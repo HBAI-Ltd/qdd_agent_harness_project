@@ -83,12 +83,20 @@ npm run qdd -- reply <会话id> "按周汇总"
 | `npm run qdd -- style [--edit\|--reset]` | 风格提示词 |
 | `npm run qdd -- check` | 守卫重新审查所有页面 |
 | `npm test` | 计算引擎不变量、数据集回放/检查点/去重、HTTP MCP、会话与跨会话、并发锁、页面鉴权（模拟 LLM） |
+| `npm run check:esp` | 检查 AI Passport 的 ESP-IDF 5.5.3 环境 |
+| `npm run build:esp` | 构建并验证 AI Passport 合并固件与匹配的调试归档，不烧录 |
+| `npm run validate:esp` | 固件完整门禁：仓库检查、宿主测试、构建与镜像验证 |
+| `npm run idf:esp -- <参数>` | 激活 IDF 后转发原生 `idf.py` 参数 |
 
 ## 目录结构
 
 ```text
 apps/cli/            harness（datasource / agent / gateway / guard / sessions）
+apps/esp/            FoloToy AI Passport ESP32-C3 固件（ESP-IDF 5.5.3，独立构建）
 packages/shared/     共享类型（含前端 API 契约）
 docs/api.md          前端对接文档
 workspace/           运行时生成（已 gitignore）：style.md、metrics.json、datasets/、store.json 示例数据、site/、sessions/、state/、.gateway-token
 ```
+
+AI Passport 环境配置与命令见 [apps/esp/README.zh_CN.md](apps/esp/README.zh_CN.md)。
+根 `npm run build` 继续只构建 TypeScript 工程；固件通过 `build:esp` 单独构建。

@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+mode="${1:---all}"
+repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+windows_host=false
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) windows_host=true ;;
+esac
+if "${windows_host}"; then
+    # ESP-IDF's Windows virtual environment provides python.exe, not python3.exe.
+    python_bin="${PYTHON:-python}"
+else
+    python_bin="${PYTHON:-python3}"
+fi
+
+usage() {
+    echo "Usage: $0 [--all|--static|--firmware]" >&2
+}
+
+run_static_checks() {
+    local actionlint_bin
+    local test_dir
+    local -a demo_compiler_flags=(-ffunction-sections -fdata-sections)
+
+    if "${windows_host}"; then
+        # MinGW's PE unwind records otherwise retain untested UI entry points.
+        # Keep the same section GC boundary used by the Linux host tests.
+        demo_compiler_flags+=(-fno-asynchronous-unwind-tables)
+    fi
+
+    "${python_bin}" tools/check_repo.py
+
+    actionlint_bin="${ACTIONLINT_BIN:-}"
+    if [[ -z "${actionlint_bin}" ]]; then
+        actionlint_bin="$(command -v actionlint || true)"
+    fi
+    if [[ -z "${actionlint_bin}" || ! -x "${actionlint_bin}" ]]; then
+        actionlint_bin="$(./tools/install-actionlint.sh)"
+    fi
+    "${actionlint_bin}" -color .github/workflows/*.yml
+
+    test_dir="$(mktemp -d /tmp/ai-passport-host-tests.XXXXXX)"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/test_ui_pixel_math.c main/ui_pixel_math.c \
+        -o "${test_dir}/test_ui_pixel_math"
+    "${test_dir}/test_ui_pixel_math"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/test_demo_navigation.c main/demo_navigation.c \
+        -o "${test_dir}/test_demo_navigation"
+    "${test_dir}/test_demo_navigation"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/test_key_guard.c -o "${test_dir}/test_key_guard"
+    "${test_dir}/test_key_guard"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Icomponents/bsp/src \
+        tests/test_bsp_display_rounding.c components/bsp/src/bsp_display_rounding.c \
+        -o "${test_dir}/test_bsp_display_rounding"
+    "${test_dir}/test_bsp_display_rounding"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Icomponents/bsp/src \
+        tests/test_bsp_es8311_sleep_check.c components/bsp/src/bsp_es8311_sleep_check.c \
+        -o "${test_dir}/test_bsp_es8311_sleep_check"
+    "${test_dir}/test_bsp_es8311_sleep_check"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror \
+        -Itests/bsp_stubs -Icomponents/bsp/include \
+        tests/test_bsp_button.c -o "${test_dir}/test_bsp_button"
+    "${test_dir}/test_bsp_button"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror \
+        -Itests/bsp_stubs -Icomponents/bsp/include \
+        tests/test_bsp_lvgl_init.c components/bsp/src/bsp_display_rounding.c \
+        -o "${test_dir}/test_bsp_lvgl_init"
+    "${test_dir}/test_bsp_lvgl_init"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror \
+        -Itests/audio_stubs -Icomponents/bsp/include -Icomponents/bsp/src \
+        tests/test_bsp_audio_recovery.c components/bsp/src/bsp_es8311_sleep_check.c \
+        -o "${test_dir}/test_bsp_audio_recovery"
+    "${test_dir}/test_bsp_audio_recovery"
+    for demo in audio low_power ble wifi; do
+        "${CC:-cc}" -std=c11 -Wall -Wextra -Werror \
+            "${demo_compiler_flags[@]}" -Itests/demo_stubs -Imain \
+            "tests/test_demo_${demo}_runtime.c" -Wl,--gc-sections \
+            -o "${test_dir}/test_demo_${demo}_runtime"
+        "${test_dir}/test_demo_${demo}_runtime"
+    done
+    PYTHONDONTWRITEBYTECODE=1 "${python_bin}" tests/test_deep_sleep_contract.py
+    PYTHONDONTWRITEBYTECODE=1 "${python_bin}" tests/test_key_wake_contract.py
+    PYTHONDONTWRITEBYTECODE=1 "${python_bin}" tests/test_check_repo.py
+    PYTHONDONTWRITEBYTECODE=1 "${python_bin}" tests/test_verify_firmware.py
+    PYTHONDONTWRITEBYTECODE=1 "${python_bin}" tests/test_archive_firmware.py
+    PYTHONDONTWRITEBYTECODE=1 "${python_bin}" tests/test_install_passport_skills.py
+    rm -rf "${test_dir}"
+    echo "Host tests: PASS"
+}
+
+run_firmware_checks() (
+    local validation_build_dir
+    local idf_build_dir
+    local idf_repo_root
+    local -a idf_command
+
+    if "${windows_host}" && [[ -n "${IDF_PATH:-}" ]]; then
+        # PowerShell already activated native Windows tools; Bash is only the gate runner.
+        # idf.py otherwise sees MSYSTEM and exits without executing the requested action.
+        # Clear its inherited Windows value before unsetting it in the MSYS child.
+        idf_command=(env MSYSTEM= env -u MSYSTEM "${python_bin}" "$(cygpath -m "${IDF_PATH}")/tools/idf.py")
+    elif command -v idf.py >/dev/null 2>&1; then
+        idf_command=(idf.py)
+    else
+        echo "ERROR: idf.py is not available; activate ESP-IDF 5.5.3 first." >&2
+        return 1
+    fi
+
+    validation_build_dir="$(mktemp -d /tmp/ai-passport-firmware.XXXXXX)"
+    trap 'case "${validation_build_dir}" in /tmp/ai-passport-firmware.*) rm -rf -- "${validation_build_dir}" ;; esac' EXIT
+    idf_build_dir="${validation_build_dir}"
+    idf_repo_root="${repo_root}"
+    if "${windows_host}"; then
+        # Native CMake reads this environment value without MSYS argument conversion.
+        idf_build_dir="$(cygpath -m "${validation_build_dir}")"
+        idf_repo_root="$(cygpath -m "${repo_root}")"
+    fi
+
+    SDKCONFIG_DEFAULTS="${idf_repo_root}/sdkconfig.defaults" \
+        "${idf_command[@]}" -B "${idf_build_dir}" \
+        -D "SDKCONFIG=${idf_build_dir}/sdkconfig" build
+    "${idf_command[@]}" -B "${idf_build_dir}" merge-bin \
+        -o "${idf_build_dir}/FoloToy-AI-Passport-full.bin"
+    "${python_bin}" tools/verify_firmware.py "${validation_build_dir}"
+    PYTHONDONTWRITEBYTECODE=1 "${python_bin}" tools/archive_firmware.py create \
+        "${validation_build_dir}" --archive-root "${repo_root}/build/firmware"
+    mkdir -p "${repo_root}/build"
+    install -m 0644 \
+        "${validation_build_dir}/FoloToy-AI-Passport-full.bin" \
+        "${repo_root}/build/FoloToy-AI-Passport-full.bin"
+    echo "Firmware build: PASS"
+)
+
+cd "${repo_root}"
+case "${mode}" in
+    --all)
+        run_static_checks
+        run_firmware_checks
+        ;;
+    --static)
+        run_static_checks
+        ;;
+    --firmware)
+        run_firmware_checks
+        ;;
+    *)
+        usage
+        exit 2
+        ;;
+esac

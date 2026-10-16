@@ -89,10 +89,10 @@ body,
   height: 10px;
 }
 *::-webkit-scrollbar-thumb {
-  background-color: #d5d5d5;
+  background-color: var(--qdd-border);
   border-radius: 4px;
   &:hover {
-    background-color: #bbb;
+    background-color: var(--qdd-muted);
   }
 }
 *::-webkit-scrollbar-track {
@@ -113,6 +113,99 @@ body,
   opacity: 0;
   transform: translateY(-8px);
 }
-.t-loading--full {
-  z-index: 2000 !important;
+.gateway-settings > .el-input,
+.gateway-settings > .el-textarea {
+  width: 100%;
+  font: 12px/1.8 var(--qdd-font);
+}
+
+.gateway-settings > .el-input {
+  display: flex;
+}
+
+.gateway-settings .el-input__wrapper {
+  min-height: 42px;
+  padding: 0 12px;
+  border-radius: calc(var(--qdd-radius) * .6);
+  background: var(--qdd-bg);
+  box-shadow: 0 0 0 1px var(--qdd-border) inset;
+}
+
+.gateway-settings .el-input__wrapper:hover {
+  box-shadow: 0 0 0 1px var(--qdd-muted) inset;
+}
+
+.gateway-settings .el-input__wrapper.is-focus {
+  box-shadow: 0 0 0 1px var(--qdd-primary) inset;
+}
+
+.gateway-settings .el-input__inner {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--qdd-text);
+  font: inherit;
+}
+
+.gateway-settings .el-textarea__inner {
+  min-height: 120px;
+  max-height: 400px;
+  padding: 10px 12px;
+  border-radius: calc(var(--qdd-radius) * .6);
+  background: var(--qdd-bg);
+  color: var(--qdd-text);
+  font: inherit;
+  resize: vertical;
+  box-shadow: 0 0 0 1px var(--qdd-border) inset;
+}
+
+.gateway-settings .el-textarea__inner:hover {
+  box-shadow: 0 0 0 1px var(--qdd-muted) inset;
+}
+
+.gateway-settings .el-textarea__inner:focus {
+  box-shadow: 0 0 0 1px var(--qdd-primary) inset;
+}
+
+.gateway-settings .el-input.is-disabled .el-input__wrapper,
+.gateway-settings .el-textarea.is-disabled .el-textarea__inner {
+  background: var(--qdd-bg);
+  box-shadow: 0 0 0 1px var(--qdd-border) inset;
+}
+
+.gateway-settings .el-button {
+  min-height: 34px;
+  padding: 8px 15px;
+  border: 1px solid var(--qdd-border);
+  border-radius: calc(var(--qdd-radius) * .6);
+  background: var(--qdd-surface);
+  color: var(--qdd-text);
+  font: 12px/1.4 var(--qdd-font);
+}
+
+.gateway-settings .el-button:hover {
+  border-color: var(--qdd-muted);
+  background: var(--qdd-hover);
+}
+
+.gateway-settings .el-button--primary {
+  border-color: var(--qdd-primary);
+  background: var(--qdd-primary);
+  color: var(--qdd-on-primary) !important;
+}
+
+.gateway-settings .el-button--primary:hover {
+  border-color: var(--qdd-primary-hover);
+  background: var(--qdd-primary-hover);
+}
+
+.gateway-settings .el-button.is-disabled,
+.gateway-settings .el-button.is-disabled:hover {
+  border-color: var(--qdd-border);
+  background: var(--qdd-bg);
+  color: var(--qdd-muted) !important;
+}
+
+.gateway-settings .el-button + .el-button {
+  margin-left: 0;
 }

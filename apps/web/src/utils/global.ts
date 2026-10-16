@@ -1,12 +1,12 @@
-import { MessagePlugin } from "tdesign-vue-next";
+import { ElMessage } from "element-plus";
 import axios from "./axios";
 
 declare global {
   interface Window {
-    $message: typeof MessagePlugin;
+    $message: typeof ElMessage;
     $axios: typeof axios;
   }
 }
 
-window.$message = MessagePlugin;
+window.$message = ElMessage;
 window.$axios = axios;

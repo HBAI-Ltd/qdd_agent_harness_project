@@ -12,11 +12,13 @@ export {}
 declare module 'vue' {
   export interface GlobalComponents {
     AgentIcon: typeof import('./../components/AgentIcon.vue')['default']
+    ElButton: typeof import('element-plus/es')['ElButton']
+    ElInput: typeof import('element-plus/es')['ElInput']
+    ElSwitch: typeof import('element-plus/es')['ElSwitch']
     RouterLink: typeof import('vue-router')['RouterLink']
     RouterView: typeof import('vue-router')['RouterView']
+    SessionActions: typeof import('./../components/SessionActions.vue')['default']
+    StoreOverview: typeof import('./../components/StoreOverview.vue')['default']
     TaskPreview: typeof import('./../components/TaskPreview.vue')['default']
-    TButton: typeof import('tdesign-vue-next')['Button']
-    TCard: typeof import('tdesign-vue-next')['Card']
-    TConfigProvider: typeof import('tdesign-vue-next')['ConfigProvider']
   }
 }

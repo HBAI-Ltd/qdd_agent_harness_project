@@ -162,6 +162,44 @@ qdd.format(0.234, "grossMargin"); // "23.4%"
 await qdd.state.set({ priceUp: 0.05 });
 ```
 
+## 任务模板与主界面通信
+
+网关注入的 SDK 提供 `qdd.host`，用于 iframe 模板与主界面双向交换 JSON 事件。主界面使用 `TaskPreview` 的 `@message="handleTaskMessage"` 统一接收；组件校验窗口来源、origin、页面 slug、协议版本和每次加载的 bridgeId。切换或重新加载页面后，旧消息与旧回调失效。
+
+模板发送与监听：
+
+```js
+const unsubscribe = qdd.host.on("host:context", (context) => {
+  // 初次连接及主题变化都会收到 { theme: "light" | "dark", locale: "zh-CN" }。
+  document.documentElement.dataset.theme = context.theme;
+});
+
+await qdd.host.ready;
+qdd.host.emit("selection:changed", { productId: "SKU-001" });
+qdd.host.on("host:result", (payload) => console.log(payload));
+
+// 只填写主界面的对话输入框，用户确认后才发送给 Agent。
+qdd.host.emit("conversation:prefill", { text: "分析这个商品最近一周的销售变化" });
+
+// 不再需要时调用 unsubscribe()。
+```
+
+主界面中的 `handleTaskMessage(message)` 是统一扩展入口；业务模块也可监听 `window` 上的 `qdd:task-message`：
+
+```js
+window.addEventListener("qdd:task-message", (event) => {
+  const message = event.detail; // { slug, type, payload, reply }
+  if (message.type === "selection:changed") {
+    console.log(message.slug, message.payload.productId);
+    message.reply("host:result", { received: true });
+  }
+});
+```
+
+发送给模板的事件名使用 `host:` 前缀，`TaskPreview` 也通过组件 ref 暴露 `postMessage(type, payload)`。模板事件名可自定义；`host:init`、`page:ready`、`page:error` 是保留的连接/错误事件。每次成功接收后，主界面回传 `host:received`，表示已收到事件，不代表业务操作已完成。`emit()`/`reply()` 返回布尔值，未完成握手、页面已切换或数据不合法时返回 `false`。
+
+载荷须为 JSON 值，最多 64 KiB、最多 64 层，不包含函数、循环引用或凭据。模板不会收到管理 token。浏览器脚本错误会通过 `page:error` 回报；页面未在加载后建立通信时，主界面显示鉴权/SDK/嵌入权限检查提示。独立打开的页面没有主界面，`qdd.host.ready` 不会完成，其余 `qdd` 数据接口照常使用。
+
 ## MCP 端点
 
 `POST /mcp`（Streamable HTTP，JSON 响应，需网关 token）对外暴露门店只读工具，可供其它 agent 接入：

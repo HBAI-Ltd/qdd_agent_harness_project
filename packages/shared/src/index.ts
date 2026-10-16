@@ -1,4 +1,5 @@
 export * from "./compute.js";
+export * from "./page-bridge.js";
 
 export const SERVICE_NAME = "qdd-agent-harness";
 export const HARNESS_VERSION = "0.3.0";

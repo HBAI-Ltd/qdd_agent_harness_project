@@ -1,292 +1,188 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 import {
-  createTask,
-  getTask,
-  listConversations,
-  listTasks,
-  parseConversation,
-  parseTask,
-  removeTask,
-  updateTask,
+  GatewayError,
+  answerQuestions,
+  cancelSession,
+  createWish,
+  gatewayEvents,
+  getSession,
+  getStyle,
+  listPages,
+  listSessions,
+  resetStyle,
+  resolveApproval,
+  saveStyle,
+  sendMessage,
+  sessionEvents,
 } from "../src/api/workspace.ts";
 
 const originalFetch = globalThis.fetch;
-const timestamp = 1_760_000_000_000;
+const base = "http://127.0.0.1:5173";
+const token = "gateway-test-token";
+const session = {
+  id: "session-1",
+  title: "销售看板",
+  summary: "",
+  slug: null,
+  status: "running",
+  createdAt: "2026-10-17T00:00:00.000Z",
+  updatedAt: "2026-10-17T00:00:00.000Z",
+};
 
-afterEach(() => {
-  globalThis.fetch = originalFetch;
-});
+afterEach(() => { globalThis.fetch = originalFetch; });
 
-function backendTask(overrides: Record<string, unknown> = {}) {
-  return { id: "task-1", title: "销售看板", updatedAt: timestamp, ...overrides };
-}
-
-function signal() {
-  return new AbortController().signal;
-}
-
-function stubJsonResponse(payload: unknown, status = 200) {
-  const calls: { input: string | URL | Request; init?: RequestInit }[] = [];
+function stubResponse(payload: unknown, status = 200, contentType = "application/json") {
+  const calls: { url: string; init: RequestInit }[] = [];
   globalThis.fetch = async (input, init) => {
-    calls.push({ input, init });
-    return new Response(JSON.stringify(payload), {
+    calls.push({ url: String(input), init: init ?? {} });
+    return new Response(contentType === "application/json" ? JSON.stringify(payload) : String(payload), {
       status,
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": contentType },
     });
   };
   return calls;
 }
 
-test("task content preserves backend HTML, JavaScript, CSS, and source associations", () => {
-  const content = {
-    html: '<main id="report"><button>刷新</button></main>',
-    script: 'document.querySelector("button").onclick = () => { window.count = 1; };',
-    css: "#report { color: black; background: white; }",
-  };
-  const task = parseTask(backendTask({
-    createdAt: timestamp - 1000,
-    description: "后端生成的任务",
-    status: "in_progress",
-    conversationId: "chat-1",
-    sourceMessageId: "message-1",
-    sourceConversationTitle: "销售分析",
-    content,
-  }));
-
-  assert.deepEqual(task, {
-    id: "task-1",
-    title: "销售看板",
-    createdAt: timestamp - 1000,
-    updatedAt: timestamp,
-    description: "后端生成的任务",
-    status: "in_progress",
-    conversationId: "chat-1",
-    sourceMessageId: "message-1",
-    sourceConversationTitle: "销售分析",
-    content,
-  });
-});
-
-test("task list records can omit content and optional metadata", () => {
-  assert.deepEqual(parseTask(backendTask()), {
-    id: "task-1",
-    title: "销售看板",
-    createdAt: timestamp,
-    updatedAt: timestamp,
-    description: "",
-    status: "todo",
-    conversationId: null,
-    sourceMessageId: null,
-    sourceConversationTitle: "",
-    content: null,
-  });
-});
-
-test("nullable task metadata and content use their documented defaults", () => {
-  const task = parseTask(backendTask({
-    description: null,
-    conversationId: null,
-    sourceMessageId: null,
-    sourceConversationTitle: null,
-    content: null,
-  }));
-  assert.equal(task.description, "");
-  assert.equal(task.sourceConversationTitle, "");
-  assert.equal(task.conversationId, null);
-  assert.equal(task.sourceMessageId, null);
-  assert.equal(task.content, null);
-});
-
-test("HTML-only task content defaults missing JavaScript and CSS to empty strings", () => {
-  assert.deepEqual(parseTask(backendTask({ content: { html: "<p>Ready</p>" } })).content, {
-    html: "<p>Ready</p>",
-    script: "",
-    css: "",
-  });
-  assert.deepEqual(parseTask(backendTask({ content: { html: "", script: "", css: "" } })).content, {
-    html: "",
-    script: "",
-    css: "",
-  });
-});
-
-test("task timestamps accept milliseconds and ISO dates and normalize both to numbers", () => {
-  const date = "2026-10-17T10:30:00+08:00";
-  const task = parseTask(backendTask({ createdAt: 0, updatedAt: date }));
-  assert.equal(task.createdAt, 0);
-  assert.equal(task.updatedAt, Date.parse(date));
-  const isoTask = parseTask(backendTask({ createdAt: date, updatedAt: timestamp }));
-  assert.equal(isoTask.createdAt, Date.parse(date));
-  assert.equal(isoTask.updatedAt, timestamp);
-});
-
-test("tasks reject invalid identities and base payload shapes", () => {
-  const invalid = [
-    null,
-    [],
-    "task-1",
-    backendTask({ id: " " }),
-    backendTask({ id: 1 }),
-    backendTask({ title: undefined }),
-    backendTask({ title: 1 }),
-  ];
-  for (const value of invalid) assert.throws(() => parseTask(value), /任务数据格式不正确/);
-});
-
-test("tasks reject invalid status, metadata, and source identifiers", () => {
-  const invalid = [
-    { status: "running" },
-    { description: 1 },
-    { sourceConversationTitle: [] },
-    { conversationId: " " },
-    { sourceMessageId: 1 },
-  ];
-  for (const overrides of invalid) assert.throws(() => parseTask(backendTask(overrides)));
-});
-
-test("task content requires string HTML and rejects non-string JavaScript or CSS", () => {
-  const invalid = [
-    "<p>Invalid wrapper</p>",
-    [],
-    {},
-    { html: 1 },
-    { html: null },
-    { html: "<p>Ready</p>", script: false },
-    { html: "<p>Ready</p>", script: null },
-    { html: "<p>Ready</p>", css: [] },
-    { html: "<p>Ready</p>", css: null },
-  ];
-  for (const content of invalid) {
-    assert.throws(() => parseTask(backendTask({ content })), /任务内容格式不正确/);
-  }
-});
-
-test("tasks reject missing, invalid, non-finite, and out-of-range timestamps", () => {
-  const invalid = [undefined, null, "not-a-date", {}, Number.NaN, Infinity, -Infinity, 8.64e15 + 1];
-  for (const updatedAt of invalid) {
-    assert.throws(() => parseTask(backendTask({ updatedAt })), /updatedAt 格式不正确/);
-  }
-  for (const createdAt of invalid.filter((value) => value !== undefined)) {
-    assert.throws(() => parseTask(backendTask({ createdAt })), /createdAt 格式不正确/);
-  }
-});
-
-test("conversations retain their messages separately from task content", () => {
-  const conversation = parseConversation({
-    id: "chat-1",
-    title: "销售分析",
-    updatedAt: timestamp,
-    messages: [{ id: "message-1", role: "assistant", content: "已生成看板", createdAt: timestamp, assistant: "store" }],
-  });
-  assert.deepEqual(conversation.messages, [
-    { id: "message-1", role: "assistant", content: "已生成看板", createdAt: timestamp, assistant: "store" },
+test("reads real session/page endpoints with Bearer auth and caller cancellation", async () => {
+  const requestSignal = new AbortController().signal;
+  const calls = stubResponse([session]);
+  assert.deepEqual(await listSessions(base + "/", "  " + token + "  ", requestSignal), [session]);
+  await getSession(base, token, "session/中文", requestSignal);
+  await listPages(base, token, requestSignal);
+  assert.deepEqual(calls.map((call) => call.url), [
+    base + "/api/sessions",
+    base + "/api/sessions/session%2F%E4%B8%AD%E6%96%87",
+    base + "/api/pages",
   ]);
-  assert.deepEqual(parseConversation({ id: "chat-2", title: "新对话", updatedAt: timestamp }).messages, []);
+  for (const call of calls) {
+    assert.equal(new Headers(call.init.headers).get("Authorization"), "Bearer " + token);
+    assert.equal(call.init.signal, requestSignal);
+    assert.equal(call.url.includes(token), false);
+  }
 });
 
-test("conversations reject duplicate or malformed messages", () => {
-  const message = { id: "message-1", role: "user", content: "生成看板", createdAt: timestamp };
-  const conversation = { id: "chat-1", title: "销售分析", updatedAt: timestamp };
-  assert.throws(() => parseConversation({ ...conversation, messages: [message, message] }), /重复 id/);
-  assert.throws(() => parseConversation({ ...conversation, messages: {} }), /messages 应为数组/);
-  assert.throws(() => parseConversation({ ...conversation, messages: [{ ...message, role: "system" }] }), /对话消息格式不正确/);
+test("wish creation sends the documented wish and optional page slug", async () => {
+  const calls = stubResponse(session, 201);
+  assert.deepEqual(await createWish(base, token, { wish: "最近 30 天各品类毛利" }), session);
+  await createWish(base, token, { wish: "改为按周", slug: "sales-report" });
+  assert.deepEqual(calls.map((call) => JSON.parse(String(call.init.body))), [
+    { wish: "最近 30 天各品类毛利" },
+    { wish: "改为按周", slug: "sales-report" },
+  ]);
+  for (const call of calls) {
+    assert.equal(call.url, base + "/api/wishes");
+    assert.equal(call.init.method, "POST");
+    assert.equal(new Headers(call.init.headers).get("Content-Type"), "application/json");
+  }
 });
 
-test("task list fetches the backend array with caller cancellation and same-origin credentials", async () => {
-  const calls = stubJsonResponse([backendTask(), backendTask({ id: "task-2", title: "库存看板" })]);
-  const requestSignal = signal();
-  const tasks = await listTasks(requestSignal);
-  assert.deepEqual(tasks.map((task) => task.id), ["task-1", "task-2"]);
-  assert.equal(tasks[0]?.content, null);
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0]?.input, "/api/tasks");
-  assert.equal(calls[0]?.init?.signal, requestSignal);
-  assert.equal(calls[0]?.init?.credentials, "same-origin");
-  assert.equal(new Headers(calls[0]?.init?.headers).get("Accept"), "application/json");
+test("follow-up messages and cancellation use the session routes", async () => {
+  const calls = stubResponse(session, 202);
+  await sendMessage(base, token, "session/1", "把图表改成按周");
+  await cancelSession(base, token, "session/1");
+  assert.equal(calls[0]?.url, base + "/api/sessions/session%2F1/messages");
+  assert.deepEqual(JSON.parse(String(calls[0]?.init.body)), { text: "把图表改成按周" });
+  assert.equal(calls[1]?.url, base + "/api/sessions/session%2F1/cancel");
+  assert.equal(calls[1]?.init.body, undefined);
+  assert.ok(calls.every((call) => call.init.method === "POST"));
 });
 
-test("task list rejects response wrappers and duplicate task ids", async () => {
-  stubJsonResponse({ data: [backendTask()] });
-  await assert.rejects(listTasks(signal()), /任务列表格式不正确/);
-  stubJsonResponse([backendTask(), backendTask({ title: "不同标题仍然重复" })]);
-  await assert.rejects(listTasks(signal()), /任务列表包含重复 id/);
+test("question answers and an explicit rejection preserve their exact request bodies", async () => {
+  const calls = stubResponse({ ok: true });
+  const answers = { range: ["最近 30 天（推荐）"], categories: ["食品", "饮料"] };
+  await answerQuestions(base, token, "session/1", "question/2", answers);
+  await resolveApproval(base, token, "session/1", "approval/3", false);
+  assert.equal(calls[0]?.url, base + "/api/sessions/session%2F1/questions/question%2F2");
+  assert.deepEqual(JSON.parse(String(calls[0]?.init.body)), { answers });
+  assert.equal(calls[1]?.url, base + "/api/sessions/session%2F1/approvals/approval%2F3");
+  assert.deepEqual(JSON.parse(String(calls[1]?.init.body)), { approved: false });
+  assert.ok(calls.every((call) => call.init.method === "POST"));
 });
 
-test("conversation list uses its own endpoint and rejects duplicate conversation ids", async () => {
-  const conversation = { id: "chat-1", title: "销售分析", updatedAt: timestamp };
-  const calls = stubJsonResponse([conversation]);
-  const conversations = await listConversations(signal());
-  assert.equal(calls[0]?.input, "/api/conversations");
-  assert.deepEqual(conversations[0]?.messages, []);
-  stubJsonResponse([conversation, conversation]);
-  await assert.rejects(listConversations(signal()), /对话列表包含重复 id/);
+test("style is read, saved as plain text, and reset through the documented endpoint", async () => {
+  const style = "黑白配色\n图表清晰，文字简洁。";
+  const calls = stubResponse(style, 200, "text/plain; charset=utf-8");
+  assert.equal(await getStyle(base, token), style);
+  assert.equal(await saveStyle(base, token, style), style);
+  assert.equal(await resetStyle(base, token), style);
+  assert.ok(calls.every((call) => call.url === base + "/api/style"));
+  assert.equal(calls[1]?.init.method, "PUT");
+  assert.equal(calls[1]?.init.body, style);
+  assert.match(new Headers(calls[1]?.init.headers).get("Content-Type") ?? "", /^text\/plain/);
+  assert.equal(calls[2]?.init.method, "DELETE");
 });
 
-test("task detail URL-encodes backend ids containing path, query, and Unicode characters", async () => {
-  const id = "任务 /?#%&";
-  const calls = stubJsonResponse(backendTask({ id, content: { html: "<main>Rendered</main>" } }));
-  const task = await getTask(id, signal());
-  assert.equal(calls[0]?.input, `/api/tasks/${encodeURIComponent(id)}`);
-  assert.equal(task.id, id);
-  assert.equal(task.content?.html, "<main>Rendered</main>");
-});
-
-test("creating a task sends conversation and message associations as JSON", async () => {
-  const input = { conversationId: "chat-1", sourceMessageId: "message-1", title: "销售看板", description: "生成任务" };
-  const calls = stubJsonResponse(backendTask(input));
-  const task = await createTask(input, signal());
-  assert.equal(task.conversationId, input.conversationId);
-  assert.equal(calls[0]?.input, "/api/tasks");
-  assert.equal(calls[0]?.init?.method, "POST");
-  assert.deepEqual(JSON.parse(String(calls[0]?.init?.body)), input);
-  assert.equal(new Headers(calls[0]?.init?.headers).get("Content-Type"), "application/json");
-});
-
-test("task updates use encoded ids and send only requested fields", async () => {
-  const id = "task/1";
-  const calls = stubJsonResponse(backendTask({ id, status: "done" }));
-  const task = await updateTask(id, { status: "done" }, signal());
-  assert.equal(task.status, "done");
-  assert.equal(calls[0]?.input, "/api/tasks/task%2F1");
-  assert.equal(calls[0]?.init?.method, "PATCH");
-  assert.deepEqual(JSON.parse(String(calls[0]?.init?.body)), { status: "done" });
-});
-
-test("task detail and updates reject a backend response for another task", async () => {
-  stubJsonResponse(backendTask({ id: "unexpected-task" }));
-  await assert.rejects(getTask("task-1", signal()), /id 与请求不匹配/);
-  await assert.rejects(updateTask("task-1", { title: "新标题" }, signal()), /id 与请求不匹配/);
-});
-
-test("task deletion accepts HTTP 204 without trying to parse JSON", async () => {
-  let calledUrl: string | URL | Request | undefined;
-  let calledMethod: string | undefined;
-  globalThis.fetch = async (input, init) => {
-    calledUrl = input;
-    calledMethod = init?.method;
-    return new Response(null, { status: 204 });
-  };
-  await removeTask("task/1", signal());
-  assert.equal(calledUrl, "/api/tasks/task%2F1");
-  assert.equal(calledMethod, "DELETE");
-});
-
-for (const status of [400, 401, 404, 500, 501]) {
-  test(`HTTP ${status} fails before accepting backend task content`, async () => {
-    stubJsonResponse(backendTask(), status);
-    const expected = status === 404 || status === 501 ? /接口尚未接入或资源不存在/ : new RegExp(`HTTP ${status}`);
-    await assert.rejects(getTask("task-1", signal()), expected);
+test("gateway errors retain HTTP status and the backend error message", async () => {
+  stubResponse({ error: "会话正在运行，请等待完成" }, 409);
+  await assert.rejects(sendMessage(base, token, session.id, "继续"), (error: unknown) => {
+    assert.ok(error instanceof GatewayError);
+    assert.equal(error.status, 409);
+    assert.equal(error.message, "会话正在运行，请等待完成");
+    return true;
   });
-}
-
-test("a successful non-JSON response reports the backend format error", async () => {
-  globalThis.fetch = async () => new Response("<!doctype html><title>Wrong proxy target</title>", { status: 200 });
-  await assert.rejects(listTasks(signal()), /后端响应不是有效 JSON/);
+  stubResponse("Not available", 502, "text/plain");
+  await assert.rejects(listSessions(base, token), (error: unknown) => {
+    assert.ok(error instanceof GatewayError);
+    assert.equal(error.status, 502);
+    assert.match(error.message, /HTTP 502/);
+    return true;
+  });
 });
 
-test("transport failures propagate without returning fabricated tasks", async () => {
-  const error = new TypeError("Backend unavailable");
-  globalThis.fetch = async () => { throw error; };
-  await assert.rejects(listTasks(signal()), (actual) => actual === error);
+test("session SSE handles fragmented UTF-8, CRLF, multiline data and the since cursor", async () => {
+  const bytes = new TextEncoder().encode(
+    ': keepalive\r\nid: ignored\r\ndata: {"type":"say",\r\ndata: "text":"中文😀","at":"2026-10-17T00:00:00.000Z"}\r\n\r\n'
+    + 'data: {"type":"status","status":"idle","at":"2026-10-17T00:00:01.000Z"}\r\n\r\n',
+  );
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const byte of bytes) controller.enqueue(Uint8Array.of(byte));
+      controller.close();
+    },
+  });
+  let capturedUrl = "";
+  let capturedInit: RequestInit | undefined;
+  globalThis.fetch = async (input, init) => {
+    capturedUrl = String(input);
+    capturedInit = init;
+    return new Response(body, { headers: { "Content-Type": "text/event-stream; charset=utf-8" } });
+  };
+  const events: unknown[] = [];
+  const requestSignal = new AbortController().signal;
+  let opened = 0;
+  await sessionEvents(base, token, "session/1", 7, (event) => events.push(event), requestSignal, () => { opened += 1; });
+  assert.equal(capturedUrl, base + "/api/sessions/session%2F1/events?since=7");
+  assert.equal(capturedInit?.signal, requestSignal);
+  assert.equal(new Headers(capturedInit?.headers).get("Accept"), "text/event-stream");
+  assert.equal(new Headers(capturedInit?.headers).get("Authorization"), "Bearer " + token);
+  assert.equal(opened, 1);
+  assert.deepEqual(events, [
+    { type: "say", text: "中文😀", at: "2026-10-17T00:00:00.000Z" },
+    { type: "status", status: "idle", at: "2026-10-17T00:00:01.000Z" },
+  ]);
+  assert.equal(body.locked, false);
+});
+
+test("aborting a live gateway stream cancels its reader and releases the lock", async () => {
+  const controller = new AbortController();
+  let cancelled = false;
+  const body = new ReadableStream<Uint8Array>({
+    start(stream) { stream.enqueue(new TextEncoder().encode('data: {"type":"pages_changed"}\n\n')); },
+    cancel() { cancelled = true; },
+  });
+  let capturedUrl = "";
+  globalThis.fetch = async (input) => {
+    capturedUrl = String(input);
+    return new Response(body, { headers: { "Content-Type": "text/event-stream" } });
+  };
+  const events: unknown[] = [];
+  await gatewayEvents(base, token, (event) => {
+    events.push(event);
+    controller.abort();
+  }, controller.signal);
+  assert.equal(capturedUrl, base + "/api/events");
+  assert.deepEqual(events, [{ type: "pages_changed" }]);
+  assert.equal(cancelled, true);
+  assert.equal(body.locked, false);
 });

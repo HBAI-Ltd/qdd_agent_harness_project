@@ -25,8 +25,8 @@
       <h1 class="notFoundTitle">页面走丢了</h1>
       <p class="notFoundDesc">您访问的页面不存在或已被移除，请检查地址是否正确。</p>
       <div class="notFoundActions">
-        <t-button theme="primary" @click="goHome">返回首页</t-button>
-        <t-button theme="default" variant="outline" @click="goBack">返回上一页</t-button>
+        <el-button type="primary" @click="goHome">返回首页</el-button>
+        <el-button plain @click="goBack">返回上一页</el-button>
       </div>
     </div>
   </div>
@@ -52,7 +52,9 @@ function goBack() {
 
 <style lang="scss" scoped>
 .notFound {
-  background: #344dd9;
+  background: var(--qdd-bg);
+  color: var(--qdd-text);
+  font-family: var(--qdd-font);
   position: relative;
   display: flex;
   align-items: center;
@@ -76,7 +78,7 @@ function goBack() {
     text-align: center;
 
     .notFoundCode {
-      color: #fff;
+      color: var(--qdd-primary);
 
       .face {
         display: block;
@@ -130,20 +132,24 @@ function goBack() {
       font-size: 26px;
       font-weight: 700;
       margin: 24px 0 0;
-      color: #fff;
+      color: var(--qdd-text);
     }
 
     .notFoundDesc {
       font-size: 14px;
       line-height: 1.6;
       margin: 12px 0 0;
-      color: rgba(255, 255, 255, 0.85);
+      color: var(--qdd-muted);
     }
 
     .notFoundActions {
       display: flex;
       gap: 16px;
       margin-top: 36px;
+
+      .el-button + .el-button {
+        margin-left: 0;
+      }
     }
   }
 }

@@ -1,18 +1,18 @@
 <template>
   <main class="connectionPage">
-    <t-card title="钱多多门店助手" :bordered="false">
+    <el-card shadow="never">
+      <template #header>钱多多门店助手</template>
       <p>检查门店助手服务的连接状态。</p>
       <p role="status" aria-live="polite">{{ statusMessage }}</p>
-      <p v-if="health">服务名称：{{ health.service }}</p>
-      <t-button :loading="loading" @click="checkHealth">重新检查</t-button>
-    </t-card>
+      <p v-if="health">网关状态：{{ health.status }}</p>
+      <el-button type="primary" :loading="loading" @click="checkHealth">重新检查</el-button>
+    </el-card>
   </main>
 </template>
 
 <script setup lang="ts">
 import { onMounted, ref } from "vue";
-import type { HealthResponse } from "@qdd/shared";
-import { getHealth } from "@/api/health";
+import { getHealth, type HealthResponse } from "@/api/health";
 
 const health = ref<HealthResponse | null>(null);
 const loading = ref(false);
@@ -45,12 +45,17 @@ onMounted(checkHealth);
 .connectionPage {
   min-height: 100%;
   padding: 32px;
-  background: var(--td-bg-color-page);
-  color: var(--td-text-color-primary);
+  background: var(--qdd-bg);
+  color: var(--qdd-text);
+  font-family: var(--qdd-font);
 
-  .t-card {
+  .el-card {
     max-width: 720px;
     margin: 0 auto;
+    border-color: var(--qdd-border);
+    border-radius: var(--qdd-radius);
+    background: var(--qdd-surface);
+    color: var(--qdd-text);
   }
 }
 </style>

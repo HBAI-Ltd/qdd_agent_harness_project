@@ -297,7 +297,7 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
     if (ext !== ".html") return send(res, 200, MIME[ext] ?? "application/octet-stream", await readFile(file));
 
     const boot =
-      `<script>window.QDD_PAGE=${toScriptJson({ slug, token: expected, metrics: await sources.metrics() })};</script>` +
+      `<script>window.QDD_PAGE=${toScriptJson({ slug, token: expected, metrics: await sources.metrics(), hostOrigins: pageHostOrigins(req, config.gateway.corsOrigins) })};</script>` +
       `<script src="/sdk/compute.js"></script><script src="/sdk/qdd.js"></script>`;
     const html = await readFile(file, "utf8");
     const head = /<head[^>]*>/i.exec(html);
@@ -363,6 +363,25 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
 const GAP_LABEL: Record<string, string> = { missing_data: "缺数据", estimate: "估测", unsupported: "暂不支持", permission: "需授权" };
 
 const escapeHtml = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+
+/** 模板仅允许配置的前端源和实际网关源建立主界面通信。 */
+function pageHostOrigins(req: IncomingMessage, configured: string[]): string[] {
+  const origins = new Set<string>();
+  for (const value of configured) {
+    try {
+      const url = new URL(value);
+      if (/^https?:$/.test(url.protocol) && url.origin === value) origins.add(url.origin);
+    } catch { /* 配置中的通配符、opaque 源与非 URL 不参与通信。 */ }
+  }
+  const requestHost = req.headers.host;
+  if (requestHost && !/[\s/@\\?#]/.test(requestHost)) {
+    try {
+      const url = new URL(`http://${requestHost}`);
+      if (url.host && !url.username && !url.password) origins.add(url.origin);
+    } catch { /* 无效 Host 不扩大通信范围。 */ }
+  }
+  return [...origins];
+}
 
 /** harness 注入的能力缺口/口径复核横幅：页面代码无法移除其内容声明。 */
 function gapBanner(page: { gaps: { kind: string; item: string; reason: string; suggestion?: string }[]; stale: string | null } | undefined): string {

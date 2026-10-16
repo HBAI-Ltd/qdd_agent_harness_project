@@ -1,454 +1,424 @@
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import type { ClarifyAnswers, PageView, SessionDetail, SessionEvent, SessionMeta } from "@qdd/shared";
 import * as api from "@/api/workspace";
-import type { AssistantKind, Conversation, TaskStatus, WorkspaceTask } from "@/api/workspace";
 
-export type { ChatMessage, Conversation, WorkspaceTask } from "@/api/workspace";
+export type { PageView, SessionDetail, SessionEvent, SessionMeta } from "@qdd/shared";
 
 interface Preferences {
   theme: "light" | "dark";
   enterToSend: boolean;
-  assistant: AssistantKind;
 }
 
-const STORAGE_KEY = "harness-preferences-v1";
-const DEFAULT_PREFERENCES: Preferences = { theme: "light", enterToSend: true, assistant: "general" };
+const PREFERENCES_KEY = "harness-preferences-v1";
+const GATEWAY_KEY = "harness-gateway-url";
+const TOKEN_KEY = "harness-gateway-token";
 
 function errorMessage(error: unknown): string {
-  if (error instanceof TypeError) return "无法连接后端服务，请检查服务与代理地址后重试。";
+  if (error instanceof TypeError) return "无法连接网关，请检查地址、服务状态与 gateway.corsOrigins 中的前端来源。";
   return error instanceof Error ? error.message : "请求失败，请稍后重试。";
 }
 
+function retryDelay(signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, 2000);
+    signal.addEventListener("abort", done, { once: true });
+    if (signal.aborted) done();
+  });
+}
+
 export function useWorkspace() {
-  const conversations = ref<Conversation[]>([]);
-  const activeConversationId = ref<string | null>(null);
-  const activeConversation = ref<Conversation>();
-  const tasks = ref<WorkspaceTask[]>([]);
-  const activeTaskId = ref<string | null>(null);
-  const activeTask = ref<WorkspaceTask>();
-  const preferences = ref<Preferences>({ ...DEFAULT_PREFERENCES });
-  const storageError = ref("");
-  const listError = ref("");
-  const conversationListError = ref("");
-  const detailError = ref("");
-  const conversationError = ref("");
-  const actionError = ref("");
-  const loadingTasks = ref(false);
-  const loadingConversations = ref(false);
-  const loadingTask = ref(false);
-  const loadingConversation = ref(false);
-  const creatingConversation = ref(false);
-  const mutatingTask = ref(false);
-  const mutatingConversation = ref(false);
-  const stoppingReply = ref(false);
-  const pendingConversationId = ref<string | null>(null);
-  let taskListController: AbortController | undefined;
-  let conversationListController: AbortController | undefined;
-  let taskDetailController: AbortController | undefined;
-  let conversationDetailController: AbortController | undefined;
-  let sendController: AbortController | undefined;
-  let conversationSelectionRequest: Promise<void> = Promise.resolve();
-  let taskSelectionRequest: Promise<void> = Promise.resolve();
-  const actionControllers = new Set<AbortController>();
-  let installingConversation = false;
+  const sessions = ref<SessionMeta[]>([]);
+  const activeSessionId = ref<string | null>(null);
+  const activeSession = ref<SessionDetail>();
+  const pages = ref<PageView[]>([]);
+  const activePageSlug = ref<string | null>(null);
+  const activePage = computed(() => pages.value.find((page) => page.slug === activePageSlug.value));
+  const revisionPageSlug = ref<string | null>(null);
+  const preferences = ref<Preferences>({ theme: "light", enterToSend: true });
+  const token = ref("");
+  const gatewayUrl = ref(api.DEFAULT_GATEWAY_URL);
+  const loadingSessions = ref(false);
+  const loadingPages = ref(false);
+  const loadingSession = ref(false);
+  const error = ref("");
+  const connected = ref(false);
+  const pendingSend = ref(false);
+  const sending = computed(() => pendingSend.value || activeSession.value?.status === "running" || activeSession.value?.status === "waiting");
+  const cancelling = ref(false);
+  const eventActionBusy = ref(false);
   let disposed = false;
+  let connectionVersion = 0;
+  let selectionVersion = 0;
+  let workspaceController: AbortController | undefined;
+  let pageController: AbortController | undefined;
+  let detailController: AbortController | undefined;
+  let globalController: AbortController | undefined;
+  let sessionController: AbortController | undefined;
+  let sendController: AbortController | undefined;
+  const actionControllers = new Set<AbortController>();
+  const reconnectingStreams = new Set<AbortController>();
 
   try {
-    const saved: unknown = JSON.parse(localStorage.getItem(STORAGE_KEY) || "null");
+    const saved: unknown = JSON.parse(localStorage.getItem(PREFERENCES_KEY) || "null");
     if (saved && typeof saved === "object") {
       const value = saved as Record<string, unknown>;
       preferences.value = {
         theme: value.theme === "dark" ? "dark" : "light",
         enterToSend: typeof value.enterToSend === "boolean" ? value.enterToSend : true,
-        assistant: value.assistant === "store" || value.assistant === "code" ? value.assistant : "general",
       };
     }
+    gatewayUrl.value = localStorage.getItem(GATEWAY_KEY) || api.DEFAULT_GATEWAY_URL;
   } catch {
-    storageError.value = "无法读取本地偏好，本次会话仍可正常使用。";
+    // 浏览器禁用存储时仍可在当前页面设置连接与偏好。
+  }
+  try {
+    token.value = sessionStorage.getItem(TOKEN_KEY) || "";
+  } catch {
+    // token 只在当前标签页保存，存储不可用时留在内存。
   }
 
   watch(preferences, () => {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(preferences.value));
-      storageError.value = "";
-    } catch {
-      storageError.value = "浏览器存储不可用，刷新后可能丢失本次偏好设置。";
-    }
+    try { localStorage.setItem(PREFERENCES_KEY, JSON.stringify(preferences.value)); } catch { /* 保留内存中的偏好。 */ }
   }, { deep: true });
 
-  const sortedConversations = computed(() => [...conversations.value].sort((a, b) => b.updatedAt - a.updatedAt));
-  const sortedTasks = computed(() => [...tasks.value].sort((a, b) => b.updatedAt - a.updatedAt));
-
-  function applyConversation(conversation: Conversation) {
-    const index = conversations.value.findIndex((entry) => entry.id === conversation.id);
-    if (index < 0) conversations.value.unshift(conversation);
-    else conversations.value[index] = conversation;
-    if (activeConversationId.value === conversation.id) activeConversation.value = conversation;
+  function stopConnections() {
+    connectionVersion++;
+    selectionVersion++;
+    workspaceController?.abort();
+    pageController?.abort();
+    detailController?.abort();
+    globalController?.abort();
+    sessionController?.abort();
+    sendController?.abort();
+    sendController = undefined;
+    for (const controller of actionControllers) controller.abort();
+    actionControllers.clear();
+    reconnectingStreams.clear();
+    connected.value = false;
+    loadingSessions.value = false;
+    loadingPages.value = false;
+    loadingSession.value = false;
+    pendingSend.value = false;
+    cancelling.value = false;
+    eventActionBusy.value = false;
   }
 
-  function applyTask(task: WorkspaceTask) {
-    const index = tasks.value.findIndex((entry) => entry.id === task.id);
-    if (index < 0) tasks.value.unshift(task);
-    else tasks.value[index] = task;
-    if (activeTaskId.value === task.id) activeTask.value = task;
-  }
-
-  async function fetchConversation(id: string | null) {
-    conversationDetailController?.abort();
-    activeConversation.value = undefined;
-    loadingConversation.value = Boolean(id);
-    conversationError.value = "";
-    if (!id) return;
-    const controller = new AbortController();
-    conversationDetailController = controller;
-    try {
-      const conversation = await api.getConversation(id, controller.signal);
-      if (!controller.signal.aborted && !disposed && activeConversationId.value === id) applyConversation(conversation);
-    } catch (error) {
-      if (!controller.signal.aborted && !disposed && activeConversationId.value === id) conversationError.value = errorMessage(error);
-    } finally {
-      if (conversationDetailController === controller) loadingConversation.value = false;
-    }
-  }
-
-  async function fetchTask(id: string | null) {
-    taskDetailController?.abort();
-    activeTask.value = undefined;
-    loadingTask.value = Boolean(id);
-    detailError.value = "";
-    if (!id) return;
-    const controller = new AbortController();
-    taskDetailController = controller;
-    try {
-      const task = await api.getTask(id, controller.signal);
-      if (!controller.signal.aborted && !disposed && activeTaskId.value === id) applyTask(task);
-    } catch (error) {
-      if (!controller.signal.aborted && !disposed && activeTaskId.value === id) detailError.value = errorMessage(error);
-    } finally {
-      if (taskDetailController === controller) loadingTask.value = false;
-    }
-  }
-
-  watch(activeConversationId, (id) => {
-    if (installingConversation) return;
-    conversationSelectionRequest = fetchConversation(id);
-  }, { flush: "sync" });
-  watch(activeTaskId, (id) => {
-    taskSelectionRequest = fetchTask(id);
+  watch([token, gatewayUrl], () => {
+    stopConnections();
+    sessions.value = [];
+    pages.value = [];
+    activeSessionId.value = null;
+    activeSession.value = undefined;
+    activePageSlug.value = null;
+    revisionPageSlug.value = null;
+    error.value = "";
+    try { sessionStorage.setItem(TOKEN_KEY, token.value); } catch { /* token 不写入 localStorage。 */ }
+    try { localStorage.setItem(GATEWAY_KEY, gatewayUrl.value); } catch { /* 地址仍可在当前页面使用。 */ }
   }, { flush: "sync" });
 
-  async function selectConversation(id: string): Promise<void> {
-    actionError.value = "";
-    if (activeConversationId.value === id) conversationSelectionRequest = fetchConversation(id);
-    else activeConversationId.value = id;
-    await conversationSelectionRequest;
-    await nextTick();
+  function applyMeta(meta: SessionMeta) {
+    const entry: SessionMeta = {
+      id: meta.id, title: meta.title, summary: meta.summary, slug: meta.slug,
+      status: meta.status, createdAt: meta.createdAt, updatedAt: meta.updatedAt,
+    };
+    const index = sessions.value.findIndex((session) => session.id === meta.id);
+    if (index === -1) sessions.value.push(entry);
+    else sessions.value[index] = entry;
+    sessions.value.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    if (activeSession.value?.id === meta.id) activeSession.value = { ...activeSession.value, ...entry };
   }
 
-  async function selectTask(id: string): Promise<void> {
-    actionError.value = "";
-    if (activeTaskId.value === id) taskSelectionRequest = fetchTask(id);
-    else activeTaskId.value = id;
-    await taskSelectionRequest;
-  }
-
-  async function loadConversations() {
-    conversationListController?.abort();
+  async function refreshPages() {
+    if (!connected.value || disposed) return;
+    pageController?.abort();
     const controller = new AbortController();
-    conversationListController = controller;
-    loadingConversations.value = true;
-    conversationListError.value = "";
+    pageController = controller;
+    loadingPages.value = true;
     try {
-      const result = await api.listConversations(controller.signal);
+      const result = await api.listPages(gatewayUrl.value, token.value, controller.signal);
       if (controller.signal.aborted || disposed) return;
-      conversations.value = result;
-      const selectedId = activeConversationId.value && result.some((item) => item.id === activeConversationId.value)
-        ? activeConversationId.value : sortedConversations.value[0]?.id;
-      if (selectedId) await selectConversation(selectedId);
-      else activeConversationId.value = null;
-    } catch (error) {
-      if (!controller.signal.aborted && !disposed) conversationListError.value = errorMessage(error);
+      pages.value = result;
+      if (activePageSlug.value && !result.some((page) => page.slug === activePageSlug.value)) activePageSlug.value = null;
+    } catch (cause) {
+      if (!controller.signal.aborted && !disposed) error.value = errorMessage(cause);
     } finally {
-      if (conversationListController === controller) loadingConversations.value = false;
+      if (pageController === controller) loadingPages.value = false;
     }
   }
 
-  async function loadTasks() {
-    taskListController?.abort();
-    const controller = new AbortController();
-    taskListController = controller;
-    loadingTasks.value = true;
-    listError.value = "";
-    try {
-      const result = await api.listTasks(controller.signal);
-      if (controller.signal.aborted || disposed) return;
-      tasks.value = result;
-      if (activeTaskId.value) {
-        if (result.some((task) => task.id === activeTaskId.value)) await selectTask(activeTaskId.value);
-        else activeTaskId.value = null;
+  function streamOpened(controller: AbortController) {
+    reconnectingStreams.delete(controller);
+    if (!reconnectingStreams.size && error.value.startsWith("事件连接中断，正在重连。")) error.value = "";
+  }
+
+  function streamError(cause: unknown, controller: AbortController): boolean {
+    if (cause instanceof api.GatewayError && (cause.status === 401 || cause.status === 403)) {
+      stopConnections();
+      error.value = errorMessage(cause);
+      return true;
+    }
+    reconnectingStreams.add(controller);
+    error.value = `事件连接中断，正在重连。${errorMessage(cause)}`;
+    return false;
+  }
+
+  async function followGateway(controller: AbortController) {
+    const version = connectionVersion;
+    let reconnecting = false;
+    while (!controller.signal.aborted && !disposed && version === connectionVersion) {
+      try {
+        await api.gatewayEvents(gatewayUrl.value, token.value, (event) => {
+          if (controller.signal.aborted || disposed || version !== connectionVersion) return;
+          if (event.type === "pages_changed") void refreshPages();
+          else applyMeta(event.session);
+        }, controller.signal, () => {
+          streamOpened(controller);
+          if (reconnecting) {
+            void refreshPages();
+            void refreshSessionList(controller.signal, version);
+          }
+        });
+        if (!controller.signal.aborted) throw new Error("网关关闭了事件流。");
+      } catch (cause) {
+        if (controller.signal.aborted || disposed || version !== connectionVersion) return;
+        if (streamError(cause, controller)) return;
       }
-    } catch (error) {
-      if (!controller.signal.aborted && !disposed) listError.value = errorMessage(error);
-    } finally {
-      if (taskListController === controller) loadingTasks.value = false;
+      reconnecting = true;
+      await retryDelay(controller.signal);
     }
   }
 
-  function actionController() {
-    const controller = new AbortController();
-    actionControllers.add(controller);
-    return controller;
-  }
-
-  function invalidateConversationList() {
-    conversationListController?.abort();
-    loadingConversations.value = false;
-    conversationListError.value = "";
-  }
-
-  function invalidateTaskList() {
-    taskListController?.abort();
-    loadingTasks.value = false;
-    listError.value = "";
-  }
-
-  function showConversation(conversation: Conversation) {
-    conversationDetailController?.abort();
-    loadingConversation.value = false;
-    conversationError.value = "";
-    installingConversation = true;
-    activeConversationId.value = conversation.id;
-    installingConversation = false;
-    applyConversation(conversation);
-  }
-
-  async function newConversation(): Promise<Conversation | undefined> {
-    if (creatingConversation.value || mutatingConversation.value || disposed) return;
-    creatingConversation.value = true;
-    actionError.value = "";
-    const controller = actionController();
+  async function refreshSessionList(signal: AbortSignal, version: number) {
     try {
-      const conversation = await api.createConversation(preferences.value.assistant, controller.signal);
-      if (controller.signal.aborted || disposed) return;
-      invalidateConversationList();
-      showConversation(conversation);
-      return conversation;
-    } catch (error) {
-      if (!controller.signal.aborted && !disposed) actionError.value = errorMessage(error);
+      const result = await api.listSessions(gatewayUrl.value, token.value, signal);
+      if (signal.aborted || disposed || version !== connectionVersion) return;
+      sessions.value = result;
+      const selected = result.find((session) => session.id === activeSessionId.value);
+      if (selected) applyMeta(selected);
+    } catch (cause) {
+      if (!signal.aborted && !disposed && version === connectionVersion) error.value = errorMessage(cause);
+    }
+  }
+
+  function receiveEvent(id: string, event: SessionEvent) {
+    const session = activeSession.value;
+    if (!session || session.id !== id) return;
+    session.events.push(event);
+    if (event.type === "status") session.status = event.status;
+    if (event.type === "published") {
+      session.slug = event.page.slug;
+      session.title = event.page.title;
+      void refreshPages();
+    }
+    session.updatedAt = event.at;
+    applyMeta(session);
+  }
+
+  async function followSession(id: string, controller: AbortController) {
+    const version = connectionVersion;
+    while (!controller.signal.aborted && !disposed && version === connectionVersion && activeSessionId.value === id) {
+      try {
+        // 以已加载的事件数量续传，历史回放和重连不会重复追加消息。
+        const since = activeSession.value?.events.length ?? 0;
+        await api.sessionEvents(gatewayUrl.value, token.value, id, since, (event) => {
+          if (!controller.signal.aborted && !disposed && activeSessionId.value === id) receiveEvent(id, event);
+        }, controller.signal, () => streamOpened(controller));
+        if (!controller.signal.aborted) throw new Error("网关关闭了会话事件流。");
+      } catch (cause) {
+        if (controller.signal.aborted || disposed || version !== connectionVersion) return;
+        if (streamError(cause, controller)) return;
+      }
+      await retryDelay(controller.signal);
+    }
+  }
+
+  async function selectSession(id: string): Promise<void> {
+    if (!connected.value || disposed) return;
+    selectionVersion++;
+    detailController?.abort();
+    sessionController?.abort();
+    if (sessionController) reconnectingStreams.delete(sessionController);
+    const controller = new AbortController();
+    detailController = controller;
+    activeSessionId.value = id;
+    activeSession.value = undefined;
+    revisionPageSlug.value = null;
+    loadingSession.value = true;
+    error.value = "";
+    try {
+      const detail = await api.getSession(gatewayUrl.value, token.value, id, controller.signal);
+      if (controller.signal.aborted || disposed || activeSessionId.value !== id) return;
+      activeSession.value = detail;
+      applyMeta(detail);
+      sessionController = new AbortController();
+      void followSession(id, sessionController);
+    } catch (cause) {
+      if (!controller.signal.aborted && !disposed) error.value = errorMessage(cause);
+    } finally {
+      if (detailController === controller) loadingSession.value = false;
+    }
+  }
+
+  function startConversation() {
+    selectionVersion++;
+    detailController?.abort();
+    sessionController?.abort();
+    if (sessionController) reconnectingStreams.delete(sessionController);
+    activeSessionId.value = null;
+    activeSession.value = undefined;
+    revisionPageSlug.value = null;
+    loadingSession.value = false;
+    error.value = "";
+  }
+
+  function revisePage(slug: string) {
+    startConversation();
+    revisionPageSlug.value = slug;
+  }
+
+  async function loadWorkspace(): Promise<void> {
+    if (disposed) return;
+    const selectedId = activeSessionId.value;
+    stopConnections();
+    error.value = "";
+    if (!token.value.trim()) {
+      error.value = "请先填写网关 token。";
       return;
-    } finally {
-      creatingConversation.value = false;
-      actionControllers.delete(controller);
     }
-  }
-
-  async function renameConversation(id: string, title: string): Promise<boolean> {
-    if (!title.trim() || mutatingConversation.value || creatingConversation.value || pendingConversationId.value === id || disposed) return false;
-    mutatingConversation.value = true;
-    actionError.value = "";
-    const controller = actionController();
     try {
-      const conversation = await api.updateConversation(id, title.trim().slice(0, 80), controller.signal);
-      if (controller.signal.aborted || disposed) return false;
-      invalidateConversationList();
-      if (activeConversationId.value === id) {
-        conversationDetailController?.abort();
-        loadingConversation.value = false;
-        conversationError.value = "";
-      }
-      applyConversation(conversation);
-      await loadTasks();
-      return true;
-    } catch (error) {
-      if (!controller.signal.aborted && !disposed) actionError.value = errorMessage(error);
-      return false;
-    } finally {
-      mutatingConversation.value = false;
-      actionControllers.delete(controller);
-    }
-  }
-
-  async function deleteConversation(id: string): Promise<boolean> {
-    if (mutatingConversation.value || creatingConversation.value || pendingConversationId.value === id || disposed) return false;
-    mutatingConversation.value = true;
-    actionError.value = "";
-    const controller = actionController();
-    try {
-      await api.removeConversation(id, controller.signal);
-      if (controller.signal.aborted || disposed) return false;
-      invalidateConversationList();
-      conversations.value = conversations.value.filter((conversation) => conversation.id !== id);
-      if (activeConversationId.value === id) {
-        activeConversationId.value = null;
-        const next = sortedConversations.value[0];
-        if (next) await selectConversation(next.id);
-      }
-      await loadTasks();
-      return true;
-    } catch (error) {
-      if (!controller.signal.aborted && !disposed) actionError.value = errorMessage(error);
-      return false;
-    } finally {
-      mutatingConversation.value = false;
-      actionControllers.delete(controller);
-    }
-  }
-
-  async function createTaskFromConversation(
-    conversationId: string, title: string, description: string, sourceMessageId: string,
-  ): Promise<WorkspaceTask | undefined> {
-    if (!title.trim() || !conversationId || !sourceMessageId || mutatingTask.value || disposed) return;
-    mutatingTask.value = true;
-    actionError.value = "";
-    const controller = actionController();
-    try {
-      const task = await api.createTask({
-        conversationId, sourceMessageId, title: title.trim().slice(0, 80), description: description.slice(0, 8000),
-      }, controller.signal);
-      if (controller.signal.aborted || disposed) return;
-      invalidateTaskList();
-      applyTask(task);
-      return task;
-    } catch (error) {
-      if (!controller.signal.aborted && !disposed) actionError.value = errorMessage(error);
+      gatewayUrl.value = api.normalizeGatewayUrl(gatewayUrl.value);
+    } catch (cause) {
+      error.value = errorMessage(cause);
       return;
-    } finally {
-      mutatingTask.value = false;
-      actionControllers.delete(controller);
     }
-  }
-
-  async function mutateTask(id: string, changes: { title?: string; status?: TaskStatus }): Promise<boolean> {
-    if (mutatingTask.value || disposed) return false;
-    mutatingTask.value = true;
-    actionError.value = "";
-    const controller = actionController();
+    const controller = new AbortController();
+    workspaceController = controller;
+    loadingSessions.value = true;
+    loadingPages.value = true;
     try {
-      const task = await api.updateTask(id, changes, controller.signal);
-      if (controller.signal.aborted || disposed) return false;
-      invalidateTaskList();
-      if (activeTaskId.value === id) {
-        taskDetailController?.abort();
-        loadingTask.value = false;
-        detailError.value = "";
+      const [sessionList, pageList] = await Promise.all([
+        api.listSessions(gatewayUrl.value, token.value, controller.signal),
+        api.listPages(gatewayUrl.value, token.value, controller.signal),
+      ]);
+      if (controller.signal.aborted || disposed) return;
+      sessions.value = sessionList;
+      pages.value = pageList;
+      if (activePageSlug.value && !pageList.some((page) => page.slug === activePageSlug.value)) activePageSlug.value = null;
+      connected.value = true;
+      globalController = new AbortController();
+      void followGateway(globalController);
+      const id = sessionList.find((session) => session.id === selectedId)?.id ?? sessionList[0]?.id;
+      if (id) await selectSession(id);
+      else startConversation();
+    } catch (cause) {
+      if (!controller.signal.aborted && !disposed) error.value = errorMessage(cause);
+    } finally {
+      if (workspaceController === controller) {
+        loadingSessions.value = false;
+        loadingPages.value = false;
       }
-      applyTask(task);
-      return true;
-    } catch (error) {
-      if (!controller.signal.aborted && !disposed) actionError.value = errorMessage(error);
-      return false;
-    } finally {
-      mutatingTask.value = false;
-      actionControllers.delete(controller);
-    }
-  }
-
-  async function renameTask(id: string, title: string): Promise<boolean> {
-    if (!title.trim()) return false;
-    return mutateTask(id, { title: title.trim().slice(0, 80) });
-  }
-
-  async function setTaskStatus(id: string, status: TaskStatus): Promise<boolean> {
-    if (status !== "todo" && status !== "in_progress" && status !== "done") return false;
-    return mutateTask(id, { status });
-  }
-
-  async function deleteTask(id: string): Promise<boolean> {
-    if (mutatingTask.value || disposed) return false;
-    mutatingTask.value = true;
-    actionError.value = "";
-    const controller = actionController();
-    try {
-      await api.removeTask(id, controller.signal);
-      if (controller.signal.aborted || disposed) return false;
-      invalidateTaskList();
-      tasks.value = tasks.value.filter((task) => task.id !== id);
-      if (activeTaskId.value === id) activeTaskId.value = null;
-      return true;
-    } catch (error) {
-      if (!controller.signal.aborted && !disposed) actionError.value = errorMessage(error);
-      return false;
-    } finally {
-      mutatingTask.value = false;
-      actionControllers.delete(controller);
     }
   }
 
   async function sendMessage(content: string): Promise<boolean> {
     const text = content.trim();
-    if (!text || text.length > 8000 || pendingConversationId.value || creatingConversation.value
-      || loadingConversation.value || mutatingConversation.value || disposed) return false;
-    const conversation = activeConversation.value ?? (activeConversationId.value ? undefined : await newConversation());
-    if (!conversation || disposed) return false;
-    pendingConversationId.value = conversation.id;
-    actionError.value = "";
+    if (!text || sending.value || loadingSession.value || disposed) return false;
+    if (!connected.value) {
+      error.value = "请在设置中连接网关后发送消息。";
+      return false;
+    }
+    const id = activeSessionId.value;
+    const selection = selectionVersion;
     const controller = new AbortController();
     sendController = controller;
+    pendingSend.value = true;
+    error.value = "";
     try {
-      const result = await api.sendConversationMessage(conversation.id, text, preferences.value.assistant, controller.signal);
+      const meta = id
+        ? await api.sendMessage(gatewayUrl.value, token.value, id, text, controller.signal)
+        : await api.createWish(gatewayUrl.value, token.value, {
+          wish: text, ...(revisionPageSlug.value ? { slug: revisionPageSlug.value } : {}),
+        }, controller.signal);
       if (controller.signal.aborted || disposed) return false;
-      invalidateConversationList();
-      if (activeConversationId.value === result.id) {
-        conversationDetailController?.abort();
-        loadingConversation.value = false;
-        conversationError.value = "";
-      }
-      applyConversation(result);
+      applyMeta(meta);
+      if (selection === selectionVersion) await selectSession(meta.id);
       return true;
-    } catch (error) {
-      if (!controller.signal.aborted && !disposed) actionError.value = errorMessage(error);
+    } catch (cause) {
+      if (!controller.signal.aborted && !disposed) error.value = errorMessage(cause);
       return false;
     } finally {
-      if (sendController === controller) pendingConversationId.value = null;
+      if (sendController === controller) pendingSend.value = false;
     }
   }
 
-  async function stopReply(): Promise<boolean> {
-    const id = pendingConversationId.value;
-    const pendingController = sendController;
-    if (!id || !pendingController || stoppingReply.value || disposed) return false;
-    stoppingReply.value = true;
-    actionError.value = "";
-    const controller = actionController();
+  async function eventAction(action: (id: string, signal: AbortSignal) => Promise<void>): Promise<boolean> {
+    const id = activeSessionId.value;
+    if (!id || !connected.value || eventActionBusy.value || disposed) return false;
+    const controller = new AbortController();
+    actionControllers.add(controller);
+    eventActionBusy.value = true;
+    error.value = "";
     try {
-      await api.stopConversation(id, controller.signal);
+      await action(id, controller.signal);
       if (controller.signal.aborted || disposed) return false;
-      if (sendController === pendingController) {
-        pendingController.abort();
-        pendingConversationId.value = null;
-      }
-      if (activeConversationId.value === id) await selectConversation(id);
+      if (activeSessionId.value === id) await selectSession(id);
       return true;
-    } catch (error) {
-      if (!controller.signal.aborted && !disposed) actionError.value = errorMessage(error);
+    } catch (cause) {
+      if (!controller.signal.aborted && !disposed) error.value = errorMessage(cause);
       return false;
     } finally {
-      stoppingReply.value = false;
       actionControllers.delete(controller);
+      if (!controller.signal.aborted) eventActionBusy.value = false;
+    }
+  }
+
+  function answerQuestions(requestId: string, answers: ClarifyAnswers): Promise<boolean> {
+    return eventAction((id, signal) => api.answerQuestions(gatewayUrl.value, token.value, id, requestId, answers, signal));
+  }
+
+  function resolveApproval(requestId: string, approved: boolean): Promise<boolean> {
+    return eventAction((id, signal) => api.resolveApproval(gatewayUrl.value, token.value, id, requestId, approved, signal));
+  }
+
+  async function cancel(): Promise<boolean> {
+    const id = activeSessionId.value;
+    if (!id || !connected.value || cancelling.value || disposed) return false;
+    const controller = new AbortController();
+    actionControllers.add(controller);
+    cancelling.value = true;
+    error.value = "";
+    try {
+      const meta = await api.cancelSession(gatewayUrl.value, token.value, id, controller.signal);
+      if (controller.signal.aborted || disposed) return false;
+      applyMeta(meta);
+      if (activeSessionId.value === id) await selectSession(id);
+      return true;
+    } catch (cause) {
+      if (!controller.signal.aborted && !disposed) error.value = errorMessage(cause);
+      return false;
+    } finally {
+      actionControllers.delete(controller);
+      if (!controller.signal.aborted) cancelling.value = false;
     }
   }
 
   onMounted(() => {
-    void loadTasks();
-    void loadConversations();
+    if (token.value.trim()) void loadWorkspace();
   });
   onBeforeUnmount(() => {
     disposed = true;
-    taskListController?.abort();
-    conversationListController?.abort();
-    taskDetailController?.abort();
-    conversationDetailController?.abort();
-    sendController?.abort();
-    for (const controller of actionControllers) controller.abort();
+    stopConnections();
   });
 
   return {
-    conversations, activeConversationId, activeConversation, sortedConversations,
-    tasks, activeTaskId, activeTask, sortedTasks, preferences, pendingConversationId, storageError,
-    listError, conversationListError, detailError, conversationError, actionError,
-    loadingTasks, loadingConversations, loadingTask, loadingConversation,
-    creatingConversation, mutatingConversation, mutatingTask, stoppingReply,
-    loadTasks, loadConversations, selectTask, selectConversation,
-    newConversation, deleteConversation, renameConversation, createTaskFromConversation,
-    setTaskStatus, renameTask, deleteTask, sendMessage, stopReply,
+    sessions, activeSessionId, activeSession, pages, activePageSlug, activePage, revisionPageSlug,
+    preferences, token, gatewayUrl, loadingSessions, loadingPages, loadingSession,
+    error, connected, sending, cancelling, eventActionBusy,
+    loadWorkspace, selectSession, startConversation, sendMessage, answerQuestions, resolveApproval, cancel, revisePage,
   };
 }

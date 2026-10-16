@@ -8,3 +8,5 @@ coverage/
 !.env.example
 .DS_Store
 Thumbs.db
+workspace/
+harness.config.json

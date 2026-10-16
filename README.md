@@ -1,153 +1,94 @@
 # qdd_agent_harness_project
 
-Aidol 创造营参赛项目——钱多多门店人工智能助手。
+Aidol 创造营参赛项目——钱多多门店人工智能助手：店铺管理 harness。
 
-基于 Node.js、TypeScript 和 npm workspaces 的 monorepo，前端使用 Vue 3、Vite 和 TDesign。
+本仓库只负责 **harness**（数据源 + agent + 网关），没有前端界面；界面由前端团队按 [docs/api.md](docs/api.md) 对接。
 
-## 环境
+店长许愿 → agent 通过数据源取数 → 生成**零后端、零 SQL** 的静态页面 → 页面运行时经网关**直连**数据工具，只在需要时调用 agent。
 
-- Node.js 24 或更高版本（当前验证版本：24.15.0）
-- npm 11 或更高版本（当前验证版本：11.12.1）
+## 架构
+
+| 层 | 位置 | 职责 |
+| --- | --- | --- |
+| 数据源 | `apps/cli/src/datasource/` | 内置门店工具 `store__*`（只读）+ 远程 MCP 服务 `mcp__<服务>__*`（Streamable HTTP，Bearer 鉴权） |
+| Agent | `apps/cli/src/agent/` | 许愿：取数 → 写页面 → 审查发布；续聊；页面运行时的只读问答 `qdd.ask` |
+| 网关 | `apps/cli/src/gateway/` | 前端唯一出口：会话/页面/设置 API、SSE 事件、页面托管与 SDK 注入、`/mcp` 端点 |
+| 数据集 | `apps/cli/src/datasets/` | `DatasetStore` 接口 + JSONL 实现：按天分区的只追加日志、检查点、主键去重、跨进程锁、增量刷新 |
+| 计算引擎 | `packages/shared/src/compute.ts` | 零 SQL 声明式聚合 / 时间线回放 / 状态区间 / 关联；数据源侧与浏览器共用同一份代码 |
+| 会话 | `apps/cli/src/sessions.ts` | 文件存储（`workspace/sessions/`），终端与前端共享 |
+
+### 页面如何取数
+
+- `qdd.tool(name, args)`：页面直连只读数据工具，不经过 agent。agent 发布时必须声明页面用到的工具，网关按页面 token 校验，未声明的一律 403。
+- `qdd.ask(question, context)`：需要 agent 能力时使用（只读工具），页面需声明 `useAgent`。
+- `snapshot_data` 生成的 `data/*.js`：实时数据不可用时的兜底。
+
+### 连续状态与聚合（零 SQL）
+
+- **指标口径** `workspace/metrics.json` 是唯一来源：`flow` 可加总、`stock` 取期末（按实体）、`ratio` 由汇总后的分子 ÷ 分母重算（不对比率求平均）、`state` 按区间统计。修改需店长授权，并会把依赖页面标记为待复核。
+- **数据集**：事实表按天分区只追加；事件流（如 `inventory_moves`）以「检查点 + 流水回放」得到任意时刻状态，`qdd compact` 生成新检查点缩短回放；维度表（`products`）与编号映射（`keymap/*`）用于跨来源关联。
+- **工具**：`store__aggregate`（过滤/分桶/分组/补齐/窗口/关联）、`store__timeline`、`store__segments`、`store__list_metrics`、`store__list_datasets`。
+- **跨会话**：页面记录依赖的数据集版本与页面版本（乐观锁，同一页面同时只允许一个会话修改）；会话摘要 + 页面清单构成共享记忆，agent 用 `recall` / `read_session` / `read_artifact` 检索；页面参数用 `qdd.state` 持久化。
+- **存储可替换**：上层只依赖 `DatasetStore` 接口。数据集超过百万行、连锁多店或出现多进程写入冲突时，新增 SQLite 实现即可替换，SQL 仍只存在于存储实现内部，agent 与页面始终零 SQL。
+
+### 需求对齐与能力缺口
+
+- **引导式提问**：新许愿写页面前，agent 必须先用 `clarify` 逐项对齐（对象、时间范围、口径、矛盾取舍、估测假设），候选项来自真实数据、推荐项在前；前端或终端回答（终端支持编号多选、回车选推荐、直接输入自定义）。`llm.clarify` 可设为 `required`（默认）/ `auto` / `off`。
+- **能力缺口**：发布和回复都必须声明 `gaps`（缺数据 / 估测 / 不支持 / 需授权），网关把缺口固定展示在页面顶部，页面代码无法移除。
+
+### 拒绝后端与未授权更改
+
+- **鉴权**：所有 API 需网关 token；页面只拿到自己的页面级 token（HMAC 派生），无法访问会话、设置或其它工具。
+- **写入沙箱**：agent 只能写当前页面目录下的静态文件；`data/` 只能由 harness 快照生成。
+- **零后端守卫**（`guard.ts`）：拒绝 fetch/XHR/WebSocket/表单提交/eval、SQL 与浏览器 SQL 引擎、云后端、服务端代码、非白名单域名。
+- **草稿 + 原子发布**，失败不留半成品；页面带 CSP，只能连回网关。
+- **写入类数据工具**：不开放直接调用；只能在许愿会话里由 agent 发起，并等店长通过 `approval_required` 授权（终端或前端），配置 `allowWrite: true` 才免确认。
+
+### 统一风格
+
+`workspace/style.md` 是所有页面共用的风格提示词（内置主题 `assets/theme.css`）。前端设置页调用 `GET/PUT/DELETE /api/style`，或在终端执行 `npm run qdd -- style --edit`。
 
 ## 快速开始
 
-在仓库根目录执行，前端无需单独安装依赖：
+需要 Node.js 24+、npm 11+。
 
 ```powershell
 npm ci
-npm run dev
+Copy-Item .env.example .env                              # 填写 DEEPSEEK_API_KEY
+Copy-Item harness.config.example.json harness.config.json  # 配置 MCP、CORS（可选）
+npm run dev                                              # 构建并启动网关
+npm run qdd -- token                                     # 查看网关 token，交给前端
 ```
 
-- 前端：`http://127.0.0.1:5177`；连接检查页为 `/test`，展示后端连接状态，支持重新检查。
-- 后端：`http://127.0.0.1:3000`，健康检查地址为 `/health`。
-- 前端请求 `/api/health`，Vite 去掉 `/api` 前缀后转发到后端 `/health`；前后端复用 `@qdd/shared` 的 `HealthResponse` 类型。
-
-如需修改后端监听地址或端口，将 `.env.example` 复制为根目录下的 `.env` 后调整配置：
+终端也可直接许愿，会话与前端共享：
 
 ```powershell
-Copy-Item .env.example .env
+npm run qdd -- wish "最近 30 天各品类销售额和毛利，标出毛利率最高的品类"
+npm run qdd -- reply <会话id> "按周汇总"
 ```
 
-Vite 同样读取根目录 `.env`。默认代理目标由 `HOST` 和 `PORT` 决定；监听所有网卡时，代理连接本机回环地址。也可设置 `API_PROXY_TARGET` 指向单独运行的后端。修改配置后需要重新启动开发服务。`HOST`、`PORT` 和 `API_PROXY_TARGET` 仅供服务端工具读取，不应加 `VITE_` 前缀或放入秘密信息。
+## 命令
 
-前端固定监听本机 5177 端口，端口被占用时会报错。需要局域网访问时可单独执行 `npm run dev --workspace @qdd/web -- --host 0.0.0.0`。
+| 命令 | 用途 |
+| --- | --- |
+| `npm run dev` / `npm start` | 构建并启动网关 / 直接启动网关 |
+| `npm run qdd -- token` | 显示网关 token |
+| `npm run qdd -- wish "<需求>" [--page <slug>] [--yes]` | 终端许愿，写入授权在终端确认 |
+| `npm run qdd -- reply <会话id> "<消息>"` | 续聊 |
+| `npm run qdd -- sessions [会话id]` | 会话列表 / 事件回放 |
+| `npm run qdd -- pages` / `tools` | 页面 / 数据工具列表 |
+| `npm run qdd -- datasets` / `metrics` | 数据集（版本、水位线）/ 指标口径 |
+| `npm run qdd -- refresh [数据集...]` | 从数据源增量刷新（也可配置 `datasets.refreshIntervalSec` 由网关定时执行） |
+| `npm run qdd -- compact <数据集> "<时刻>"` | 为事件流生成检查点 |
+| `npm run qdd -- style [--edit\|--reset]` | 风格提示词 |
+| `npm run qdd -- check` | 守卫重新审查所有页面 |
+| `npm test` | 计算引擎不变量、数据集回放/检查点/去重、HTTP MCP、会话与跨会话、并发锁、页面鉴权（模拟 LLM） |
 
 ## 目录结构
 
 ```text
-apps/
-  server/             Node.js HTTP 服务入口（@qdd/server）
-  web/                Vue 3 前端（@qdd/web）
-    src/api/          后端接口客户端与待对接接口
-    src/pages/        对话工作空间、连接检查与 404 页面
-    src/router/       Vue Router 路由
-    src/utils/        Axios 客户端与全局工具
-packages/
-  shared/             应用间共享的类型和常量（@qdd/shared）
-package.json          workspace 定义与根命令
-package-lock.json     全仓唯一依赖锁文件
-tsconfig.base.json    共享严格 TypeScript 配置
-tsconfig.json         普通 tsc 使用的后端及共享包 references
-tsconfig.check.json   后端及共享包的无产物类型检查
-```
-
-服务端使用 NodeNext 模块解析，前端覆盖为 Bundler 模块解析并加入 DOM 类型。前端 Vue SFC 和 Vite 配置由 `@qdd/web` 的 `typecheck` 命令检查。后端保留 TypeScript 7；Vue 检查使用前端的 TypeScript 6，通过 `scripts/vue-typecheck.mjs` 显式解析，避免 npm 提升依赖后误用不兼容的编译器。前端独立的 `tsconfig.check.json` 直接检查共享源码，不依赖已有构建产物。根命令先构建共享包和后端，再检查、打包前端，避免使用普通 `tsc` 编译 Vue SFC。
-
-新增 Node.js workspace 时，需要同步维护根目录的构建 references 和构建命令；Vue workspace 使用自己的 references，并通过 `vue-tsc` 检查，不要加入根目录普通 `tsc` 的引用链。新增共享包时，也需要维护类型检查的 `paths`、依赖声明和使用方的 project references。
-
-## 常用命令
-
-| 命令 | 用途 |
-| --- | --- |
-| `npm run dev` | 同时启动后端编译监听、后端自动重启和 Vite 热更新 |
-| `npm run dev:server` | 单独启动后端开发服务 |
-| `npm run dev:web` | 单独启动前端；需有运行中的后端才能请求 API |
-| `npm run build` | 构建共享包、后端和前端，产物位于各 workspace 的 `dist/` |
-| `npm run build:server` | 构建共享包和后端 |
-| `npm run build:web` | 检查并打包前端 |
-| `npm run typecheck` | 检查后端、共享包、Vue SFC 和 Vite 配置 |
-| `npm start` | 启动编译后的 JSON 后端服务，需先构建 |
-| `npm run preview --workspace @qdd/web` | 预览前端生产产物，固定端口 5177，支持 API 代理 |
-| `npm run clean` | 清理各 workspace 的构建产物与增量信息 |
-
-## 验证
-
-```powershell
-npm run typecheck
-npm run build
-npm run dev
-```
-
-访问前端 `/test` 应显示“服务连接正常”；`GET http://127.0.0.1:3000/health` 和 `GET http://127.0.0.1:5177/api/health` 均应返回 HTTP 200，例如：
-
-```json
-{ "status": "ok", "service": "qdd-agent-harness" }
-```
-
-后端未知路径以及前端代理下的未知 API 应返回 HTTP 404。前端未知页面由 Vue Router 展示 404 页面。停止后端后，连接检查应显示失败并允许重试。目前没有自动化测试框架。
-
-## 部署
-
-```powershell
-npm ci
-npm run build
-npm start
-```
-
-`npm start` 仅提供 JSON API。前端产物位于 `apps/web/dist`，需要通过静态站点服务部署，并配置：
-
-- `/api/*` 反向代理到后端，去掉 `/api` 前缀。
-- 页面路径回退到 `index.html`，支持 Vue Router 的浏览器历史路由。
-
-Vite 开发和预览代理配置不会写入生产静态产物。业务接口与认证尚未实现。
-
-## Harness 对话工作空间
-
-前端位于 `C:\worker\qdd_agent_harness_project\apps\web`。运行 `npm run dev:web` 后访问 `http://127.0.0.1:5177/`。
-
-- 界面采用黑白灰配色，左侧包含对话、任务、设置以及后端任务列表。对话与任务分别管理，点击任务后在右侧渲染页面内容。
-- 任务列表、任务详情、对话及消息由后端提供。前端通过 `apps/web/src/api/workspace.ts` 统一请求，所有待对接的业务地址均使用 `// TODO` 标注。
-- 任务内容是后端返回的原生 `html`、`script`、`css`。前端将其组合为独立文档，使用允许脚本执行的沙箱 iframe 渲染，脚本与样式隔离于聊天界面。
-- 设置保存在当前浏览器的 localStorage；任务记录以后端为准。小屏幕通过顶部按钮展开侧边栏。
-
-当前服务端仅实现 `/health`，业务接口等待后端团队代码。以下地址与字段仅为前端临时占位，不是后端接口约定；接入处均标注 `// TODO`，后续以后端实际实现为准。前端已准备好任务列表和 HTML / JavaScript / CSS 页面渲染，接口未就绪时展示待接入与重试状态。
-
-| 待对接地址 | 用途 |
-| --- | --- |
-| `GET /api/tasks` | 获取任务列表 |
-| `GET /api/tasks/:id` | 获取任务详情 |
-| `POST /api/tasks` | 从对话创建任务，提交来源对话、消息、标题和说明 |
-| `PATCH /api/tasks/:id` | 修改任务标题或状态 |
-| `DELETE /api/tasks/:id` | 删除任务 |
-| `GET /api/conversations` | 获取对话列表 |
-| `POST /api/conversations` | 新建对话 |
-| `GET /api/conversations/:id` | 获取对话及消息 |
-| `PATCH /api/conversations/:id` | 修改对话标题 |
-| `DELETE /api/conversations/:id` | 删除对话，保留其关联任务 |
-| `POST /api/conversations/:id/messages` | 发送消息，返回更新后的完整对话 |
-| `POST /api/conversations/:id/stop` | 请求后端停止当前对话回复 |
-
-任务列表期望返回数组，每项至少包含 `id`、`title`、`updatedAt`。时间支持毫秒时间戳或 ISO 字符串。可选字段包含 `description`、`status`（`todo` / `in_progress` / `done`）、`createdAt`、`conversationId`、`sourceMessageId` 和 `sourceConversationTitle`。任务详情包含 `content`；暂无页面时可省略或传 `null`。对话详情另有 `messages` 数组，每条消息包含 `id`、`role`、`content`、`createdAt`。页面内容约定如下：
-
-```json
-{
-  "id": "task-1",
-  "title": "门店运营看板",
-  "updatedAt": "2026-10-17T08:00:00.000Z",
-  "content": {
-    "html": "<main><h1>门店运营看板</h1><button id=\"refresh\">刷新</button></main>",
-    "script": "document.querySelector('#refresh').addEventListener('click', () => { document.querySelector('h1').textContent = '已刷新'; });",
-    "css": "body { font-family: sans-serif; color: #111; background: #fff; }"
-  }
-}
-```
-
-`html` 为页面标记，`script` 与 `css` 分别为不带外层标签的 JavaScript 和 CSS 源码。客户端不保存服务端密钥。页面脚本不能访问宿主 DOM 或 localStorage；沙箱用于隔离宿主页面，不承诺限制任务页面的网络访问。
-
-手动验证：确认后端任务列表显示及任务详情切换；检查空列表、请求失败和重试；后端返回包含样式与按钮脚本的页面，确认 iframe 中布局和交互正常；在设置中切换主题和 Enter 发送；检查窄屏侧边栏。
-
-接口契约测试位于 `apps/web/tests/workspace-api.test.ts`，使用 Node.js 内置测试运行器，不依赖真实后端：
-
-```powershell
-node --test apps/web/tests/workspace-api.test.ts
+apps/cli/            harness（datasource / agent / gateway / guard / sessions）
+packages/shared/     共享类型（含前端 API 契约）
+docs/api.md          前端对接文档
+workspace/           运行时生成（已 gitignore）：style.md、metrics.json、datasets/、store.json 示例数据、site/、sessions/、state/、.gateway-token
 ```

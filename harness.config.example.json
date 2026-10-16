@@ -1,0 +1,20 @@
+{
+  "workspace": "workspace",
+  "llm": { "model": "deepseek-chat", "maxSteps": 40 },
+  "gateway": {
+    "host": "127.0.0.1",
+    "port": 5173,
+    "tokenEnv": "QDD_GATEWAY_TOKEN",
+    "corsOrigins": ["http://localhost:3000"]
+  },
+  "datasets": { "refreshIntervalSec": 300 },
+  "cdnAllowlist": ["cdn.jsdelivr.net", "unpkg.com", "cdnjs.cloudflare.com", "fonts.googleapis.com", "fonts.gstatic.com"],
+  "mcpServers": {
+    "erp": {
+      "url": "https://erp.example.com/mcp",
+      "bearerTokenEnv": "ERP_MCP_TOKEN",
+      "allowTools": ["get_*", "list_*", "query_*"],
+      "allowWrite": false
+    }
+  }
+}

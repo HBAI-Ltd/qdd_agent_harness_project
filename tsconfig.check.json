@@ -6,5 +6,6 @@
       "@qdd/shared": ["./packages/shared/src/index.ts"]
     }
   },
-  "include": ["apps/*/src/**/*.ts", "packages/*/src/**/*.ts"]
+  "include": ["apps/*/src/**/*.ts", "packages/*/src/**/*.ts"],
+  "exclude": ["apps/web"]
 }

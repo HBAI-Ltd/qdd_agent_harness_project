@@ -13,11 +13,15 @@
     "apps/*"
   ],
   "scripts": {
-    "dev": "npm run build && concurrently --kill-others --names types,server \"tsc -b --watch --preserveWatchOutput\" \"node --env-file-if-exists=.env --watch --enable-source-maps apps/server/dist/index.js\"",
-    "build": "tsc -b",
-    "typecheck": "tsc -p tsconfig.check.json",
+    "dev": "npm run build:server && concurrently --kill-others --names types,server,web \"tsc -b packages/shared apps/server --watch --preserveWatchOutput\" \"node --env-file-if-exists=.env --watch --enable-source-maps apps/server/dist/index.js\" \"npm run dev:web\"",
+    "dev:server": "npm run build:server && concurrently --kill-others --names types,server \"tsc -b packages/shared apps/server --watch --preserveWatchOutput\" \"node --env-file-if-exists=.env --watch --enable-source-maps apps/server/dist/index.js\"",
+    "dev:web": "npm run dev --workspace @qdd/web",
+    "build": "npm run build:server && npm run build:web",
+    "build:server": "tsc -b packages/shared apps/server",
+    "build:web": "npm run build --workspace @qdd/web",
+    "typecheck": "tsc -p tsconfig.check.json && npm run typecheck --workspace @qdd/web",
     "start": "node --env-file-if-exists=.env --enable-source-maps apps/server/dist/index.js",
-    "clean": "tsc -b --clean"
+    "clean": "tsc -b packages/shared apps/server --clean && npm run clean --workspace @qdd/web"
   },
   "devDependencies": {
     "@types/node": "24.19.2",

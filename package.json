@@ -1,0 +1,27 @@
+{
+  "name": "qdd-agent-harness-project",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "npm@11.12.1",
+  "engines": {
+    "node": ">=24",
+    "npm": ">=11"
+  },
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "npm run build && concurrently --kill-others --names types,server \"tsc -b --watch --preserveWatchOutput\" \"node --env-file-if-exists=.env --watch --enable-source-maps apps/server/dist/index.js\"",
+    "build": "tsc -b",
+    "typecheck": "tsc -p tsconfig.check.json",
+    "start": "node --env-file-if-exists=.env --enable-source-maps apps/server/dist/index.js",
+    "clean": "tsc -b --clean"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "concurrently": "10.0.6",
+    "typescript": "7.0.2"
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "name": "@qdd/server",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -b",
+    "start": "node --enable-source-maps dist/index.js",
+    "clean": "tsc -b --clean"
+  },
+  "dependencies": {
+    "@qdd/shared": "0.0.0"
+  }
+}

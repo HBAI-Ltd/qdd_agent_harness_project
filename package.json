@@ -13,15 +13,16 @@
     "apps/*"
   ],
   "scripts": {
-    "dev": "npm run build && concurrently --kill-others --names types,server \"tsc -b --watch --preserveWatchOutput\" \"node --env-file-if-exists=.env --watch --enable-source-maps apps/server/dist/index.js\"",
+    "dev": "npm run build && node --env-file-if-exists=.env --enable-source-maps apps/cli/dist/index.js serve",
+    "qdd": "node --env-file-if-exists=.env --enable-source-maps apps/cli/dist/index.js",
     "build": "tsc -b",
     "typecheck": "tsc -p tsconfig.check.json",
-    "start": "node --env-file-if-exists=.env --enable-source-maps apps/server/dist/index.js",
-    "clean": "tsc -b --clean"
+    "test": "tsc -b && node --test \"apps/cli/dist/**/*.test.js\"",
+    "clean": "tsc -b --clean",
+    "start": "node --env-file-if-exists=.env --enable-source-maps apps/cli/dist/index.js serve"
   },
   "devDependencies": {
     "@types/node": "24.19.2",
-    "concurrently": "10.0.6",
     "typescript": "7.0.2"
   }
 }

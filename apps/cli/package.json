@@ -1,8 +1,11 @@
 {
-  "name": "@qdd/server",
+  "name": "@qdd/cli",
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "bin": {
+    "qdd": "./dist/index.js"
+  },
   "scripts": {
     "build": "tsc -b",
     "start": "node --enable-source-maps dist/index.js",

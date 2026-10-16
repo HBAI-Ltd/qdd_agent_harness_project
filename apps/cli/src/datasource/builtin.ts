@@ -68,7 +68,8 @@ function datasetTools({ store, metrics }: StoreToolDeps): LocalTool[] {
     },
     {
       name: "aggregate",
-      description: "零 SQL 声明式聚合：过滤→时间分桶→分组→按指标口径汇总→补齐→比率重算→窗口（累计/移动平均/环比/排名/占比）。",
+      description:
+        "零 SQL 声明式聚合：过滤→时间分桶→分组→按指标口径汇总→补齐→比率重算→窗口（累计/移动平均/环比/排名/占比）。任意日期范围都可用 filter 或 time.from/to 截取后再分组，例如近 7 天各品类。",
       inputSchema: {
         type: "object",
         properties: {
@@ -82,7 +83,11 @@ function datasetTools({ store, metrics }: StoreToolDeps): LocalTool[] {
           },
           metrics: { type: "array", items: { type: "string" }, description: "指标名，见 list_metrics" },
           window: { type: "array", description: "{ metric, op: cumsum|rolling_mean|rolling_sum|pct_change|diff|rank|share, size?, lag?, as? }", items: { type: "object" } },
-          sort: { type: "array", items: { type: "object" } },
+          sort: {
+            type: "array",
+            description: '排序，如 [{"by":"revenue","desc":true}]；by 为输出列（分组字段、指标、bucket 或窗口输出列）',
+            items: { type: "object", properties: { by: { type: "string" }, desc: { type: "boolean" } }, required: ["by"] },
+          },
           limit: { type: "integer" },
           keymap: { type: "array", description: "外部编号映射，每项 { field, dataset }", items: { type: "object" } },
           join: joinSchema,

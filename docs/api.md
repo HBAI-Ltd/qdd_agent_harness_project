@@ -29,6 +29,7 @@ GET  /api/sessions/:id               → SessionDetail（元信息 + 全部事�
 GET  /api/sessions/:id/events        → SSE，先回放历史事件再推送实时事件；?since=N 跳过前 N 条
 POST /api/sessions/:id/messages      { "text": "把图表改成按周" } → 202 SessionMeta（运行中时 409）
 POST /api/sessions/:id/approvals/:requestId   { "approved": true }
+POST /api/sessions/:id/questions/:requestId   { "answers": { "<问题id>": ["<候选项 label 或自填内容>"] } }
 POST /api/sessions/:id/cancel        → 202
 ```
 
@@ -37,14 +38,32 @@ POST /api/sessions/:id/cancel        → 202
 | type | 字段 | 说明 |
 | --- | --- | --- |
 | `user` | `text` | 店长的消息 |
-| `status` | `status`: `running` / `idle` / `error` | 本轮开始/结束 |
+| `status` | `status`: `running` / `waiting` / `idle` / `error` | 本轮开始/结束；`waiting` 表示在等店长回答问题或授权 |
 | `say` | `text` | agent 的回复 |
 | `tool` | `text` | 数据查询、快照、写文件等进度 |
 | `warn` | `text` | 守卫拦截、工具失败等 |
 | `approval_required` | `requestId, tool, source, args` | 写入类数据工具等待授权，5 分钟未处理视为拒绝 |
 | `approval_resolved` | `requestId, approved` | |
+| `question_required` | `requestId, round, questions: ClarifyQuestion[]` | agent 引导式提问，30 分钟未回答按推荐项继续 |
+| `question_answered` | `requestId, answers \| null` | `null` 表示未回答 |
+| `gaps` | `gaps: CapabilityGap[]` | 本轮的能力缺口声明（同时写入页面并由网关强制展示） |
 | `published` | `page, files` | 页面已发布，可刷新展示 |
 | `error` | `message` | 本轮失败 |
+
+### 引导式提问（需求对齐）
+
+新许愿在写页面前，agent 会先用 `question_required` 与店长逐项对齐（由 `llm.clarify` 控制：`required` 默认 / `auto` / `off`）。每个 `ClarifyQuestion`：
+
+| 字段 | 说明 |
+| --- | --- |
+| `id` | 回答时的键 |
+| `header` | ≤12 字短标签，适合做标签页/步骤条 |
+| `question` | 问题 |
+| `options[]` | 2-5 个候选 `{ label, description? }`，**第一个为推荐项**（label 带「（推荐）」） |
+| `multiSelect` | 是否多选 |
+| `allowOther` | 是否允许自填（候选项之外的内容） |
+
+建议的界面：一次一题的向导，默认选中第一个候选，最后一步汇总确认后一次性提交。回答校验失败（单选给了多个、不允许自填却自填）返回 400。一轮最多 4 题，最多 3 轮。
 
 ## 页面
 
@@ -63,6 +82,21 @@ GET /api/events?access_token=<token>   → SSE GatewayEvent
   { "type": "pages_changed" }
   { "type": "session_updated", "session": SessionMeta }
 ```
+
+### 引导式提问（需求对齐）
+
+新许愿在写页面前，agent 会先用 `question_required` 与店长逐项对齐（由 `llm.clarify` 控制：`required` 默认 / `auto` / `off`）。每个 `ClarifyQuestion`：
+
+| 字段 | 说明 |
+| --- | --- |
+| `id` | 回答时的键 |
+| `header` | ≤12 字短标签，适合做标签页/步骤条 |
+| `question` | 问题 |
+| `options[]` | 2-5 个候选 `{ label, description? }`，**第一个为推荐项**（label 带「（推荐）」） |
+| `multiSelect` | 是否多选 |
+| `allowOther` | 是否允许自填（候选项之外的内容） |
+
+建议的界面：一次一题的向导，默认选中第一个候选，最后一步汇总确认后一次性提交。回答校验失败（单选给了多个、不允许自填却自填）返回 400。一轮最多 4 题，最多 3 轮。
 
 ## 页面状态
 
@@ -99,6 +133,21 @@ POST /api/tools/:name    body 为参数对象 → { "result": ... }
 ```
 
 写入类工具（`mutating: true`）不开放直接调用（403），只能在许愿会话中经 `approval_required` 授权后由 agent 执行。
+
+### 引导式提问（需求对齐）
+
+新许愿在写页面前，agent 会先用 `question_required` 与店长逐项对齐（由 `llm.clarify` 控制：`required` 默认 / `auto` / `off`）。每个 `ClarifyQuestion`：
+
+| 字段 | 说明 |
+| --- | --- |
+| `id` | 回答时的键 |
+| `header` | ≤12 字短标签，适合做标签页/步骤条 |
+| `question` | 问题 |
+| `options[]` | 2-5 个候选 `{ label, description? }`，**第一个为推荐项**（label 带「（推荐）」） |
+| `multiSelect` | 是否多选 |
+| `allowOther` | 是否允许自填（候选项之外的内容） |
+
+建议的界面：一次一题的向导，默认选中第一个候选，最后一步汇总确认后一次性提交。回答校验失败（单选给了多个、不允许自填却自填）返回 400。一轮最多 4 题，最多 3 轮。
 
 ## 页面运行时 SDK（供了解，前端无需处理）
 

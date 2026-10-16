@@ -17,6 +17,7 @@ const RULES: { re: RegExp; reason: string }[] = [
   { re: /\b(WebSocket|EventSource|RTCPeerConnection|WebTransport)\b/, reason: "禁止长连接/实时通道" },
   { re: /\bsendBeacon\b/, reason: "禁止上报请求" },
   { re: /<form\b[^>]*\b(action|method)\s*=/i, reason: "禁止表单提交到服务端" },
+  { re: /qdd-gaps/i, reason: "禁止改动 harness 注入的能力缺口说明" },
   { re: /\beval\s*\(|\bnew\s+Function\s*\(|\bimportScripts\s*\(/, reason: "禁止动态执行代码（无法审查）" },
   {
     re: /\b(CREATE\s+TABLE|INSERT\s+INTO|DELETE\s+FROM|DROP\s+TABLE|ALTER\s+TABLE|SELECT\s+[\w*,\s.()]{1,120}\s+FROM\s+\w+)/i,

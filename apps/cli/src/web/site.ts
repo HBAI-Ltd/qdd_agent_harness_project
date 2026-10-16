@@ -57,7 +57,7 @@ export async function readPages(paths: HarnessPaths): Promise<PageEntry[]> {
     return [];
   }
   // 兼容旧版本清单
-  return raw.map((p) => ({ tools: [], useAgent: false, metrics: [], datasets: {}, version: 1, stale: null, sessionId: "", ...p }) as PageEntry);
+  return raw.map((p) => ({ tools: [], useAgent: false, metrics: [], datasets: {}, version: 1, stale: null, gaps: [], sessionId: "", ...p }) as PageEntry);
 }
 
 export const writePages = (paths: HarnessPaths, pages: PageEntry[]) => writeManifest(paths, pages);

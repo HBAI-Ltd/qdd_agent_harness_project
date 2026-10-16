@@ -152,6 +152,17 @@ describe("数据集", () => {
     assert.deepEqual(out.map((r) => [r.category, r.revenue]), [["饮料", 5], [null, 7]]);
   });
 
+  test("聚合描述严格校验，错误写法给出正确示例", async () => {
+    await assert.rejects(
+      queryAggregate(ctx(), { dataset: "order_items", metrics: ["revenue"], groupBy: ["category"], sort: [{ field: "revenue", dir: "desc" } as never] }),
+      /sort 每项应为 \{"by": 输出列/,
+    );
+    await assert.rejects(queryAggregate(ctx(), { dataset: "order_items", metrics: ["revenue"], groupBy: ["品类"] }), /字段 品类 不存在/);
+    await assert.rejects(queryAggregate(ctx(), { dataset: "order_items", metrics: ["revenue"], filter: [["date", "between" as never, 1]] }), /操作 between 不支持/);
+    const ok = await queryAggregate(ctx(), { dataset: "order_items", metrics: ["revenue"], groupBy: ["category"], sort: [{ by: "revenue", desc: true }] });
+    assert.ok(Number(ok[0]!.revenue) >= Number(ok[1]!.revenue));
+  });
+
   test("字段类型校验", async () => {
     await assert.rejects(store.append("erp_sales", [{ id: "x3", time: "2026-10-16 12:00", sku: "a", revenue: "5" }]), /应为 number/);
   });

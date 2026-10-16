@@ -32,6 +32,8 @@ export interface HarnessConfig {
     model: string;
     apiKeyEnv: string;
     maxSteps: number;
+    /** required：新许愿写页面前必须先 clarify；auto：由模型判断；off：不提问 */
+    clarify: "required" | "auto" | "off";
   };
   gateway: {
     host: string;
@@ -86,6 +88,50 @@ export interface DatasetManifest {
   updatedAt: string;
 }
 
+// ---------------------------------------------------------------- 能力缺口
+
+/**
+ * 无法用真实数据回答的部分必须显式声明：
+ * missing_data 缺数据；estimate 基于假设的估测/推演；unsupported 当前能力不支持；permission 需要授权/被拒绝。
+ */
+export type GapKind = "missing_data" | "estimate" | "unsupported" | "permission";
+
+export interface CapabilityGap {
+  kind: GapKind;
+  /** 涉及的需求或指标 */
+  item: string;
+  /** 为什么做不到 / 估测依据的假设 */
+  reason: string;
+  /** 补齐能力需要什么（接入哪个数据源、授权等） */
+  suggestion?: string;
+}
+
+// ---------------------------------------------------------------- 需求澄清
+
+export interface ClarifyOption {
+  label: string;
+  description?: string;
+}
+
+/** agent 向店长提出的引导式问题：给出候选项，推荐项排第一。 */
+export interface ClarifyQuestion {
+  id: string;
+  /** 简短标签，如「时间范围」 */
+  header: string;
+  question: string;
+  options: ClarifyOption[];
+  multiSelect: boolean;
+  /** 允许店长输入候选项以外的内容 */
+  allowOther: boolean;
+}
+
+/** 回答：问题 id → 选中的候选项 label（或自填内容）。 */
+export type ClarifyAnswers = Record<string, string[]>;
+
+export interface AnswerBody {
+  answers: ClarifyAnswers;
+}
+
 // ---------------------------------------------------------------- 页面
 
 export interface PageEntry {
@@ -105,6 +151,8 @@ export interface PageEntry {
   version: number;
   /** 依赖的指标口径变更后标记，提示需要复核 */
   stale: string | null;
+  /** 能力缺口声明（网关会强制展示在页面上） */
+  gaps: CapabilityGap[];
   sessionId: string;
   createdAt: string;
   updatedAt: string;
@@ -117,7 +165,8 @@ export interface PageView extends PageEntry {
 
 // ---------------------------------------------------------------- 会话
 
-export type SessionStatus = "running" | "idle" | "error";
+/** waiting：等待店长回答问题或授权。 */
+export type SessionStatus = "running" | "waiting" | "idle" | "error";
 
 export interface SessionMeta {
   id: string;
@@ -142,7 +191,10 @@ export type SessionEvent = At &
     | { type: "warn"; text: string }
     | { type: "approval_required"; requestId: string; tool: string; source: string; args: JsonObject }
     | { type: "approval_resolved"; requestId: string; approved: boolean }
+    | { type: "question_required"; requestId: string; round: number; questions: ClarifyQuestion[] }
+    | { type: "question_answered"; requestId: string; answers: ClarifyAnswers | null }
     | { type: "published"; page: PageEntry; files: string[] }
+    | { type: "gaps"; gaps: CapabilityGap[] }
     | { type: "error"; message: string }
   );
 

@@ -1,6 +1,6 @@
 import { cp, mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
-import type { JsonObject, MetricCatalog, PageEntry } from "@qdd/shared";
+import type { CapabilityGap, ClarifyAnswers, ClarifyQuestion, GapKind, JsonObject, MetricCatalog, PageEntry } from "@qdd/shared";
 import type { LoadedConfig } from "../config.js";
 import type { Authorizer, DataSources, DataTool } from "../datasource/registry.js";
 import { updateMetrics } from "../datasets/metrics.js";
@@ -24,9 +24,13 @@ export interface WishRequest {
   history?: ChatMessage[] | undefined;
 }
 
+/** 向店长提问；返回 null 表示未回答（超时或无人值守）。 */
+export type Clarifier = (questions: ClarifyQuestion[]) => Promise<ClarifyAnswers | null>;
+
 export interface WishHooks {
   onEvent(event: AgentEvent): void;
   authorize: Authorizer;
+  clarify?: Clarifier | undefined;
   signal?: AbortSignal | undefined;
 }
 
@@ -38,6 +42,66 @@ export interface WishResult {
   messages: ChatMessage[];
   /** 本轮结论（发布摘要或回复内容），作为会话摘要供跨会话检索。 */
   summary: string;
+  gaps: CapabilityGap[];
+}
+
+const GAP_KINDS: GapKind[] = ["missing_data", "estimate", "unsupported", "permission"];
+const MAX_CLARIFY_ROUNDS = 3;
+
+/** 校验并规范化澄清问题。 */
+function parseQuestions(raw: unknown): ClarifyQuestion[] | string {
+  if (!Array.isArray(raw) || raw.length < 1 || raw.length > 4) return "questions 需要 1-4 个问题";
+  const out: ClarifyQuestion[] = [];
+  const ids = new Set<string>();
+  for (const [i, q] of (raw as Record<string, unknown>[]).entries()) {
+    const options = Array.isArray(q?.options) ? (q.options as Record<string, unknown>[]) : [];
+    if (typeof q?.question !== "string" || !q.question.trim()) return `第 ${i + 1} 个问题缺少 question`;
+    if (options.length < 2 || options.length > 5) return `问题「${q.question}」需要 2-5 个候选项`;
+    const labels = options.map((o) => (typeof o?.label === "string" ? o.label.trim() : ""));
+    if (labels.some((l) => !l) || new Set(labels).size !== labels.length) return `问题「${q.question}」的候选项 label 不能为空或重复`;
+    const id = typeof q.id === "string" && q.id.trim() ? q.id.trim() : `q${i + 1}`;
+    if (ids.has(id)) return `问题 id ${id} 重复`;
+    ids.add(id);
+    out.push({
+      id,
+      header: String(q.header ?? "").slice(0, 12) || `问题${i + 1}`,
+      question: q.question.slice(0, 300),
+      options: options.map((o, j) => ({ label: labels[j]!.slice(0, 60), ...(typeof o.description === "string" ? { description: o.description.slice(0, 200) } : {}) })),
+      multiSelect: q.multiSelect === true,
+      allowOther: q.allowOther !== false,
+    });
+  }
+  return out;
+}
+
+const gapsSchema = {
+  type: "array",
+  description:
+    "能力缺口声明，必填（确实没有则传 []）。凡是缺数据、靠假设估测、能力不支持、未获授权的部分都必须列出，不得用编造的数字填补。",
+  items: {
+    type: "object",
+    properties: {
+      kind: { type: "string", enum: GAP_KINDS },
+      item: { type: "string", description: "涉及的需求或指标" },
+      reason: { type: "string", description: "为什么做不到 / 估测依据的假设" },
+      suggestion: { type: "string", description: "补齐需要什么：接入哪个数据源、授权等" },
+    },
+    required: ["kind", "item", "reason"],
+  },
+};
+
+/** 校验 gaps；返回错误信息或规范化后的列表。 */
+function parseGaps(raw: unknown): CapabilityGap[] | string {
+  if (!Array.isArray(raw)) return "缺少 gaps：请列出能力缺口（缺数据 / 估测 / 不支持 / 未授权），确实没有则传 []。";
+  const out: CapabilityGap[] = [];
+  for (const g of raw as Record<string, unknown>[]) {
+    const kind = g?.kind as GapKind;
+    if (!GAP_KINDS.includes(kind) || typeof g.item !== "string" || typeof g.reason !== "string" || !g.reason.trim()) {
+      return `gaps 格式错误：每项需要 kind(${GAP_KINDS.join("/")})、item、reason`;
+    }
+    out.push({ kind, item: g.item.slice(0, 200), reason: g.reason.slice(0, 500), ...(typeof g.suggestion === "string" ? { suggestion: g.suggestion.slice(0, 300) } : {}) });
+  }
+  return out;
 }
 
 const EXPLORE_LIMIT = 12_000;
@@ -111,8 +175,8 @@ const HARNESS_TOOLS: LlmTool[] = [
     type: "function",
     function: {
       name: "reply",
-      description: "不修改页面、只回答店长的问题时使用，结束本轮。",
-      parameters: object({ text: { type: "string" } }, ["text"]),
+      description: "不修改页面、只回答店长的问题，或需求无法实现时使用，结束本轮。",
+      parameters: object({ text: { type: "string" }, gaps: gapsSchema }, ["text", "gaps"]),
     },
   },
   {
@@ -127,8 +191,40 @@ const HARNESS_TOOLS: LlmTool[] = [
           tools: { type: "array", items: { type: "string" }, description: "页面运行时通过 qdd.tool() 直接调用的只读数据工具" },
           useAgent: { type: "boolean", description: "页面运行时是否需要通过 qdd.ask() 调用 agent" },
           metrics: { type: "array", items: { type: "string" }, description: "页面展示的指标（口径变更时据此提示复核）" },
+          gaps: gapsSchema,
         },
-        ["title", "summary", "tools", "useAgent"],
+        ["title", "summary", "tools", "useAgent", "gaps"],
+      ),
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "clarify",
+      description:
+        "需求模糊、多需求混杂或互相矛盾时，在动手前向店长逐项对齐。一次 1-4 个问题，每题 2-5 个候选项，推荐项排第一并在 label 末尾标「（推荐）」。候选项应来自真实数据（如实际品类、实际日期范围）。店长可多选或自填。能从数据或常识推断的不要问。",
+      parameters: object(
+        {
+          questions: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                id: { type: "string", description: "问题标识，如 range" },
+                header: { type: "string", description: "≤12 字的短标签，如「时间范围」" },
+                question: { type: "string" },
+                options: {
+                  type: "array",
+                  items: { type: "object", properties: { label: { type: "string" }, description: { type: "string", description: "选这个意味着什么" } }, required: ["label"] },
+                },
+                multiSelect: { type: "boolean" },
+                allowOther: { type: "boolean", description: "默认 true" },
+              },
+              required: ["question", "options"],
+            },
+          },
+        },
+        ["questions"],
       ),
     },
   },
@@ -202,6 +298,9 @@ export async function runWish(
   /** 草稿区：所有写入先进这里，finish 审查通过后才原子发布。 */
   const staged = new Map<string, string>();
   let existing = updating ? await listFiles(pageDir) : [];
+  let clarifyRounds = 0;
+  /** 新许愿（非续聊、非修改已有页面）且可交互时，写页面前必须先对齐需求。 */
+  const mustClarify = !!hooks.clarify && history.length === 0 && !updating && config.llm.clarify === "required";
 
   const tools: LlmTool[] = [
     ...sources.tools.map((t): LlmTool => ({
@@ -274,6 +373,8 @@ export async function runWish(
   async function finish(args: JsonObject): Promise<WishResult | string> {
     const files = [...new Set([...existing, ...staged.keys()])];
     if (!files.includes("index.html")) return "错误：缺少入口 index.html";
+    const gaps = parseGaps(args.gaps);
+    if (typeof gaps === "string") return gaps;
     const pageTools = Array.isArray(args.tools) ? [...new Set(args.tools.map(String))] : [];
     const problems: string[] = [];
     for (const name of pageTools) {
@@ -315,12 +416,13 @@ export async function runWish(
       datasets: versions,
       version: baseVersion + 1,
       stale: null,
+      gaps,
       sessionId: request.sessionId,
       createdAt: updating?.createdAt ?? now,
       updatedAt: now,
     };
     await upsertPage(paths, page);
-    return { page, files, messages: [], summary: page.summary };
+    return { page, files, messages: [], summary: page.summary, gaps };
   }
 
   async function dispatch(name: string, args: JsonObject): Promise<string | WishResult> {
@@ -328,6 +430,9 @@ export async function runWish(
       case "snapshot_data":
         return snapshot(args);
       case "write_file": {
+        if (mustClarify && clarifyRounds === 0) {
+          return "请先调用 clarify 与店长对齐需求（对象、时间范围、口径、矛盾需求的取舍、估测假设中有歧义的部分），再写页面。需求明确时问 1 个确认题即可。";
+        }
         const content = typeof args.content === "string" ? args.content : "";
         const { path: rel, violations } = checkFile(String(args.path ?? ""), content, config.cdnAllowlist);
         if (violations.length) {
@@ -354,9 +459,22 @@ export async function runWish(
       case "finish":
         return finish(args);
       case "reply": {
+        const gaps = parseGaps(args.gaps);
+        if (typeof gaps === "string") return gaps;
         const text = String(args.text ?? "");
         hooks.onEvent({ kind: "say", text });
-        return { page: undefined, files: [], messages: [], summary: text.slice(0, 200) };
+        return { page: undefined, files: [], messages: [], summary: text.slice(0, 200), gaps };
+      }
+      case "clarify": {
+        const questions = parseQuestions(args.questions);
+        if (typeof questions === "string") return `错误：${questions}`;
+        if (!hooks.clarify || config.llm.clarify === "off") return "当前为无人值守模式，无法提问：请按推荐项继续，并在页面口径说明与 gaps 中写明所做的假设。";
+        if (++clarifyRounds > MAX_CLARIFY_ROUNDS) return `已提问 ${MAX_CLARIFY_ROUNDS} 轮，请按已知信息与推荐项继续，并写明假设。`;
+        const answers = await hooks.clarify(questions);
+        if (!answers) return "店长未回答：请按推荐项继续，并在页面口径说明与 gaps 中写明所做的假设。";
+        return questions
+          .map((q) => `【${q.header}】${q.question}\n→ ${(answers[q.id] ?? []).join("、") || "（未选择，按推荐项）"}`)
+          .join("\n");
       }
       case "recall":
         return JSON.stringify(await recall(paths, String(args.query ?? "")));

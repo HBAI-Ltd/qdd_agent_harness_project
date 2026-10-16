@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import { readdir, readFile } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
-import { HARNESS_VERSION, SERVICE_NAME, type SessionEvent } from "@qdd/shared";
+import { HARNESS_VERSION, SERVICE_NAME, type ClarifyAnswers, type ClarifyQuestion, type SessionEvent } from "@qdd/shared";
 import { createChat } from "./agent/llm.js";
 import { loadConfig, type LoadedConfig } from "./config.js";
 import { DataSources } from "./datasource/registry.js";
@@ -43,18 +43,55 @@ async function openSources(loaded: LoadedConfig) {
   return sources;
 }
 
-/** 在终端里跟随会话输出，并处理写入授权。 */
+/** 终端引导式回答：编号选择（多选用逗号），直接回车选推荐项，也可直接输入自定义内容。 */
+async function askInTerminal(rl: ReturnType<typeof createInterface>, questions: ClarifyQuestion[]): Promise<ClarifyAnswers> {
+  const answers: ClarifyAnswers = {};
+  for (const [i, q] of questions.entries()) {
+    console.log(`\n\x1b[35m[${i + 1}/${questions.length}] ${q.header}\x1b[0m ${q.question}`);
+    q.options.forEach((o, j) => console.log(`  ${j + 1}. ${o.label}${o.description ? `\x1b[2m — ${o.description}\x1b[0m` : ""}`));
+    const hint = [q.multiSelect ? "可多选，如 1,3" : "选一个编号", "回车 = 1", q.allowOther ? "或直接输入其它" : ""].filter(Boolean).join("；");
+    for (;;) {
+      const raw = (await rl.question(`  \x1b[2m(${hint})\x1b[0m > `)).trim();
+      if (!raw) {
+        answers[q.id] = [q.options[0]!.label];
+        break;
+      }
+      const nums = raw.split(/[,，\s]+/).map(Number);
+      if (nums.every((n) => Number.isInteger(n) && n >= 1 && n <= q.options.length) && (q.multiSelect || nums.length === 1)) {
+        answers[q.id] = [...new Set(nums)].map((n) => q.options[n - 1]!.label);
+        break;
+      }
+      if (q.allowOther) {
+        answers[q.id] = [raw];
+        break;
+      }
+      console.log("  无效输入，请重新选择");
+    }
+  }
+  return answers;
+}
+
+/** 在终端里跟随会话输出，处理写入授权与需求澄清（逐个串行提问）。 */
 async function follow(hub: SessionHub, id: string, autoYes: boolean): Promise<void> {
   const rl = process.stdin.isTTY ? createInterface({ input: process.stdin, output: process.stdout }) : undefined;
+  let queue = Promise.resolve();
+  const enqueue = (task: () => Promise<void>) => {
+    queue = queue.then(task).catch((error: Error) => console.error(`\x1b[31m${error.message}\x1b[0m`));
+  };
   const off = hub.subscribe(id, (e) => {
     printEvent(e);
+    if (e.type === "question_required") {
+      // 非交互终端：按推荐项（第一个候选）回答
+      if (!rl || autoYes) return hub.answer(id, e.requestId, Object.fromEntries(e.questions.map((q) => [q.id, [q.options[0]!.label]])));
+      return enqueue(async () => hub.answer(id, e.requestId, await askInTerminal(rl, e.questions)));
+    }
     if (e.type !== "approval_required") return;
     if (autoYes) return hub.approve(id, e.requestId, true);
     if (!rl) return hub.approve(id, e.requestId, false);
-    void rl
-      .question(`\x1b[33m  是否授权 ${e.tool} ${JSON.stringify(e.args)}？[y/N] \x1b[0m`)
-      .then((a) => hub.approve(id, e.requestId, /^y(es)?$/i.test(a.trim())))
-      .catch(() => {});
+    enqueue(async () => {
+      const a = await rl.question(`\x1b[33m  是否授权 ${e.tool} ${JSON.stringify(e.args)}？[y/N] \x1b[0m`);
+      hub.approve(id, e.requestId, /^y(es)?$/i.test(a.trim()));
+    });
   });
   const onSigint = () => hub.cancel(id);
   process.once("SIGINT", onSigint);
@@ -76,6 +113,10 @@ function printEvent(e: SessionEvent): void {
     case "warn": return console.log(`\x1b[33m· ${e.text}\x1b[0m`);
     case "approval_required": return console.log(`\x1b[33m⚠ 写入操作 ${e.tool}（${e.source}）待授权\x1b[0m`);
     case "approval_resolved": return console.log(`\x1b[33m  ${e.approved ? "已授权" : "已拒绝"}\x1b[0m`);
+    case "question_required": return console.log(`\x1b[35m? 需要对齐需求（第 ${e.round} 轮，${e.questions.length} 个问题）\x1b[0m`);
+    case "question_answered":
+      return console.log(e.answers ? `\x1b[35m  ${Object.entries(e.answers).map(([k, v]) => `${k}=${v.join("/")}`).join("；")}\x1b[0m` : "\x1b[35m  未回答，按推荐项继续\x1b[0m");
+    case "gaps": return console.log(`\x1b[33m能力缺口：\n${e.gaps.map((g) => `  - [${g.kind}] ${g.item}：${g.reason}`).join("\n")}\x1b[0m`);
     case "published": return console.log(`\x1b[32m✓ 已发布「${e.page.title}」${e.page.summary}\x1b[0m`);
     case "error": return console.log(`\x1b[31m✗ ${e.message}\x1b[0m`);
     case "user": return console.log(`\x1b[2m> ${e.text}\x1b[0m`);

@@ -37,6 +37,7 @@ describe("guard", () => {
     ["表单提交", '<form action="/save" method="post">'],
     ["非白名单 CDN", '<script src="https://evil.example.com/x.js"></script>'],
     ["eval", "eval('1')"],
+    ["移除缺口说明", "document.querySelector('[data-qdd-gaps]').remove()"],
   ]) {
     test(`拒绝 ${name}`, () => assert.notDeepEqual(checkFile("index.html", content!, CDN).violations, []));
   }
@@ -119,7 +120,7 @@ describe("gateway", () => {
   before(async () => {
     process.env.FAKE_MCP_TOKEN = "secret";
     root = await mkdtemp(path.join(tmpdir(), "qdd-"));
-    await writeFile(path.join(root, "harness.config.json"), JSON.stringify({ gateway: { port: 0 } }));
+    await writeFile(path.join(root, "harness.config.json"), JSON.stringify({ gateway: { port: 0 }, llm: { clarify: "auto" } }));
     base = await loadConfig(root);
     await ensureWorkspace(base.paths);
     fake = await startFakeSseMcp();
@@ -178,7 +179,7 @@ describe("gateway", () => {
         path: "index.html",
         content: '<html><head><link rel="stylesheet" href="../../assets/theme.css"></head><body><script src="./data/cat.js"></script></body></html>',
       }),
-      call("finish", { title: "品类销售", summary: "饮料品类毛利最高", tools: ["store__sales_summary"], useAgent: false, metrics: ["revenue"] }),
+      call("finish", { title: "品类销售", summary: "饮料品类毛利最高", tools: ["store__sales_summary"], useAgent: false, metrics: ["revenue"], gaps: [] }),
     );
     const created = (await (await api("/api/wishes", { method: "POST", body: JSON.stringify({ wish: "看看各品类" }) })).json()) as SessionMeta;
     assert.equal(created.status, "running");
@@ -195,7 +196,7 @@ describe("gateway", () => {
       }
       await new Promise((r) => setTimeout(r, 20));
     }
-    while (detail.status === "running") {
+    while (detail.status === "running" || detail.status === "waiting") {
       await new Promise((r) => setTimeout(r, 20));
       detail = (await (await api(`/api/sessions/${created.id}`)).json()) as SessionDetail;
     }
@@ -211,7 +212,7 @@ describe("gateway", () => {
     assert.equal(detail.summary, "饮料品类毛利最高");
 
     // 续聊：上一轮的完整对话会带给模型
-    script.push(call("reply", { text: "饮料毛利最高" }));
+    script.push(call("reply", { text: "饮料毛利最高", gaps: [] }));
     assert.equal((await api(`/api/sessions/${created.id}/messages`, { method: "POST", body: JSON.stringify({ text: "哪个品类毛利最高？" }) })).status, 202);
     const final = await gateway.hub.wait(created.id);
     assert.equal(final.status, "idle");
@@ -272,7 +273,7 @@ describe("gateway", () => {
   });
 
   test("跨会话：新会话的提示词带上以往摘要，recall 能检索到页面", async () => {
-    script.push(call("recall", { query: "品类毛利" }), call("reply", { text: "之前做过品类分析" }));
+    script.push(call("recall", { query: "品类毛利" }), call("reply", { text: "之前做过品类分析", gaps: [] }));
     const created = (await (await api("/api/wishes", { method: "POST", body: JSON.stringify({ wish: "上次的品类结论是什么" }) })).json()) as SessionMeta;
     await gateway.hub.wait(created.id);
     const prompt = seen.at(-2)![0]!.content!;
@@ -286,7 +287,7 @@ describe("gateway", () => {
     // 1) 运行中的会话占用页面时，另一个会话不能修改它
     let release!: () => void;
     const gate = new Promise<void>((r) => (release = r));
-    script.push(call("reply", { text: "ok" }));
+    script.push(call("reply", { text: "ok", gaps: [] }));
     const blocking: ChatFn = async (m, t) => {
       await gate;
       return chat(m, t);
@@ -311,14 +312,26 @@ describe("gateway", () => {
         bumped = true;
         const current = (await readPages(base.paths)).find((p) => p.slug === page!.slug)!;
         await upsertPage(base.paths, { ...current, version: current.version + 1 });
+        return call("finish", { title: "t", summary: "s", tools: [], useAgent: false, gaps: [] });
+      }
+      if (/发布冲突/.test(String(last.content))) {
+        // 3) 缺少 gaps 时拒绝发布
         return call("finish", { title: "t", summary: "s", tools: [], useAgent: false });
       }
-      assert.match(String(last.content), /发布冲突/);
-      return call("finish", { title: "t", summary: "s", tools: [], useAgent: false });
+      assert.match(String(last.content), /缺少 gaps/);
+      return call("finish", {
+        title: "t", summary: "s", tools: [], useAgent: false,
+        gaps: [{ kind: "missing_data", item: "客流量", reason: "数据源没有客流数据", suggestion: "接入门店客流计数器" }],
+      });
     };
     const before = (await readPages(base.paths)).find((p) => p.slug === page!.slug)!.version;
     const result = await runWish(base, sources, racing, { wish: "调整", slug: page!.slug, sessionId: first.id }, { onEvent: () => {}, authorize: async () => false });
     assert.equal(result.page?.version, before + 2);
+    assert.equal(result.page?.gaps[0]?.item, "客流量");
+    const view = ((await (await api("/api/pages")).json()) as PageView[]).find((p) => p.slug === page!.slug)!;
+    const enter = await fetch(gateway.url + view.url, { redirect: "manual" });
+    const served = await (await fetch(`${gateway.url}/pages/${view.slug}/`, { headers: { cookie: enter.headers.get("set-cookie")!.split(";")[0]! } })).text();
+    assert.match(served, /<body[^>]*><aside data-qdd-gaps[^>]*>.*\[缺数据\] 客流量<\/b>：数据源没有客流数据/);
   });
 
   test("数据集增量刷新（远程 MCP + 编号映射，可重复执行）", async () => {
@@ -338,6 +351,62 @@ describe("gateway", () => {
     assert.deepEqual((await readAll(store, "erp_sales")).map((r) => r.code).sort(), ["SKU001", "SKU002"]);
     const listed = (await (await api("/api/datasets")).json()) as { name: string }[];
     assert.ok(listed.some((d) => d.name === "erp_sales"));
+  });
+
+  test("引导式提问：等待店长回答、校验候选项、答案回到模型", async () => {
+    script.push(
+      call("clarify", {
+        questions: [
+          { id: "range", header: "时间范围", question: "「最近」指多久？", options: [{ label: "近 30 天（推荐）" }, { label: "近 7 天" }], allowOther: false },
+          { id: "focus", header: "关注点", question: "想先看哪些？", multiSelect: true, options: [{ label: "品类" }, { label: "时段" }, { label: "渠道" }] },
+        ],
+      }),
+      call("reply", { text: "好的", gaps: [] }),
+    );
+    const created = (await (await api("/api/wishes", { method: "POST", body: JSON.stringify({ wish: "最近生意咋样 帮我看看" }) })).json()) as SessionMeta;
+    let detail: SessionDetail;
+    let asked: Extract<SessionDetail["events"][number], { type: "question_required" }> | undefined;
+    for (;;) {
+      detail = (await (await api(`/api/sessions/${created.id}`)).json()) as SessionDetail;
+      asked = detail.events.find((e) => e.type === "question_required") as typeof asked;
+      if (asked && detail.status === "waiting") break;
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    assert.equal(asked.round, 1);
+    assert.equal(asked.questions[1]!.multiSelect, true);
+    const answer = (answers: object) => api(`/api/sessions/${created.id}/questions/${asked!.requestId}`, { method: "POST", body: JSON.stringify({ answers }) });
+    assert.equal((await answer({ range: ["近 30 天（推荐）", "近 7 天"] })).status, 400); // 单选
+    assert.equal((await answer({ range: ["半年"] })).status, 400); // 不允许自填
+    assert.equal((await answer({ range: ["近 7 天"], focus: ["品类", "按商品看"] })).status, 200); // 允许自填
+    const final = await gateway.hub.wait(created.id);
+    assert.equal(final.status, "idle");
+    const toolResult = seen.at(-1)!.at(-1)!.content!;
+    assert.match(toolResult, /【时间范围】.*\n→ 近 7 天/);
+    assert.match(toolResult, /【关注点】.*\n→ 品类、按商品看/);
+  });
+
+  test("对齐门槛：新许愿未 clarify 不能写页面", async () => {
+    const strict: LoadedConfig = { ...base, config: { ...base.config, llm: { ...base.config.llm, clarify: "required" } } };
+    const outputs: string[] = [];
+    const steps = [
+      call("write_file", { path: "index.html", content: "<p>x</p>" }),
+      call("clarify", { questions: [{ question: "按近 30 天看可以吗？", options: [{ label: "就这样（推荐）" }, { label: "需要调整" }] }] }),
+      call("write_file", { path: "index.html", content: "<p>x</p>" }),
+      call("reply", { text: "完成", gaps: [] }),
+    ];
+    const scripted: ChatFn = async (messages) => {
+      const last = messages.at(-1)!;
+      if (last.role === "tool") outputs.push(String(last.content));
+      return steps.shift()!;
+    };
+    await runWish(strict, sources, scripted, { wish: "看看生意", sessionId: "00000000-0000-0000-0000-000000000000" }, {
+      onEvent: () => {},
+      authorize: async () => false,
+      clarify: async (qs) => ({ [qs[0]!.id]: ["就这样（推荐）"] }),
+    });
+    assert.match(outputs[0]!, /请先调用 clarify/);
+    assert.match(outputs[1]!, /→ 就这样（推荐）/);
+    assert.match(outputs[2]!, /已写入草稿/);
   });
 
   test("风格提示词接口", async () => {

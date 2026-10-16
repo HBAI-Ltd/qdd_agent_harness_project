@@ -2,14 +2,14 @@ import { watch } from "node:fs";
 import { mkdir, readFile, stat } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import path from "node:path";
-import type { AskBody, CreateWishBody, GatewayEvent, JsonObject, PageView, SendMessageBody, ToolInfo } from "@qdd/shared";
+import type { AnswerBody, AskBody, CreateWishBody, GatewayEvent, JsonObject, PageView, SendMessageBody, ToolInfo } from "@qdd/shared";
 import { runAsk } from "../agent/ask.js";
 import type { ChatFn } from "../agent/llm.js";
 import type { LoadedConfig } from "../config.js";
 import type { DataSources } from "../datasource/registry.js";
 import { refreshDatasets } from "../datasets/refresh.js";
 import { pageCsp } from "../guard.js";
-import { Conflict, NotFound, SessionHub } from "../sessions.js";
+import { BadRequest, Conflict, NotFound, SessionHub } from "../sessions.js";
 import { readPages, readStyle, resetStyle, toScriptJson, writeAtomic, writeStyle } from "../web/site.js";
 import { Auth } from "./auth.js";
 import { handleMcp } from "./mcp-endpoint.js";
@@ -67,7 +67,7 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
 
   const server = createServer((req, res) => {
     route(req, res).catch((error: Error) => {
-      const status = error instanceof HttpError ? error.status : error instanceof NotFound ? 404 : error instanceof Conflict ? 409 : 500;
+      const status = error instanceof HttpError ? error.status : error instanceof NotFound ? 404 : error instanceof Conflict ? 409 : error instanceof BadRequest ? 400 : 500;
       if (res.headersSent) {
         res.end();
         return;
@@ -257,6 +257,13 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
         hub.cancel(id);
         return json(res, 202, await hub.meta(id));
       }
+      const question = /^\/questions\/([^/]+)$/.exec(sub);
+      if (question && m === "POST") {
+        const body = (await readJson(req)) as AnswerBody | undefined;
+        if (!body?.answers || typeof body.answers !== "object" || Array.isArray(body.answers)) throw new HttpError(400, "answers 必须是对象");
+        hub.answer(id, question[1]!, body.answers);
+        return json(res, 200, { ok: true });
+      }
       const approval = /^\/approvals\/([^/]+)$/.exec(sub);
       if (approval && m === "POST") {
         const body = (await readJson(req)) as { approved?: unknown };
@@ -294,7 +301,10 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
       `<script src="/sdk/compute.js"></script><script src="/sdk/qdd.js"></script>`;
     const html = await readFile(file, "utf8");
     const head = /<head[^>]*>/i.exec(html);
-    const out = head ? html.replace(head[0], head[0] + boot) : boot + html;
+    let out = head ? html.replace(head[0], head[0] + boot) : boot + html;
+    const entry = (await readPages(paths)).find((x) => x.slug === slug);
+    const banner = gapBanner(entry);
+    if (banner) out = /<body[^>]*>/i.test(out) ? out.replace(/<body[^>]*>/i, (m) => m + banner) : out + banner;
     res.setHeader("Content-Security-Policy", csp);
     send(res, 200, MIME[".html"]!, out);
   }
@@ -348,6 +358,20 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
         server.closeAllConnections();
       }),
   };
+}
+
+const GAP_LABEL: Record<string, string> = { missing_data: "缺数据", estimate: "估测", unsupported: "暂不支持", permission: "需授权" };
+
+const escapeHtml = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+
+/** harness 注入的能力缺口/口径复核横幅：页面代码无法移除其内容声明。 */
+function gapBanner(page: { gaps: { kind: string; item: string; reason: string; suggestion?: string }[]; stale: string | null } | undefined): string {
+  if (!page || (!page.gaps.length && !page.stale)) return "";
+  const items = page.gaps
+    .map((g) => `<li><b>[${GAP_LABEL[g.kind] ?? g.kind}] ${escapeHtml(g.item)}</b>：${escapeHtml(g.reason)}${g.suggestion ? `（${escapeHtml(g.suggestion)}）` : ""}</li>`)
+    .join("");
+  const stale = page.stale ? `<li><b>[口径变更]</b> ${escapeHtml(page.stale)}</li>` : "";
+  return `<aside data-qdd-gaps style="all:initial;display:block;font:13px/1.6 system-ui,sans-serif;background:#fff7e6;color:#613400;border-bottom:1px solid #ffd591;padding:8px 16px"><b style="font-weight:600">能力缺口说明</b><ul style="margin:4px 0 0;padding-left:20px">${stale}${items}</ul></aside>`;
 }
 
 /** 在 root 内解析相对路径，拒绝越界与隐藏文件。 */

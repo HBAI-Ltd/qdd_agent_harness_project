@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { appendFile, readdir, readFile } from "node:fs/promises";
 import path from "node:path";
-import type { JsonObject, SessionDetail, SessionEvent, SessionMeta } from "@qdd/shared";
+import type { ClarifyAnswers, ClarifyQuestion, JsonObject, SessionDetail, SessionEvent, SessionMeta } from "@qdd/shared";
 import { runWish, type AgentEvent } from "./agent/agent.js";
 import type { ChatFn, ChatMessage } from "./agent/llm.js";
 import type { LoadedConfig } from "./config.js";
@@ -16,6 +16,7 @@ import { writeAtomic } from "./web/site.js";
  */
 const ID_RE = /^[0-9a-f-]{36}$/;
 const APPROVAL_TIMEOUT_MS = 5 * 60_000;
+const QUESTION_TIMEOUT_MS = 30 * 60_000;
 
 type Distribute<T> = T extends unknown ? Omit<T, "at"> : never;
 export type NewEvent = Distribute<SessionEvent>;
@@ -30,6 +31,10 @@ export class SessionHub {
   /** 页面 → 正在修改它的会话，同一页面同时只允许一个会话修改 */
   private readonly editing = new Map<string, string>();
   private readonly approvals = new Map<string, PendingApproval & { sessionId: string }>();
+  private readonly questions = new Map<string, { sessionId: string; questions: ClarifyQuestion[]; resolve(a: ClarifyAnswers | null): void }>();
+  /** 每个会话尚未处理的提问/授权数，>0 时状态为 waiting */
+  private readonly pendingCount = new Map<string, number>();
+  private readonly rounds = new Map<string, number>();
   private readonly listeners = new Map<string, Set<(e: SessionEvent) => void>>();
   private readonly metaListeners = new Set<(meta: SessionMeta) => void>();
 
@@ -113,6 +118,24 @@ export class SessionHub {
     pending.resolve(approved);
   }
 
+  /** 回答澄清问题；校验答案必须是候选项（允许自填的问题除外）。 */
+  answer(id: string, requestId: string, answers: ClarifyAnswers): void {
+    const pending = this.questions.get(requestId);
+    if (!pending || pending.sessionId !== id) throw new NotFound("问题不存在或已过期");
+    const clean: ClarifyAnswers = {};
+    for (const q of pending.questions) {
+      const picked = answers[q.id];
+      if (picked === undefined) continue;
+      if (!Array.isArray(picked) || picked.some((v) => typeof v !== "string" || !v.trim())) throw new BadRequest(`问题 ${q.id} 的回答必须是字符串数组`);
+      if (!q.multiSelect && picked.length > 1) throw new BadRequest(`问题 ${q.id} 是单选`);
+      const labels = new Set(q.options.map((o) => o.label));
+      const other = picked.filter((v) => !labels.has(v));
+      if (other.length && !q.allowOther) throw new BadRequest(`问题 ${q.id} 只能从候选项中选择`);
+      clean[q.id] = picked.map((v) => v.trim().slice(0, 300));
+    }
+    pending.resolve(clean);
+  }
+
   cancel(id: string): void {
     this.running.get(id)?.abort();
   }
@@ -156,11 +179,13 @@ export class SessionHub {
           onEvent: (e: AgentEvent) => {
             if (e.kind !== "ok") void this.emit(id, { type: e.kind, text: e.text });
           },
-          authorize: (tool, args) => this.requestApproval(id, tool.name, tool.source, args),
+          authorize: (tool, args) => this.waitFor(meta, this.requestApproval(id, tool.name, tool.source, args)),
+          clarify: (questions) => this.waitFor(meta, this.requestClarify(id, questions)),
         },
       );
       await writeAtomic(this.file(id, "messages.json"), JSON.stringify(result.messages));
       if (result.summary) meta.summary = result.summary;
+      if (result.gaps.length) await this.emit(id, { type: "gaps", gaps: result.gaps });
       if (result.page) {
         meta.slug = result.page.slug;
         meta.title = result.page.title;
@@ -175,7 +200,40 @@ export class SessionHub {
     } finally {
       this.running.delete(id);
       for (const [slug, holder] of this.editing) if (holder === id) this.editing.delete(slug);
+      for (const q of this.questions.values()) if (q.sessionId === id) q.resolve(null);
+      this.pendingCount.delete(id);
     }
+  }
+
+  /** 等待店长期间把状态切到 waiting，全部处理完再切回 running。 */
+  private async waitFor<T>(meta: SessionMeta, pending: Promise<T>): Promise<T> {
+    const n = (this.pendingCount.get(meta.id) ?? 0) + 1;
+    this.pendingCount.set(meta.id, n);
+    if (n === 1) await this.setStatus(meta, "waiting");
+    try {
+      return await pending;
+    } finally {
+      const left = (this.pendingCount.get(meta.id) ?? 1) - 1;
+      this.pendingCount.set(meta.id, left);
+      if (left === 0 && this.running.has(meta.id)) await this.setStatus(meta, "running");
+    }
+  }
+
+  private requestClarify(sessionId: string, questions: ClarifyQuestion[]): Promise<ClarifyAnswers | null> {
+    const requestId = randomUUID();
+    const round = (this.rounds.get(sessionId) ?? 0) + 1;
+    this.rounds.set(sessionId, round);
+    return new Promise((resolve) => {
+      const done = (answers: ClarifyAnswers | null) => {
+        clearTimeout(timer);
+        if (!this.questions.delete(requestId)) return;
+        void this.emit(sessionId, { type: "question_answered", requestId, answers });
+        resolve(answers);
+      };
+      const timer = setTimeout(() => done(null), QUESTION_TIMEOUT_MS);
+      this.questions.set(requestId, { sessionId, questions, resolve: done });
+      void this.emit(sessionId, { type: "question_required", requestId, round, questions });
+    });
   }
 
   private requestApproval(sessionId: string, tool: string, source: string, args: JsonObject): Promise<boolean> {
@@ -214,3 +272,4 @@ export class SessionHub {
 
 export class NotFound extends Error {}
 export class Conflict extends Error {}
+export class BadRequest extends Error {}

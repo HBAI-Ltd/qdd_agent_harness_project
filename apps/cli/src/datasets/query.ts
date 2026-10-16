@@ -39,6 +39,55 @@ export interface AggregateArgs extends AggSpec {
   join?: JoinArg[];
 }
 
+const AGG_KEYS = new Set(["dataset", "filter", "groupBy", "time", "metrics", "window", "sort", "limit", "keymap", "join"]);
+const FILTER_OPS = new Set(["=", "!=", ">", ">=", "<", "<=", "in", "not_in", "contains"]);
+const BUCKETS = new Set(["hour", "day", "week", "month"]);
+const WINDOW_OPS = new Set(["cumsum", "rolling_mean", "rolling_sum", "pct_change", "diff", "rank", "share"]);
+
+/** 严格校验：未知字段/写法直接报错并给出正确写法，避免静默忽略。 */
+async function validateAggregate(ctx: QueryContext, args: AggregateArgs): Promise<void> {
+  const errors: string[] = [];
+  for (const k of Object.keys(args)) if (!AGG_KEYS.has(k)) errors.push(`未知参数 ${k}（可用：${[...AGG_KEYS].join(", ")}）`);
+  const m = await ctx.store.get(args.dataset);
+  if (!m) throw new Error(`数据集 ${args.dataset} 不存在，见 store__list_datasets`);
+  const fields = new Set(Object.keys(m.fields));
+  for (const list of [args.join ?? []]) {
+    for (const j of list) {
+      const right = await ctx.store.get(j.dataset);
+      if (!right) errors.push(`join 数据集 ${j.dataset} 不存在`);
+      else for (const f of j.fields ?? Object.keys(right.fields)) fields.add(f);
+    }
+  }
+  const field = (f: unknown, where: string) => {
+    if (typeof f !== "string" || !fields.has(f)) errors.push(`${where}：字段 ${String(f)} 不存在（可用：${[...fields].join(", ")}）`);
+  };
+  if (!Array.isArray(args.metrics) || !args.metrics.length) errors.push("metrics 不能为空");
+  for (const g of args.groupBy ?? []) field(g, "groupBy");
+  for (const f of args.filter ?? []) {
+    if (!Array.isArray(f) || f.length !== 3) errors.push(`filter 每项应为 [字段, 操作, 值]，收到 ${JSON.stringify(f)}`);
+    else {
+      field(f[0], "filter");
+      if (!FILTER_OPS.has(f[1] as string)) errors.push(`filter 操作 ${String(f[1])} 不支持（可用：${[...FILTER_OPS].join(" ")}）`);
+    }
+  }
+  if (args.time) {
+    field(args.time.field, "time.field");
+    if (!BUCKETS.has(args.time.bucket)) errors.push(`time.bucket 应为 hour/day/week/month`);
+  }
+  const outputs = new Set<string>([...(args.groupBy ?? []), ...(args.metrics ?? []), ...(args.time ? ["bucket"] : [])]);
+  for (const w of args.window ?? []) {
+    if (!WINDOW_OPS.has(w.op)) errors.push(`window.op ${String(w.op)} 不支持（可用：${[...WINDOW_OPS].join(" ")}）`);
+    outputs.add(w.as ?? `${w.metric}_${w.op}`);
+  }
+  for (const s of args.sort ?? []) {
+    const raw = s as unknown as Record<string, unknown>;
+    if (typeof raw.by !== "string" || Object.keys(raw).some((k) => k !== "by" && k !== "desc")) {
+      errors.push(`sort 每项应为 {"by": 输出列, "desc": true|false}，收到 ${JSON.stringify(s)}`);
+    } else if (!outputs.has(raw.by)) errors.push(`sort.by ${raw.by} 不是输出列（可用：${[...outputs].join(", ")}）`);
+  }
+  if (errors.length) throw new Error(`聚合描述有误：\n- ${errors.join("\n- ")}`);
+}
+
 async function enrich(ctx: QueryContext, rows: Row[], keymap: KeymapArg[] = [], joins: JoinArg[] = []): Promise<Row[]> {
   for (const k of keymap) rows = mapKeys(rows, await readAll(ctx.store, k.dataset), k.field);
   for (const j of joins) rows = join(rows, await readAll(ctx.store, j.dataset), j);
@@ -46,6 +95,7 @@ async function enrich(ctx: QueryContext, rows: Row[], keymap: KeymapArg[] = [], 
 }
 
 export async function queryAggregate(ctx: QueryContext, args: AggregateArgs): Promise<Row[]> {
+  await validateAggregate(ctx, args);
   const rows = await readAll(ctx.store, args.dataset, { from: args.time?.from, to: args.time?.to });
   return aggregate(await enrich(ctx, rows, args.keymap, args.join), args, await ctx.metrics());
 }

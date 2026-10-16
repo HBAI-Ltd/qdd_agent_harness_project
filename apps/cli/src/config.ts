@@ -11,6 +11,7 @@ export const DEFAULT_CONFIG: HarnessConfig = {
     model: "deepseek-chat",
     apiKeyEnv: "DEEPSEEK_API_KEY",
     maxSteps: 40,
+    clarify: "required",
   },
   gateway: { host: "127.0.0.1", port: 5173, tokenEnv: "QDD_GATEWAY_TOKEN", corsOrigins: [] },
   cdnAllowlist: [

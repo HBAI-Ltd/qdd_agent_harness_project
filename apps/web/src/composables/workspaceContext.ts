@@ -1,5 +1,6 @@
 import { inject, type InjectionKey, type Ref } from "vue";
 import type { useWorkspace } from "./useWorkspace";
+import type { useComposer } from "./useComposer";
 import type { Overview, PendingItem, Skill } from "@qdd/shared";
 import type { GatewayResource } from "./useGatewayResource";
 
@@ -11,6 +12,7 @@ export interface WorkspaceContext {
   pending: GatewayResource<PendingItem[]>;
   draft: Ref<string>;
   submitMessage: () => Promise<boolean>;
+  composer: ReturnType<typeof useComposer>;
   notify: (message: string) => void;
   navigation: {
     openConversation: () => Promise<void>;

@@ -29,6 +29,8 @@ const paths: Record<string, string> = {
   moon: "M20 15A9 9 0 0 1 9 3a9 9 0 1 0 11 12Z",
   stop: "M6 6h12v12H6Z",
   folder: "M3 6h7l2 3h9v12H3ZM3 6V3h7l2 3h7v3",
+  clip: "m21 11-8.5 8.5a5 5 0 0 1-7-7L14 4a3.5 3.5 0 0 1 5 5l-8.5 8.5a2 2 0 0 1-3-3L15 7",
+  file: "M14 3H6v18h12V7ZM14 3v4h4",
 };
 </script>
 

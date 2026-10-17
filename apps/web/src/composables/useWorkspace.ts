@@ -107,6 +107,14 @@ export function useWorkspace() {
       };
     }
     gatewayUrl.value = localStorage.getItem(GATEWAY_KEY) || __DEV_GATEWAY_URL__ || api.DEFAULT_GATEWAY_URL;
+    // 开发时网关与前端同机：主机名跟随当前访问地址，否则任务页面 iframe 属跨站，页面 cookie 不会带上。
+    if (import.meta.env.DEV) {
+      try {
+        const url = new URL(gatewayUrl.value);
+        url.hostname = window.location.hostname;
+        gatewayUrl.value = url.origin;
+      } catch { /* 保留原地址，由连接设置提示错误。 */ }
+    }
   } catch {
     // 浏览器禁用存储时仍可在当前页面设置连接与偏好。
   }
@@ -484,7 +492,7 @@ export function useWorkspace() {
     }
   }
 
-  async function sendMessage(content: string, options: Pick<CreateWishBody, "skillId"> = {}): Promise<boolean> {
+  async function sendMessage(content: string, options: Pick<CreateWishBody, "skillId" | "model"> & { attachments?: api.AttachmentRef[] } = {}): Promise<boolean> {
     const text = content.trim();
     if (!text || sending.value || loadingSession.value || disposed) return false;
     if (!connected.value) {
@@ -513,16 +521,20 @@ export function useWorkspace() {
     sendRequests.set(target, request);
     pendingSends.value.add(target);
     pendingMessages.value.set(target, {
-      event: { type: "user", text, at: new Date().toISOString() },
+      event: { type: "user", text, ...(options.attachments?.length ? { attachments: options.attachments } : {}), at: new Date().toISOString() },
       cursor: activeSession.value?.events.length ?? 0,
     });
     error.value = "";
+    const extra = {
+      ...(options.attachments?.length ? { attachments: options.attachments.map((a) => a.id) } : {}),
+      ...(options.model ? { model: options.model } : {}),
+    };
     try {
       const meta = id
-        ? await api.sendMessage(gatewayUrl.value, token.value, id, text, controller.signal)
+        ? await api.sendMessage(gatewayUrl.value, token.value, id, text, controller.signal, extra)
         : await api.createWish(gatewayUrl.value, token.value, {
           wish: text, ...(revisionPageSlug.value ? { slug: revisionPageSlug.value } : {}),
-          ...(options.skillId ? { skillId: options.skillId } : {}),
+          ...(options.skillId ? { skillId: options.skillId } : {}), ...extra,
         }, controller.signal);
       if (controller.signal.aborted || disposed) return false;
       // Keep the identity even if the following detail/SSE request fails.
@@ -670,6 +682,6 @@ export function useWorkspace() {
     preferences, token, gatewayUrl, loadingSessions, loadingPages, loadingSession,
     error, connected, gatewayChanges, sending, responding, pendingMessage, canCancel, cancelling, eventActionBusy, pendingPagePins,
     loadWorkspace, openConversation, selectSession, startNewConversation,
-    sendMessage, answerQuestions, resolveApproval, cancel, revisePage, setPagePinned,
+    sendMessage, answerQuestions, resolveApproval, cancel, revisePage, setPagePinned, applyResponseMeta,
   };
 }

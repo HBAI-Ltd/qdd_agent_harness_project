@@ -4,7 +4,7 @@ import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, before, describe, test } from "node:test";
-import type { PageView, SessionDetail, SessionMeta } from "@qdd/shared";
+import type { AttachmentRef, ModelCatalog, PageView, SessionDetail, SessionMeta } from "@qdd/shared";
 import { runWish } from "./agent/agent.js";
 import type { ChatFn, ChatMessage } from "./agent/llm.js";
 import { loadConfig, type LoadedConfig } from "./config.js";
@@ -617,6 +617,54 @@ describe("gateway", () => {
     assert.equal(end.status, "error");
     const detail = await hub.detail(meta.id);
     assert.equal(detail.events.filter((e) => e.type === "error").at(-1)?.type === "error" && (detail.events.filter((e) => e.type === "error").at(-1) as { message: string }).message, "已取消");
+  });
+
+  test("附件：任意扩展名与文件夹路径，模型按需读取；切换模型下一轮生效", async () => {
+    const catalog = (await (await api("/api/models")).json()) as ModelCatalog;
+    assert.equal(catalog.default, catalog.models[0]!.id);
+
+    const upload = (name: string, body: string | Uint8Array) =>
+      api("/api/attachments", { method: "POST", body, headers: { "Content-Type": "application/octet-stream", "X-File-Name": encodeURIComponent(name) } });
+    assert.equal((await upload("../escape.txt", "x")).status, 400);
+    const csv = (await (await upload("报表/9月/销售.csv", "日期,销售额\n2026-09-01,1200\n")).json()) as AttachmentRef;
+    assert.equal(csv.path, "报表/9月/销售.csv");
+    assert.equal(csv.mime, "text/csv");
+    const bin = (await (await upload("模型.blend", new Uint8Array([0, 1, 2, 255]))).json()) as AttachmentRef;
+    assert.equal((await (await api(`/api/attachments/${csv.id}`)).text()), "日期,销售额\n2026-09-01,1200\n");
+
+    const models: (string | undefined)[] = [];
+    const hub = gateway.hub as unknown as { chat: (model?: string) => ChatFn };
+    const original = hub.chat;
+    hub.chat = (model) => {
+      models.push(model);
+      return chat;
+    };
+    try {
+      script.push(call("read_attachment", { id: csv.id }), call("read_attachment", { id: bin.id }), call("reply", { text: "9 月 1 日销售额 1200", gaps: [] }));
+      const unknown = await api("/api/wishes", { method: "POST", body: JSON.stringify({ wish: "看看", model: "nope" }) });
+      assert.equal(unknown.status, 400);
+      const meta = (await (await api("/api/wishes", { method: "POST", body: JSON.stringify({ wish: "看看附件", attachments: [csv.id, bin.id], model: catalog.default }) })).json()) as SessionMeta;
+      await gateway.hub.wait(meta.id);
+      const turn = seen.at(-1)!;
+      assert.match(String(turn.find((m) => m.role === "user")?.content), new RegExp(`id=${csv.id}`));
+      const results = turn.filter((m) => m.role === "tool").map((m) => String(m.content));
+      assert.ok(results.some((r) => r.includes("2026-09-01,1200")));
+      assert.ok(results.some((r) => r.includes("二进制")));
+      const detail = (await (await api(`/api/sessions/${meta.id}`)).json()) as SessionDetail;
+      const user = detail.events.find((e) => e.type === "user");
+      assert.deepEqual(user?.type === "user" ? user.attachments?.map((a) => a.path) : [], ["报表/9月/销售.csv", "模型.blend"]);
+      assert.equal(detail.model, catalog.default);
+
+      assert.equal((await api(`/api/sessions/${meta.id}/model`, { method: "PUT", body: JSON.stringify({ model: "nope" }) })).status, 400);
+      const switched = (await (await api(`/api/sessions/${meta.id}/model`, { method: "PUT", body: JSON.stringify({ model: catalog.default }) })).json()) as SessionMeta;
+      assert.equal(switched.model, catalog.default);
+      script.push(call("reply", { text: "好的", gaps: [] }));
+      await api(`/api/sessions/${meta.id}/messages`, { method: "POST", body: JSON.stringify({ text: "继续" }) });
+      await gateway.hub.wait(meta.id);
+      assert.deepEqual(models, [catalog.default, catalog.default]);
+    } finally {
+      hub.chat = original;
+    }
   });
 
   test("风格提示词接口", async () => {

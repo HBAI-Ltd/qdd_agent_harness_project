@@ -20,6 +20,7 @@ const controlsUrl = "data:text/javascript," + encodeURIComponent(`
     props: ["nativeType", "disabled"],
     setup: (props, { attrs, slots }) => () => h("button", { ...attrs, type: props.nativeType || "button", disabled: props.disabled }, slots.default?.()),
   };
+  export const ElSelect = { setup: (_, { slots }) => () => h("select", slots.default?.()) };
   export const ElCard = { setup: (_, { slots }) => () => h("div", slots.default?.()) };
   export const ElInput = {
     inheritAttrs: false,
@@ -47,12 +48,21 @@ const browserUrl = "data:text/javascript," + encodeURIComponent(`
     }, [h("button", { "aria-label": "关闭实时浏览器画面", onClick: () => emit("close") }, "关闭")]),
   };
 `);
+const workspaceApiUrl = "data:text/javascript," + encodeURIComponent(`
+  export async function downloadAttachment() { return new Blob(); }
+`);
+const composerUrl = "data:text/javascript," + encodeURIComponent(`
+  export async function filesFromDrop() { return []; }
+  export function filesFromInput() { return []; }
+`);
 registerHooks({
   resolve(specifier, context, nextResolve) {
     if (context.parentURL?.startsWith("data:text/javascript,")) {
       if (specifier === "vue") return { url: vueUrl, shortCircuit: true };
       if (specifier === "element-plus") return { url: controlsUrl, shortCircuit: true };
       if (specifier === "@/composables/workspaceContext") return { url: contextUrl, shortCircuit: true };
+      if (specifier === "@/api/workspace") return { url: workspaceApiUrl, shortCircuit: true };
+      if (specifier === "@/composables/useComposer") return { url: composerUrl, shortCircuit: true };
       if (specifier === "@/utils/markdown") return { url: markdownUrl, shortCircuit: true };
       if (specifier === "@/utils/chatTimeline") return { url: timelineUrl, shortCircuit: true };
       if (specifier === "@/components/SessionBrowser.vue") return { url: browserUrl, shortCircuit: true };
@@ -105,6 +115,7 @@ async function mount(initialSession, sendResult = async () => true) {
     canCancel: ref(false),
     cancelling: ref(false),
     eventActionBusy: ref(false),
+    liveBlocks: ref({ sessionId: null, blocks: {} }),
     answerQuestions() {},
     resolveApproval() {},
     async cancel() { calls.cancel++; workspace.cancelling.value = true; },
@@ -132,6 +143,10 @@ async function mount(initialSession, sendResult = async () => true) {
     workspace,
     draft,
     submitMessage,
+    composer: {
+      attachments: ref([]), uploading: ref(false), ready: ref([]), catalog: ref(null), currentModel: ref(undefined),
+      selectModel() {}, addFiles() {}, removeAttachment() {}, removeFolder() {},
+    },
     notify() {},
     navigation: { openPage() {}, openView() {} },
   });

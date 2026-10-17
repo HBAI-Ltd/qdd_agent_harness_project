@@ -25,6 +25,45 @@ export interface McpServerConfig {
   allowWrite?: boolean;
 }
 
+export interface ModelConfig {
+  /** 选择用的唯一 id（会话记录此值） */
+  id: string;
+  /** 展示名；缺省为 model */
+  label?: string;
+  /** 提供方分组名，如 DeepSeek */
+  provider?: string;
+  model: string;
+  baseUrl?: string;
+  apiKeyEnv?: string;
+  maxTokens?: number;
+  thinking?: "enabled" | "disabled";
+}
+
+/** 前端可选的模型目录（不含密钥与地址）。 */
+export interface ModelOption {
+  id: string;
+  label: string;
+  provider: string;
+  model: string;
+  /** 对应的 API Key 环境变量是否已配置 */
+  available: boolean;
+}
+
+export interface ModelCatalog {
+  models: ModelOption[];
+  default: string;
+}
+
+/** 会话附件引用（任意扩展名；文件夹上传时 path 保留目录结构）。 */
+export interface AttachmentRef {
+  id: string;
+  name: string;
+  /** 相对路径，如 报表/2026-09/销售.csv */
+  path: string;
+  size: number;
+  mime: string;
+}
+
 export interface HarnessConfig {
   /** 工作区目录（风格提示词、门店数据、页面、会话），相对仓库根目录。 */
   workspace: string;
@@ -39,6 +78,8 @@ export interface HarnessConfig {
     clarify: "required" | "auto" | "off";
     /** 思考模式：enabled 时请求 thinking 并以 reasoning_content 流式返回思考过程 */
     thinking: "enabled" | "disabled";
+    /** 可切换的模型；缺省只有上面这一个。未填写的字段沿用上面的默认值。 */
+    models?: ModelConfig[];
   };
   /** 授权请求等待店长处理的时长（分钟），超时视为拒绝；工作台可集中处理。 */
   approvalTimeoutMin: number;
@@ -227,6 +268,8 @@ export interface SessionMeta {
   status: SessionStatus;
   /** 会话来源：缺省为店长发起；定时任务触发时记录任务 id。 */
   origin?: { kind: "schedule"; scheduleId: string; scheduleName: string };
+  /** 选择的模型 id；缺省用默认模型。下一轮起生效。 */
+  model?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -259,7 +302,7 @@ export type AssistantPart =
 
 export type SessionEvent = At &
   (
-    | { type: "user"; text: string }
+    | { type: "user"; text: string; attachments?: AttachmentRef[] }
     | { type: "status"; status: SessionStatus }
     | { type: "say"; text: string }
     | AssistantBlockEvent
@@ -287,10 +330,20 @@ export interface CreateWishBody {
   slug?: string;
   /** 预先加载的技能（名称或 id） */
   skillId?: string;
+  /** 已上传附件的 id */
+  attachments?: string[];
+  /** 模型 id */
+  model?: string;
 }
 
 export interface SendMessageBody {
   text: string;
+  attachments?: string[];
+  model?: string;
+}
+
+export interface SelectModelBody {
+  model: string;
 }
 
 export interface ApprovalBody {
@@ -465,6 +518,24 @@ export interface ConnectorView {
   config: Record<string, string | boolean>;
   lastVerifiedAt: string | null;
   createdAt: string | null;
+}
+
+// ---------------------------------------------------------------- 摄像头云账号
+
+/** haik：海康互联（短信 + 人机验证）；tysl：天翼视联（官方登录页授权） */
+export type CameraProvider = "haik" | "tysl";
+
+export interface CameraAccountStatus {
+  provider: CameraProvider;
+  name: string;
+  /** harness.config.json 的 mcpServers 中是否配置了同名服务 */
+  configured: boolean;
+  /** 本地服务是否可访问 */
+  reachable: boolean;
+  connected: boolean;
+  /** 脱敏后的账号，如 138****0000 */
+  account?: string;
+  detail?: string;
 }
 
 // ---------------------------------------------------------------- 浏览器（实时画面）

@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { appendFile, readdir, readFile } from "node:fs/promises";
 import path from "node:path";
-import type { ClarifyAnswers, ClarifyQuestion, JsonObject, PendingItem, SessionDetail, SessionEvent, SessionMeta } from "@qdd/shared";
+import type { AttachmentRef, ClarifyAnswers, ClarifyQuestion, JsonObject, PendingItem, SessionDetail, SessionEvent, SessionMeta } from "@qdd/shared";
 import { runWish, WishError, type AgentEvent } from "./agent/agent.js";
 import type { ChatFn, ChatMessage } from "./agent/llm.js";
+import { AttachmentStore } from "./attachments.js";
 import type { LoadedConfig } from "./config.js";
 import type { DataSources } from "./datasource/registry.js";
 import type { Workbench } from "./workbench/index.js";
@@ -31,6 +32,15 @@ export interface CreateOptions {
   skillId?: string | undefined;
   /** 无人值守（定时任务）：不提问，授权仍进入工作台待办 */
   unattended?: boolean;
+  attachments?: AttachmentRef[] | undefined;
+  /** 模型 id；缺省用默认模型 */
+  model?: string | undefined;
+}
+
+export interface SendOptions {
+  attachments?: AttachmentRef[] | undefined;
+  /** 切换模型，本轮起生效 */
+  model?: string | undefined;
 }
 
 export class SessionHub {
@@ -47,13 +57,16 @@ export class SessionHub {
   private readonly rounds = new Map<string, number>();
   private readonly listeners = new Map<string, Set<(e: SessionEvent) => void>>();
   private readonly metaListeners = new Set<(meta: SessionMeta) => void>();
+  readonly attachments: AttachmentStore;
 
   constructor(
     private readonly loaded: LoadedConfig,
     private readonly sources: DataSources,
-    private readonly chat: () => ChatFn,
+    private readonly chat: (model?: string) => ChatFn,
     private readonly workbench?: Workbench,
-  ) {}
+  ) {
+    this.attachments = new AttachmentStore(loaded.paths.attachments);
+  }
 
   private file(id: string, kind: "meta.json" | "events.jsonl" | "messages.json") {
     if (!ID_RE.test(id)) throw new NotFound("会话不存在");
@@ -146,13 +159,14 @@ export class SessionHub {
       slug: opts.slug ?? null,
       status: "idle",
       ...(opts.origin ? { origin: opts.origin } : {}),
+      ...(opts.model ? { model: opts.model } : {}),
       createdAt: now,
       updatedAt: now,
     };
     await this.saveMeta(meta);
     if (opts.unattended) this.unattended.add(meta.id);
     try {
-      await this.start(meta, wish, skill?.id);
+      await this.start(meta, wish, opts.attachments ?? [], skill?.id);
     } catch (error) {
       this.unattended.delete(meta.id);
       throw error;
@@ -161,11 +175,22 @@ export class SessionHub {
   }
 
   /** 许愿之后在同一会话里继续对话。 */
-  async send(id: string, text: string): Promise<SessionMeta> {
+  async send(id: string, text: string, options: SendOptions = {}): Promise<SessionMeta> {
     const meta = await this.meta(id);
     if (this.running.has(id)) throw new Conflict("会话正在运行，请等待完成");
-    await this.start(meta, text);
+    if (options.model) meta.model = options.model;
+    await this.start(meta, text, options.attachments ?? []);
     return this.meta(id);
+  }
+
+  /** 切换会话模型；运行中的一轮保持原模型，下一轮起生效。 */
+  async selectModel(id: string, model: string): Promise<SessionMeta> {
+    const meta = await this.meta(id);
+    meta.model = model;
+    meta.updatedAt = new Date().toISOString();
+    await this.saveMeta(meta);
+    for (const l of this.metaListeners) l({ ...meta });
+    return meta;
   }
 
   approve(id: string, requestId: string, approved: boolean): void {
@@ -207,8 +232,8 @@ export class SessionHub {
     return this.meta(id);
   }
 
-  private async start(meta: SessionMeta, text: string, skillId?: string): Promise<void> {
-    const chat = this.chat(); // 缺少 API key 时在这里同步报错
+  private async start(meta: SessionMeta, text: string, attachments: AttachmentRef[], skillId?: string): Promise<void> {
+    const chat = this.chat(meta.model); // 缺少 API key 时在这里同步报错
     if (meta.slug) {
       const holder = this.editing.get(meta.slug);
       if (holder && holder !== meta.id) throw new Conflict(`页面 ${meta.slug} 正在被会话 ${holder} 修改`);
@@ -216,12 +241,12 @@ export class SessionHub {
     }
     const controller = new AbortController();
     this.running.set(meta.id, controller);
-    await this.emit(meta.id, { type: "user", text });
+    await this.emit(meta.id, { type: "user", text, ...(attachments.length ? { attachments } : {}) });
     await this.setStatus(meta, "running");
-    void this.run(meta, text, chat, controller, skillId);
+    void this.run(meta, text, attachments, chat, controller, skillId);
   }
 
-  private async run(meta: SessionMeta, text: string, chat: ChatFn, controller: AbortController, skillId?: string): Promise<void> {
+  private async run(meta: SessionMeta, text: string, attachments: AttachmentRef[], chat: ChatFn, controller: AbortController, skillId?: string): Promise<void> {
     const id = meta.id;
     try {
       let history: ChatMessage[] = [];
@@ -234,7 +259,7 @@ export class SessionHub {
         this.loaded,
         this.sources,
         chat,
-        { wish: text, sessionId: id, slug: meta.slug ?? undefined, history, skillId, workbench: this.workbench },
+        { wish: text, sessionId: id, slug: meta.slug ?? undefined, history, skillId, workbench: this.workbench, attachments, attachmentStore: this.attachments },
         {
           signal: controller.signal,
           onEvent: (e: AgentEvent) => {

@@ -9,6 +9,7 @@ import type { BrowserStreamEvent, PendingItem, SessionMeta } from "@qdd/shared";
 import type { ChatFn, ChatMessage } from "./agent/llm.js";
 import { loadConfig } from "./config.js";
 import { DataSources } from "./datasource/registry.js";
+import { BrowserService } from "./browser/index.js";
 import { startGateway, type Gateway } from "./gateway/server.js";
 import { ensureWorkspace } from "./web/site.js";
 
@@ -21,6 +22,10 @@ const CHROME = [
 ].find((p) => existsSync(p));
 
 const TOKEN = "test-gateway-token-0123456789";
+const FORM = `<!doctype html><html><head><title>筛选</title></head><body>
+<label>品类 <select aria-label="品类" onchange="document.getElementById('o').textContent='已选 '+this.value"><option value="蔬菜">蔬菜</option><option value="水果">水果</option></select></label>
+<button style="width:0;height:0;padding:0;border:0;overflow:hidden">零尺寸</button>
+<p id="o">未选择</p></body></html>`;
 const PAGE = `<!doctype html><html><head><title>竞品价格</title></head><body>
 <h1>城南生鲜 · 今日特价</h1>
 <label>搜索商品 <input id="q" aria-label="搜索商品"></label>
@@ -61,7 +66,7 @@ describe("浏览器工具（本机 Chrome）", { skip: CHROME ? false : "未找�
   };
 
   before(async () => {
-    site = createServer((_req, res) => res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" }).end(PAGE));
+    site = createServer((req, res) => res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" }).end(req.url === "/form" ? FORM : PAGE));
     await new Promise<void>((r) => site.listen(0, "127.0.0.1", r));
     siteUrl = `http://127.0.0.1:${(site.address() as { port: number }).port}/`;
     const root = await mkdtemp(path.join(tmpdir(), "qdd-browser-"));
@@ -147,5 +152,29 @@ describe("浏览器工具（本机 Chrome）", { skip: CHROME ? false : "未找�
     assert.equal(after.url, siteUrl);
     assert.equal((await api(`/api/browser/${state.browserSessionId}/input`, { method: "POST", body: JSON.stringify({ tabId: state.tabId, type: "navigate", url: "file:///etc/passwd" }) })).status, 400);
     controller.abort();
+  });
+
+  test("回归：点击下拉选项会选中；不可点击（零尺寸）的元素限时报错且不关闭会话；参数错误给出可读提示", { timeout: 60_000 }, async () => {
+    const service = gateway.workbench.browser as BrowserService;
+    const owner = "00000000-0000-0000-0000-0000000000b1";
+    const text = (r: Awaited<ReturnType<BrowserService["execute"]>>) => r.content.map((c) => (c.type === "text" ? c.text : "")).join("");
+    await service.execute(owner, { action: "open", url: `${siteUrl}form` });
+    const snap = JSON.parse(text(await service.execute(owner, { action: "snapshot" }))) as { snapshot: string };
+    const ref = (pattern: RegExp) => /\[(r\d+_\d+)\]/.exec(snap.snapshot.split("\n").find((l) => pattern.test(l)) ?? "")?.[1];
+    const fruit = ref(/option "水果"/) ?? ref(/MenuListOption "水果"|"水果"/);
+    assert.ok(fruit, snap.snapshot);
+    await service.execute(owner, { action: "click", ref: fruit });
+    assert.match(text(await service.execute(owner, { action: "read" })), /已选 水果/);
+
+    const covered = ref(/button "零尺寸"/);
+    assert.ok(covered, snap.snapshot);
+    const started = Date.now();
+    await assert.rejects(service.execute(owner, { action: "click", ref: covered }), /8 秒内不可点击/);
+    assert.ok(Date.now() - started < 20_000);
+    // 会话仍在，可以继续操作
+    assert.match(text(await service.execute(owner, { action: "read" })), /已选 水果/);
+
+    await assert.rejects(service.execute(owner, { action: "pressKey", key: "Enter", ref: covered }), /browser 参数错误：.*ref/);
+    await service.closeSession(owner);
   });
 });

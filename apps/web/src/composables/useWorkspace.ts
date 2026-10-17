@@ -51,14 +51,26 @@ export function useWorkspace() {
   const gatewayChanges = ref({ overview: 0, pending: 0, skills: 0, schedules: 0, connectors: 0 });
   const selectionVersion = ref(0);
   const pendingSends = ref(new Set<string>());
+  const pendingMessages = ref(new Map<string, { event: Extract<SessionEvent, { type: "user" }>; cursor: number }>());
+  const pendingStops = ref(new Set<string>());
   const pendingCancellations = ref(new Set<string>());
   const pendingActions = ref(new Set<string>());
   const sendTarget = () => activeSessionId.value ?? `draft:${selectionVersion.value}`;
   const pendingSend = computed(() => pendingSends.value.has(sendTarget()));
   const conversationStatus = computed(() => activeSession.value?.status
     ?? sessions.value.find((session) => session.id === activeSessionId.value)?.status);
-  const sending = computed(() => pendingSend.value || conversationStatus.value === "running" || conversationStatus.value === "waiting");
-  const cancelling = computed(() => !!activeSessionId.value && pendingCancellations.value.has(activeSessionId.value));
+  const responding = computed(() => pendingSend.value || conversationStatus.value === "running");
+  const cancelling = computed(() => pendingStops.value.has(sendTarget())
+    || (!!activeSessionId.value && pendingCancellations.value.has(activeSessionId.value)));
+  const sending = computed(() => responding.value || conversationStatus.value === "waiting" || cancelling.value);
+  const canCancel = computed(() => pendingSend.value || conversationStatus.value === "running" || conversationStatus.value === "waiting");
+  const pendingMessage = computed(() => {
+    const pending = pendingMessages.value.get(sendTarget());
+    if (!pending) return undefined;
+    const received = activeSession.value?.events.slice(pending.cursor)
+      .some((event) => event.type === "user" && event.text === pending.event.text);
+    return received ? undefined : pending.event;
+  });
   const eventActionBusy = computed(() => !!activeSessionId.value && pendingActions.value.has(activeSessionId.value));
   let disposed = false;
   let connectionVersion = 0;
@@ -68,6 +80,7 @@ export function useWorkspace() {
   let globalController: AbortController | undefined;
   let sessionController: AbortController | undefined;
   const sendControllers = new Set<AbortController>();
+  const sendRequests = new Map<string, { stopRequested: boolean; sessionId: string | undefined; signal: AbortSignal }>();
   const actionControllers = new Set<AbortController>();
   const reconnectingStreams = new Set<AbortController>();
   let conversationStorage: Storage | undefined;
@@ -119,6 +132,9 @@ export function useWorkspace() {
     loadingPages.value = false;
     loadingSession.value = false;
     pendingSends.value.clear();
+    pendingMessages.value.clear();
+    pendingStops.value.clear();
+    sendRequests.clear();
     pendingCancellations.value.clear();
     pendingActions.value.clear();
   }
@@ -139,6 +155,9 @@ export function useWorkspace() {
   }, { flush: "sync" });
 
   function applyMeta(meta: SessionMeta) {
+    const current = sessions.value.find((session) => session.id === meta.id);
+    if (current && current.updatedAt > meta.updatedAt) return;
+    if (meta.status === "idle" || meta.status === "error") pendingStops.value.delete(meta.id);
     const entry: SessionMeta = {
       id: meta.id, title: meta.title, summary: meta.summary, slug: meta.slug,
       status: meta.status, createdAt: meta.createdAt, updatedAt: meta.updatedAt,
@@ -239,14 +258,14 @@ export function useWorkspace() {
     const session = activeSession.value;
     if (!session || session.id !== id) return;
     session.events.push(event);
-    if (event.type === "status") session.status = event.status;
+    if (event.type === "status" && event.at >= session.updatedAt) session.status = event.status;
     if (event.type === "published") {
       session.slug = event.page.slug;
       session.title = event.page.title;
       if (revisionPageSlug.value === event.page.slug) revisionPageSlug.value = null;
       void refreshPages();
     }
-    session.updatedAt = event.at;
+    session.updatedAt = event.at > session.updatedAt ? event.at : session.updatedAt;
     applyMeta(session);
   }
 
@@ -270,6 +289,7 @@ export function useWorkspace() {
 
   async function selectSession(id: string): Promise<void> {
     if (!connected.value || disposed) return;
+    if (activeSessionId.value === id && activeSession.value?.id === id) return;
     const selection = ++selectionVersion.value;
     detailController?.abort();
     sessionController?.abort();
@@ -286,8 +306,9 @@ export function useWorkspace() {
     try {
       const detail = await api.getSession(gatewayUrl.value, token.value, id, controller.signal);
       if (controller.signal.aborted || disposed || selection !== selectionVersion.value) return;
-      activeSession.value = detail;
-      applyMeta(detail);
+      const current = sessions.value.find((session) => session.id === id);
+      activeSession.value = current && current.updatedAt > detail.updatedAt ? { ...detail, ...current } : detail;
+      applyResponseMeta(activeSession.value);
       sessionController = new AbortController();
       void followSession(id, sessionController);
     } catch (cause) {
@@ -353,7 +374,10 @@ export function useWorkspace() {
 
   async function loadWorkspace(): Promise<void> {
     if (disposed) return;
-    stopConnections();
+    // Refreshing history must not abort a POST that may already have created a session.
+    // Keep the current identity, pending sends, and live streams on an existing connection.
+    const refreshing = connected.value;
+    if (!refreshing) stopConnections();
     error.value = "";
     if (!token.value.trim()) {
       error.value = "请先填写网关 token。";
@@ -365,7 +389,9 @@ export function useWorkspace() {
       error.value = errorMessage(cause);
       return;
     }
+    workspaceController?.abort();
     const controller = new AbortController();
+    const sessionSnapshot = new Map(sessions.value.map((session) => [session.id, session.updatedAt]));
     workspaceController = controller;
     loadingSessions.value = true;
     loadingPages.value = true;
@@ -375,15 +401,32 @@ export function useWorkspace() {
         api.listPages(gatewayUrl.value, token.value, controller.signal),
       ]);
       if (controller.signal.aborted || disposed) return;
-      sessions.value = sessionList;
+      const previous = sessions.value;
+      sessions.value = sessionList.map((entry) => {
+        const current = previous.find((session) => session.id === entry.id);
+        return current && current.updatedAt > entry.updatedAt ? current : entry;
+      });
+      for (const entry of previous) {
+        if (!sessions.value.some((session) => session.id === entry.id)
+          && (!sessionSnapshot.has(entry.id) || sessionSnapshot.get(entry.id) !== entry.updatedAt
+            || pendingSends.value.has(entry.id))) applyResponseMeta(entry);
+      }
       pages.value = pageList;
       if (activePageSlug.value && !pageList.some((page) => page.slug === activePageSlug.value)) activePageSlug.value = null;
       connected.value = true;
-      globalController = new AbortController();
-      void followGateway(globalController);
-      const id = conversationSelection.choose(gatewayUrl.value, sessionList, activeSessionId.value);
+      if (!refreshing) {
+        globalController = new AbortController();
+        void followGateway(globalController);
+      }
+      if (pendingSend.value) return;
+      const selected = sessions.value.find((session) => session.id === activeSessionId.value);
+      if (selected) applyResponseMeta(selected);
+      const id = conversationSelection.choose(gatewayUrl.value, sessions.value, activeSessionId.value);
       if (id) await selectSession(id);
       else {
+        detailController?.abort();
+        sessionController?.abort();
+        if (sessionController) reconnectingStreams.delete(sessionController);
         activeSessionId.value = null;
         activeSession.value = undefined;
       }
@@ -420,8 +463,15 @@ export function useWorkspace() {
     const selection = selectionVersion.value;
     const target = sendTarget();
     const controller = new AbortController();
+    const request = { stopRequested: false, sessionId: undefined as string | undefined, signal: controller.signal };
+    let responseTarget = target;
     sendControllers.add(controller);
+    sendRequests.set(target, request);
     pendingSends.value.add(target);
+    pendingMessages.value.set(target, {
+      event: { type: "user", text, at: new Date().toISOString() },
+      cursor: activeSession.value?.events.length ?? 0,
+    });
     error.value = "";
     try {
       const meta = id
@@ -433,19 +483,41 @@ export function useWorkspace() {
       if (controller.signal.aborted || disposed) return false;
       // Keep the identity even if the following detail/SSE request fails.
       applyResponseMeta(meta);
+      responseTarget = meta.id;
+      request.sessionId = meta.id;
+      // Transfer the draft's pending state before exposing its new session identity.
+      pendingSends.value.add(meta.id);
+      sendRequests.set(meta.id, request);
+      const pending = pendingMessages.value.get(target);
+      if (pending) pendingMessages.value.set(meta.id, pending);
+      let cancellationError = "";
+      if (request.stopRequested) {
+        if (!await cancelSession(meta.id, controller.signal, selection)) cancellationError = error.value;
+        if (controller.signal.aborted || disposed) return false;
+      }
       if (selection === selectionVersion.value) {
         conversationSelection.remember(gateway, meta.id);
         activeSessionId.value = meta.id;
         revisionPageSlug.value = null;
         await selectSession(meta.id);
+        if (cancellationError && activeSessionId.value === meta.id) error.value = cancellationError;
       }
       return true;
     } catch (cause) {
+      if (sendRequests.get(target) === request) pendingMessages.value.delete(target);
+      if (sendRequests.get(responseTarget) === request) pendingMessages.value.delete(responseTarget);
       if (!controller.signal.aborted && !disposed && selection === selectionVersion.value) error.value = errorMessage(cause);
       return false;
     } finally {
       sendControllers.delete(controller);
-      if (!controller.signal.aborted) pendingSends.value.delete(target);
+      if (sendRequests.get(target) === request) sendRequests.delete(target);
+      if (sendRequests.get(responseTarget) === request) sendRequests.delete(responseTarget);
+      if (!controller.signal.aborted) {
+        pendingSends.value.delete(target);
+        pendingSends.value.delete(responseTarget);
+        if (target !== responseTarget || !request.stopRequested || !request.sessionId) pendingStops.value.delete(target);
+        if (target !== responseTarget) pendingMessages.value.delete(target);
+      }
     }
   }
 
@@ -460,7 +532,6 @@ export function useWorkspace() {
     try {
       await action(id, controller.signal);
       if (controller.signal.aborted || disposed) return false;
-      if (selection === selectionVersion.value) await selectSession(id);
       return true;
     } catch (cause) {
       if (!controller.signal.aborted && !disposed && selection === selectionVersion.value) error.value = errorMessage(cause);
@@ -479,26 +550,46 @@ export function useWorkspace() {
     return eventAction((id, signal) => api.resolveApproval(gatewayUrl.value, token.value, id, requestId, approved, signal));
   }
 
-  async function cancel(): Promise<boolean> {
-    const id = activeSessionId.value;
-    if (!id || !connected.value || cancelling.value || disposed) return false;
-    const selection = selectionVersion.value;
-    const controller = new AbortController();
-    actionControllers.add(controller);
+  async function cancelSession(id: string, signal: AbortSignal, selection: number): Promise<boolean> {
     pendingCancellations.value.add(id);
+    pendingStops.value.add(id);
     error.value = "";
     try {
-      const meta = await api.cancelSession(gatewayUrl.value, token.value, id, controller.signal);
-      if (controller.signal.aborted || disposed) return false;
+      const meta = await api.cancelSession(gatewayUrl.value, token.value, id, signal);
+      if (signal.aborted || disposed) return false;
       applyResponseMeta(meta);
-      if (selection === selectionVersion.value) await selectSession(id);
+      const latest = sessions.value.find((session) => session.id === id);
+      if (latest?.status === "idle" || latest?.status === "error") pendingStops.value.delete(id);
       return true;
     } catch (cause) {
-      if (!controller.signal.aborted && !disposed && selection === selectionVersion.value) error.value = errorMessage(cause);
+      if (!signal.aborted) pendingStops.value.delete(id);
+      if (!signal.aborted && !disposed && selection === selectionVersion.value) error.value = errorMessage(cause);
       return false;
     } finally {
+      if (!signal.aborted) pendingCancellations.value.delete(id);
+    }
+  }
+
+  async function cancel(): Promise<boolean> {
+    if (!connected.value || cancelling.value || disposed) return false;
+    const target = sendTarget();
+    const request = sendRequests.get(target);
+    if (request) {
+      // Aborting the creation request can orphan a real session. Cancel it once
+      // the server returns its identity, and keep submissions locked meanwhile.
+      request.stopRequested = true;
+      pendingStops.value.add(target);
+      if (request.sessionId) return cancelSession(request.sessionId, request.signal, selectionVersion.value);
+      return true;
+    }
+    const id = activeSessionId.value;
+    if (!id) return false;
+    const controller = new AbortController();
+    actionControllers.add(controller);
+    try {
+      return await cancelSession(id, controller.signal, selectionVersion.value);
+    } finally {
       actionControllers.delete(controller);
-      if (!controller.signal.aborted) pendingCancellations.value.delete(id);
     }
   }
 
@@ -513,7 +604,7 @@ export function useWorkspace() {
   return {
     sessions, activeSessionId, activeSession, pages, activePageSlug, activePage, revisionPageSlug,
     preferences, token, gatewayUrl, loadingSessions, loadingPages, loadingSession,
-    error, connected, gatewayChanges, sending, cancelling, eventActionBusy,
+    error, connected, gatewayChanges, sending, responding, pendingMessage, canCancel, cancelling, eventActionBusy,
     loadWorkspace, openConversation, selectSession, startNewConversation,
     sendMessage, answerQuestions, resolveApproval, cancel, revisePage,
   };

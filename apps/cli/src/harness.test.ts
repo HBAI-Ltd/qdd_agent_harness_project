@@ -13,6 +13,7 @@ import { refreshDatasets } from "./datasets/refresh.js";
 import { readAll } from "./datasets/store.js";
 import { startGateway, type Gateway } from "./gateway/server.js";
 import { checkFile } from "./guard.js";
+import { SessionHub } from "./sessions.js";
 import { ensureWorkspace, readPages, upsertPage } from "./web/site.js";
 
 const CDN = ["cdn.jsdelivr.net"];
@@ -98,6 +99,126 @@ const call = (name: string, args: object): ChatMessage => ({
   role: "assistant",
   content: null,
   tool_calls: [{ id: `c${n++}`, type: "function", function: { name, arguments: JSON.stringify(args) } }],
+});
+
+describe("session cancellation", () => {
+  let loaded: LoadedConfig;
+  let sources: DataSources;
+
+  before(async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "qdd-cancel-"));
+    loaded = await loadConfig(root);
+    await ensureWorkspace(loaded.paths);
+    sources = await DataSources.open(loaded);
+  });
+
+  after(async () => { await sources.close(); });
+
+  async function until<T>(read: () => Promise<T | undefined>): Promise<T> {
+    const deadline = Date.now() + 2000;
+    for (;;) {
+      const value = await read();
+      if (value !== undefined) return value;
+      if (Date.now() > deadline) throw new Error("等待取消状态超时");
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+
+  for (const kind of ["question", "approval"] as const) {
+    test(`cancelling a waiting ${kind} releases only that conversation and permits a follow-up`, async (t) => {
+      let writes = 0;
+      const tool = {
+        name: `cancel_test__write_${kind}`, description: "测试写入", inputSchema: { type: "object" },
+        source: "test", mutating: true, preauthorized: false,
+        call: async () => { writes++; return "已写入"; },
+      };
+      sources.tools.push(tool);
+      t.after(() => { sources.tools.splice(sources.tools.indexOf(tool), 1); });
+      let calls = 0;
+      const chat: ChatFn = async (messages) => {
+        calls++;
+        if (messages.some((message) => message.role === "tool") || messages.filter((message) => message.role === "user").length > 1) {
+          return call("reply", { text: "已继续完成", gaps: [] });
+        }
+        return kind === "question"
+          ? call("clarify", { questions: [{ id: "scope", question: "选择范围", options: [{ label: "近期" }, { label: "全部" }] }] })
+          : call(tool.name, {});
+      };
+      const hub = new SessionHub(loaded, sources, () => chat);
+      const statuses: { id: string; status: SessionMeta["status"] }[] = [];
+      hub.onMeta((meta) => { statuses.push({ id: meta.id, status: meta.status }); });
+      t.after(async () => {
+        for (const pending of await hub.pending()) {
+          if (pending.kind === "question") hub.answer(pending.sessionId, pending.requestId, {});
+          else hub.approve(pending.sessionId, pending.requestId, false);
+        }
+      });
+      const cancelled = await hub.create("需要停止的对话");
+      const retained = await hub.create("需要保留的对话");
+      const pending = await until(async () => {
+        const entries = await hub.pending();
+        return entries.length === 2 && (await hub.meta(cancelled.id)).status === "waiting"
+          && (await hub.meta(retained.id)).status === "waiting" ? entries : undefined;
+      });
+      const own = pending.find((entry) => entry.sessionId === cancelled.id)!;
+      const other = pending.find((entry) => entry.sessionId === retained.id)!;
+      const callsBeforeCancel = calls;
+      hub.cancel(cancelled.id);
+      const final = await until(async () => {
+        const detail = await hub.detail(cancelled.id);
+        return detail.status === "error" && statuses.some((entry) => entry.id === cancelled.id && entry.status === "error")
+          ? detail : undefined;
+      });
+      assert.equal(hub.isRunning(cancelled.id), false);
+      assert.ok(final.events.some((event) => event.type === "error" && event.message === "已取消"));
+      const history = JSON.parse(await readFile(path.join(loaded.paths.sessions, `${cancelled.id}.messages.json`), "utf8")) as ChatMessage[];
+      for (const toolCall of history.flatMap((message) => message.tool_calls ?? [])) {
+        assert.ok(history.some((message) => message.role === "tool" && message.tool_call_id === toolCall.id), "Cancelled history must retain a result for every tool call");
+      }
+      assert.equal(calls, callsBeforeCancel, "Cancellation must not call the model again");
+      assert.equal(writes, 0, "Cancelled authorization must not execute the write");
+      assert.deepEqual((await hub.pending()).map((entry) => entry.requestId), [other.requestId]);
+      assert.equal((await hub.meta(retained.id)).status, "waiting");
+      if (kind === "question") {
+        assert.ok(final.events.some((event) => event.type === "question_answered" && event.requestId === own.requestId && event.answers === null));
+        assert.throws(() => hub.answer(cancelled.id, own.requestId, {}));
+        hub.answer(retained.id, other.requestId, { scope: ["近期"] });
+      } else {
+        assert.ok(final.events.some((event) => event.type === "approval_resolved" && event.requestId === own.requestId && event.approved === false));
+        assert.throws(() => hub.approve(cancelled.id, own.requestId, true));
+        hub.approve(retained.id, other.requestId, true);
+      }
+      await until(async () => (await hub.meta(retained.id)).status === "idle" ? true : undefined);
+      await hub.send(cancelled.id, "继续对话");
+      await until(async () => (await hub.meta(cancelled.id)).status === "idle" ? true : undefined);
+      assert.equal(writes, kind === "approval" ? 1 : 0);
+    });
+  }
+
+  test("cancellation skips later tools in the same model response", async (t) => {
+    const chat: ChatFn = async () => {
+      const question = call("clarify", { questions: [{ id: "scope", question: "选择范围", options: [{ label: "近期" }, { label: "全部" }] }] });
+      const later = call("reply", { text: "这条回复应被停止", gaps: [] });
+      return { ...question, tool_calls: [...question.tool_calls!, ...later.tool_calls!] };
+    };
+    const hub = new SessionHub(loaded, sources, () => chat);
+    const created = await hub.create("同批工具停止");
+    t.after(async () => {
+      for (const pending of await hub.pending()) if (pending.kind === "question") hub.answer(created.id, pending.requestId, {});
+    });
+    await until(async () => (await hub.meta(created.id)).status === "waiting" ? true : undefined);
+    hub.cancel(created.id);
+    const final = await until(async () => {
+      const detail = await hub.detail(created.id);
+      return detail.status === "error" ? detail : undefined;
+    });
+    assert.ok(final.events.some((event) => event.type === "error" && event.message === "已取消"));
+    assert.equal(final.events.some((event) => event.type === "say" && event.text === "这条回复应被停止"), false);
+    const history = JSON.parse(await readFile(path.join(loaded.paths.sessions, `${created.id}.messages.json`), "utf8")) as ChatMessage[];
+    assert.equal(history.filter((message) => message.role === "tool").length, 2);
+    assert.ok(history.filter((message) => message.role === "tool").every((message) => message.content === "已取消，工具未完成。"));
+    assert.deepEqual(await hub.pending(), []);
+  });
 });
 
 describe("gateway", () => {
@@ -480,6 +601,22 @@ describe("gateway", () => {
     await runWish(base, sources, scripted, { wish: "看看", sessionId: "00000000-0000-0000-0000-000000000003" }, { onEvent: () => {}, authorize: async () => false });
     assert.doesNotMatch(outputs[1]!, /^重复调用/);
     assert.match(outputs[2]!, /^重复调用：你已连续 3 次修改参数调用 store__aggregate（order_items），结果完全相同/);
+  });
+
+  test("回归：等待店长回答时停止执行，会话立即结束", async () => {
+    const asking: ChatFn = async (messages) => {
+      if (messages.at(-1)!.role === "tool") return call("reply", { text: "不该执行到这里", gaps: [] });
+      return call("clarify", { questions: [{ id: "q", header: "范围", question: "看哪个范围？", options: [{ label: "30 天（推荐）" }, { label: "7 天" }] }] });
+    };
+    const hub = new (gateway.hub.constructor as new (...a: unknown[]) => typeof gateway.hub)(base, sources, () => asking);
+    const meta = await hub.create("看看");
+    for (let i = 0; i < 100 && (await hub.meta(meta.id)).status !== "waiting"; i++) await new Promise((r) => setTimeout(r, 20));
+    assert.equal((await hub.meta(meta.id)).status, "waiting");
+    hub.cancel(meta.id);
+    const end = await Promise.race([hub.wait(meta.id), new Promise<never>((_, reject) => setTimeout(() => reject(new Error("取消后会话仍未结束")), 3000))]);
+    assert.equal(end.status, "error");
+    const detail = await hub.detail(meta.id);
+    assert.equal(detail.events.filter((e) => e.type === "error").at(-1)?.type === "error" && (detail.events.filter((e) => e.type === "error").at(-1) as { message: string }).message, "已取消");
   });
 
   test("风格提示词接口", async () => {

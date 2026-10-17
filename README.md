@@ -2,7 +2,7 @@
 
 Aidol 创造营参赛项目——钱多多门店人工智能助手：店铺管理 harness。
 
-本仓库只负责 **harness**（数据源 + agent + 网关），没有前端界面；界面由前端团队按 [docs/api.md](docs/api.md) 对接。
+本仓库包含 **harness**（数据源 + agent + 网关）与 Vue / Element Plus 工作台前端。前端使用 [docs/api.md](docs/api.md) 中的接口，启动和界面说明见 [apps/web/README.md](apps/web/README.md)。
 
 店长许愿 → agent 通过数据源取数 → 生成**零后端、零 SQL** 的静态页面 → 页面运行时经网关**直连**数据工具，只在需要时调用 agent。
 
@@ -13,6 +13,7 @@ Aidol 创造营参赛项目——钱多多门店人工智能助手：店铺管�
 | 数据源 | `apps/cli/src/datasource/` | 内置门店工具 `store__*`（只读）+ 远程 MCP 服务 `mcp__<服务>__*`（Streamable HTTP，Bearer 鉴权） |
 | Agent | `apps/cli/src/agent/` | 许愿：取数 → 写页面 → 审查发布；续聊；页面运行时的只读问答 `qdd.ask` |
 | 网关 | `apps/cli/src/gateway/` | 前端唯一出口：会话/页面/设置 API、SSE 事件、页面托管与 SDK 注入、`/mcp` 端点 |
+| 工作台前端 | `apps/web/` | 对话与提问授权、任务页面、技能、定时任务、连接器和工作台总览 |
 | 数据集 | `apps/cli/src/datasets/` | `DatasetStore` 接口 + JSONL 实现：按天分区的只追加日志、检查点、主键去重、跨进程锁、增量刷新 |
 | 计算引擎 | `packages/shared/src/compute.ts` | 零 SQL 声明式聚合 / 时间线回放 / 状态区间 / 关联；数据源侧与浏览器共用同一份代码 |
 | 会话 | `apps/cli/src/sessions.ts` | 文件存储（`workspace/sessions/`），终端与前端共享 |
@@ -87,6 +88,7 @@ npm run qdd -- reply <会话id> "按周汇总"
 | 命令 | 用途 |
 | --- | --- |
 | `npm run dev` / `npm start` | 构建并启动网关 / 直接启动网关 |
+| `npm run dev:web` / `npm run build:web` | 启动前端开发服务 / 检查类型并构建前端 |
 | `npm run qdd -- token` | 显示网关 token |
 | `npm run qdd -- wish "<需求>" [--page <slug>] [--yes]` | 终端许愿，写入授权在终端确认 |
 | `npm run qdd -- reply <会话id> "<消息>"` | 续聊 |
@@ -103,6 +105,7 @@ npm run qdd -- reply <会话id> "按周汇总"
 
 ```text
 apps/cli/            harness（datasource / agent / gateway / guard / sessions）
+apps/web/            Vue / Element Plus 工作台（page/layout 公共框架、views 路由界面）
 packages/shared/     共享类型（含前端 API 契约）
 docs/api.md          前端对接文档
 workspace/           运行时生成（已 gitignore）：style.md、metrics.json、datasets/、store.json 示例数据、site/、sessions/、state/、.gateway-token

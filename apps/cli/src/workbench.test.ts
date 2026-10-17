@@ -5,12 +5,12 @@ import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, before, describe, test } from "node:test";
-import type { ConnectorView, Overview, PendingItem, Schedule, SessionMeta, Skill } from "@qdd/shared";
+import type { ConnectorView, Overview, PageEntry, PageView, PendingItem, Schedule, SessionMeta, Skill } from "@qdd/shared";
 import type { ChatFn, ChatMessage } from "./agent/llm.js";
 import { loadConfig, type LoadedConfig } from "./config.js";
 import { DataSources } from "./datasource/registry.js";
 import { startGateway, type Gateway } from "./gateway/server.js";
-import { ensureWorkspace } from "./web/site.js";
+import { ensureWorkspace, readPages, writePages } from "./web/site.js";
 import { nextRun, parseCron } from "./workbench/cron.js";
 import { FeishuClient } from "./workbench/feishu.js";
 import { openWorkbench } from "./workbench/index.js";
@@ -159,6 +159,12 @@ describe("workbench gateway", () => {
     assert.doesNotMatch(String(view.config.webhookUrl), /signed$/);
     assert.match(feishu.messages.at(-1)!.text, /验证成功/);
 
+    // 店长填写官方地址时，按 FEISHU_BASE_URL（此处为模拟服务）转发
+    const official = await post("/api/connectors", { type: "feishu", mode: "webhook", name: "官方地址", webhookUrl: "https://open.feishu.cn/open-apis/bot/v2/hook/plain" });
+    assert.equal(official.status, 201);
+    assert.equal(feishu.messages.at(-1)!.via, "webhook");
+    await api(`/api/connectors/${((await official.json()) as ConnectorView).id}`, { method: "DELETE" });
+
     const disk = await readFile(loaded.paths.connectors, "utf8");
     assert.doesNotMatch(disk, new RegExp(SIGN_SECRET));
     assert.doesNotMatch(disk, /hook\/signed/);
@@ -301,5 +307,37 @@ describe("workbench gateway", () => {
     await idle(session.id);
     assert.equal(feishu.messages.at(-1)!.text, "今天记得盘点生鲜");
     assert.ok(!feishu.messages.some((m) => m.text.includes("99,999")));
+  });
+
+  test("页面：按定时任务区分类型，可多个置顶并按置顶先后排在最前", async () => {
+    const existing = await readPages(loaded.paths);
+    const page = (slug: string, updatedAt: string): PageEntry => ({
+      slug, title: slug, wish: "", summary: "", tools: [], useAgent: false, metrics: [], datasets: {}, version: 1, stale: null, gaps: [], sessionId: "",
+      createdAt: updatedAt, updatedAt,
+    });
+    await writePages(loaded.paths, [...existing, page("p-a", "2026-01-01T00:00:00Z"), page("p-b", "2026-01-02T00:00:00Z"), page("p-c", "2026-01-03T00:00:00Z")]);
+    const list = async () => ((await (await api("/api/pages")).json()) as PageView[]).filter((x) => x.slug.startsWith("p-"));
+
+    const schedule = (await (await post("/api/schedules", { name: "刷新 B", cron: "0 8 * * *", prompt: "刷新", slug: "p-b" })).json()) as Schedule;
+    let pages = await list();
+    assert.deepEqual(pages.map((x) => x.slug), ["p-c", "p-b", "p-a"]);
+    assert.deepEqual(pages.map((x) => x.kind), ["once", "scheduled", "once"]);
+    assert.deepEqual(pages[1]!.schedules, [{ id: schedule.id, name: "刷新 B", enabled: true }]);
+    assert.ok(pages.every((x) => x.pinnedAt === null));
+
+    assert.equal((await api("/api/pages/p-a/pin", { method: "PUT" })).status, 200);
+    assert.equal((await api("/api/pages/p-b/pin", { method: "PUT" })).status, 200);
+    const again = (await (await api("/api/pages/p-a/pin", { method: "PUT" })).json()) as { pinnedAt: string };
+    pages = await list();
+    assert.deepEqual(pages.map((x) => x.slug), ["p-a", "p-b", "p-c"]);
+    assert.equal(again.pinnedAt, pages[0]!.pinnedAt);
+    assert.equal((await api("/api/pages/不存在/pin", { method: "PUT" })).status, 404);
+
+    assert.equal((await api("/api/pages/p-a/pin", { method: "DELETE" })).status, 200);
+    pages = await list();
+    assert.deepEqual(pages.map((x) => x.slug), ["p-b", "p-c", "p-a"]);
+    assert.equal(pages[2]!.pinnedAt, null);
+    await api(`/api/schedules/${schedule.id}`, { method: "DELETE" });
+    assert.equal((await list()).find((x) => x.slug === "p-b")!.kind, "once");
   });
 });

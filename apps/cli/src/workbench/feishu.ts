@@ -81,12 +81,24 @@ export class FeishuClient {
     }
     for (let attempt = 0; ; attempt++) {
       await this.throttle(webhookUrl);
-      const reply = await this.post(webhookUrl, body);
+      const reply = await this.post(this.route(webhookUrl), body);
       const code = reply.code ?? reply.StatusCode ?? 0;
       if (code === 0) return;
       if (!RATE_LIMITED.has(code) || attempt >= RATE_RETRIES) throw new FeishuError(describe(code, reply.msg ?? reply.StatusMessage));
       await sleep(1000 * 2 ** attempt);
     }
+  }
+
+  /**
+   * 配置了 FEISHU_BASE_URL（私有化部署、代理或测试环境）时，把官方域名的 webhook 转发到该地址，
+   * 店长仍填写飞书后台给出的官方地址。
+   */
+  private route(webhookUrl: string): string {
+    if (this.baseUrl === FEISHU_BASE_URL) return webhookUrl;
+    for (const official of [FEISHU_BASE_URL, LARK_BASE_URL]) {
+      if (webhookUrl.startsWith(`${official}/`)) return this.baseUrl + webhookUrl.slice(official.length);
+    }
+    return webhookUrl;
   }
 
   /** 按 webhook 排队，保证任意 1 秒内最多发出 WEBHOOK_PER_SEC 次。 */

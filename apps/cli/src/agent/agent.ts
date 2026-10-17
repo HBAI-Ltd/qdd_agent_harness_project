@@ -751,7 +751,7 @@ export async function runWish(
           return `重复调用：参数与之前完全相同，结果不会变化，未再执行。请基于已返回的结果继续；如果之前的结果是摘要，说明数据过大——给页面用请 snapshot_data，理解数据请粗化分组或缩小范围。${times >= 3 ? "已多次重复，请立即进入下一步（提问对齐或写页面）。" : ""}`;
         }
         collectRefs(args, usedDatasets, usedMetrics);
-        hooks.onEvent({ kind: "tool", text: `查询 ${name} ${truncate(JSON.stringify(args), 120)}` });
+        hooks.onEvent({ kind: "tool", text: `查询 ${name} ${truncate(JSON.stringify(args), 2000)}` });
         const result = await sources.call(name, args, hooks.authorize);
         ledger.add(result, await scopeOf(args));
         // 换着参数反复查询却得到完全相同的结果：说明调参方向不对，拦截并提示（计入熔断）
@@ -772,6 +772,16 @@ export async function runWish(
   try {
     return await loop();
   } catch (error) {
+    if (hooks.signal?.aborted) {
+      // Preserve valid tool-call history so the cancelled conversation can resume.
+      const assistantIndex = messages.findLastIndex((message) => message.role === "assistant" && message.tool_calls?.length);
+      const answered = new Set(messages.slice(assistantIndex + 1)
+        .filter((message) => message.role === "tool").map((message) => message.tool_call_id));
+      for (const call of messages[assistantIndex]?.tool_calls ?? []) {
+        if (!answered.has(call.id)) messages.push({ role: "tool", tool_call_id: call.id, content: "已取消，工具未完成。" });
+      }
+      throw new WishError((error as Error).message, conversation());
+    }
     if (error instanceof WishError) throw error;
     throw new WishError((error as Error).message, conversation());
   }
@@ -783,6 +793,7 @@ export async function runWish(
     // 熔断后不再向模型提供探索类数据工具（snapshot_data 仍可取数）
     const activeTools = explorationPaused ? tools.filter((t) => !sources.get(t.function.name)) : tools;
     const reply = await chat(messages, activeTools, hooks.signal);
+    hooks.signal?.throwIfAborted();
     messages.push(reply);
     if (reply.content?.trim()) hooks.onEvent({ kind: "say", text: reply.content.trim() });
 
@@ -796,16 +807,19 @@ export async function runWish(
     let done: WishResult | undefined;
     let rejectedCalls = 0;
     for (const call of reply.tool_calls) {
+      hooks.signal?.throwIfAborted();
       let output: string;
       try {
         const args = call.function.arguments ? (JSON.parse(call.function.arguments) as JsonObject) : {};
         const result = await dispatch(call.function.name, args);
+        hooks.signal?.throwIfAborted();
         if (typeof result === "string") output = result;
         else {
           done = result;
           output = result.page ? "已发布" : "已回复";
         }
       } catch (error) {
+        hooks.signal?.throwIfAborted();
         output = `错误：${(error as Error).message}`;
         hooks.onEvent({ kind: "warn", text: `${call.function.name} 失败：${(error as Error).message}` });
       }

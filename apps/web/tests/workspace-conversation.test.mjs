@@ -104,7 +104,11 @@ function backend(initial = [], pages = []) {
       let release;
       const promise = new Promise((resolve) => { release = resolve; });
       delays.push({ path, method, promise });
-      return { release, fail: (message) => release(json({ error: message }, 500)) };
+      return {
+        release,
+        respond: (value, status = 202) => release(json(value, status)),
+        fail: (message) => release(json({ error: message }, 500)),
+      };
     },
     emitSession(id, event) {
       sessions.get(id).events.push(event);
@@ -158,6 +162,14 @@ async function ready(workspace) {
     await setImmediate();
   }
   assert.fail(`Workspace did not connect: ${workspace.error.value}`);
+}
+
+async function until(predicate, message) {
+  for (let i = 0; i < 30; i++) {
+    if (predicate()) return;
+    await setImmediate();
+  }
+  assert.fail(message);
 }
 
 afterEach(() => {
@@ -553,4 +565,357 @@ test("schedule origin survives detail loading and live metadata updates", async 
   assert.deepEqual(workspace.sessions.value[0].origin, original.origin);
   assert.deepEqual(workspace.activeSession.value.origin, original.origin);
   assert.equal(workspace.gatewayChanges.value.overview, 1);
+});
+
+test("refreshing while the first wish is pending preserves its draft, request, and submission lock", async () => {
+  const service = backend();
+  const { workspace } = mountWorkspace();
+  await ready(workspace);
+  const delay = service.hold("/api/wishes", "POST");
+  const pending = workspace.sendMessage("帮我创建获取信息的 skill");
+  const creation = service.calls.find((call) => call.path === "/api/wishes");
+  assert.equal(workspace.pendingMessage.value.text, "帮我创建获取信息的 skill");
+  assert.equal(workspace.responding.value, true);
+  await workspace.loadWorkspace();
+  await workspace.openConversation();
+  assert.equal(creation.signal.aborted, false);
+  assert.equal(workspace.activeSessionId.value, null);
+  assert.equal(workspace.sending.value, true);
+  assert.equal(workspace.pendingMessage.value.text, "帮我创建获取信息的 skill");
+  assert.equal(await workspace.sendMessage("重复提交同一需求"), false);
+  delay.release();
+  assert.equal(await pending, true);
+  assert.equal(workspace.activeSessionId.value, "created-1");
+  assert.equal(await workspace.sendMessage("继续刚才的对话"), true);
+  assert.equal(service.calls.filter((call) => call.path === "/api/wishes").length, 1);
+  assert.equal(service.calls.filter((call) => call.path === "/api/sessions/created-1/messages").length, 1);
+});
+
+for (const existingHistory of [false, true]) {
+  test(`an old refresh snapshot cannot undo a wish completed during refresh (${existingHistory ? "existing history" : "empty history"})`, async () => {
+    const service = backend(existingHistory ? [session("existing")] : []);
+    const { workspace, local } = mountWorkspace();
+    await ready(workspace);
+    workspace.startNewConversation();
+    const delay = service.hold("/api/sessions");
+    const refreshing = workspace.loadWorkspace();
+    assert.equal(await workspace.sendMessage("刷新期间创建的新对话"), true);
+    assert.equal(workspace.activeSessionId.value, "created-1");
+    const detailCount = service.calls.filter((call) => call.path === "/api/sessions/created-1").length;
+    delay.release();
+    await refreshing;
+    assert.equal(workspace.activeSessionId.value, "created-1");
+    assert.equal(workspace.activeSession.value.id, "created-1");
+    assert.equal(local.values.get("harness-conversation-v1:" + gateway), "created-1");
+    assert.ok(workspace.sessions.value.some((entry) => entry.id === "created-1"));
+    assert.equal(service.streamCount("created-1"), 1);
+    assert.equal(service.streamCount("existing"), 0);
+    assert.equal(service.calls.filter((call) => call.path === "/api/sessions/created-1").length, detailCount);
+    assert.equal(await workspace.sendMessage("刷新结束后继续此对话"), true);
+    assert.equal(service.calls.filter((call) => call.path === "/api/wishes").length, 1);
+    assert.equal(service.calls.filter((call) => call.path === "/api/sessions/created-1/messages").length, 1);
+  });
+}
+
+test("follow-ups, refresh, answers, approvals, and stopping retain existing messages and the live stream", async () => {
+  const original = session("selected");
+  original.events = [{ type: "say", text: "之前的回复仍然可见", at: original.createdAt }];
+  const service = backend([original]);
+  const { workspace } = mountWorkspace();
+  await ready(workspace);
+  const detailCount = () => service.calls.filter((call) => call.path === "/api/sessions/selected").length;
+  const streamCount = () => service.calls.filter((call) => call.path === "/api/sessions/selected/events").length;
+  const initialDetailCount = detailCount();
+  const initialStreamCount = streamCount();
+  const stream = service.calls.find((call) => call.path === "/api/sessions/selected/events");
+  for (const [path, invoke] of [
+    ["messages", () => workspace.sendMessage("继续分析")],
+    ["questions/q-1", () => workspace.answerQuestions("q-1", { range: ["最近 7 天"] })],
+    ["approvals/a-1", () => workspace.resolveApproval("a-1", true)],
+    ["cancel", () => workspace.cancel()],
+  ]) {
+    const delay = service.hold(`/api/sessions/selected/${path}`, "POST");
+    const action = invoke();
+    assert.equal(workspace.activeSession.value.events[0].text, "之前的回复仍然可见");
+    assert.equal(workspace.loadingSession.value, false);
+    if (path === "messages") {
+      await workspace.loadWorkspace();
+      assert.equal(workspace.sending.value, true);
+      assert.equal(await workspace.sendMessage("重复发送"), false);
+    }
+    delay.release();
+    assert.equal(await action, true);
+    assert.equal(workspace.activeSession.value.events[0].text, "之前的回复仍然可见");
+    assert.equal(workspace.loadingSession.value, false);
+    assert.equal(detailCount(), initialDetailCount);
+    assert.equal(streamCount(), initialStreamCount);
+    assert.equal(stream.signal.aborted, false);
+    assert.equal(service.streamCount("selected"), 1);
+  }
+});
+
+test("optimistic messages appear immediately and only a new matching user event acknowledges them", async () => {
+  const original = session("selected");
+  original.events = [
+    { type: "user", text: "重新查询", at: original.createdAt },
+    { type: "say", text: "之前的查询结果", at: original.createdAt },
+  ];
+  const service = backend([original]);
+  const { workspace } = mountWorkspace();
+  await ready(workspace);
+  const delay = service.hold("/api/sessions/selected/messages", "POST");
+  const pending = workspace.sendMessage("重新查询");
+  assert.equal(workspace.pendingMessage.value.text, "重新查询");
+  assert.equal(workspace.activeSession.value.events.length, 2);
+  service.emitSession("selected", { type: "say", text: "正在处理", at: "2026-10-17T03:00:00Z" });
+  await setImmediate();
+  assert.equal(workspace.pendingMessage.value.text, "重新查询");
+  service.emitSession("selected", { type: "user", text: "重新查询", at: "2026-10-17T03:00:01Z" });
+  await setImmediate();
+  assert.equal(workspace.pendingMessage.value, undefined);
+  assert.equal(workspace.activeSession.value.events.filter((event) => event.type === "user").length, 2);
+  delay.release();
+  assert.equal(await pending, true);
+  assert.equal(workspace.pendingMessage.value, undefined);
+});
+
+test("stopping before creation returns waits for the real session id without aborting or unlocking submission", async () => {
+  const service = backend();
+  const { workspace } = mountWorkspace();
+  await ready(workspace);
+  const creation = service.hold("/api/wishes", "POST");
+  const cancellation = service.hold("/api/sessions/created-1/cancel", "POST");
+  const pending = workspace.sendMessage("获取最新信息");
+  const request = service.calls.find((call) => call.path === "/api/wishes");
+  assert.equal(workspace.canCancel.value, true);
+  assert.equal(await workspace.cancel(), true);
+  assert.equal(workspace.cancelling.value, true);
+  assert.equal(workspace.sending.value, true);
+  assert.equal(request.signal.aborted, false);
+  assert.equal(service.calls.filter((call) => call.path.endsWith("/cancel")).length, 0);
+  await workspace.loadWorkspace();
+  assert.equal(workspace.activeSessionId.value, null);
+  assert.equal(workspace.cancelling.value, true);
+  assert.equal(await workspace.sendMessage("仍不能重复提交"), false);
+  creation.release();
+  await until(() => service.calls.some((call) => call.path.endsWith("/cancel")), "Creation never sent its deferred cancellation");
+  assert.equal(workspace.sending.value, true);
+  assert.equal(workspace.cancelling.value, true);
+  assert.equal(await workspace.cancel(), false);
+  assert.equal(await workspace.sendMessage("停止完成前禁止重复提交"), false);
+  cancellation.release();
+  assert.equal(await pending, true);
+  assert.equal(workspace.activeSessionId.value, "created-1");
+  assert.equal(workspace.sending.value, false);
+  assert.equal(workspace.cancelling.value, false);
+  assert.equal(request.signal.aborted, false);
+  assert.equal(service.calls.filter((call) => call.path === "/api/wishes").length, 1);
+  assert.equal(service.calls.filter((call) => call.path === "/api/sessions/created-1/cancel").length, 1);
+  assert.equal(await workspace.sendMessage("停止后继续同一对话"), true);
+  assert.equal(service.calls.filter((call) => call.path === "/api/wishes").length, 1);
+});
+
+test("stopping an existing conversation waits for its in-flight message acknowledgement before cancelling that turn", async () => {
+  const original = session("selected");
+  const service = backend([original]);
+  const { workspace } = mountWorkspace();
+  await ready(workspace);
+  const message = service.hold("/api/sessions/selected/messages", "POST");
+  const cancellation = service.hold("/api/sessions/selected/cancel", "POST");
+  const pending = workspace.sendMessage("开始新一轮执行");
+  const request = service.calls.find((call) => call.path.endsWith("/messages"));
+  assert.equal(await workspace.cancel(), true);
+  // A known session id alone does not establish that /messages reached the server:
+  // cancellation must follow acknowledgement so it cannot stop the previous idle turn.
+  assert.equal(service.calls.filter((call) => call.path.endsWith("/cancel")).length, 0);
+  assert.equal(request.signal.aborted, false);
+  assert.equal(workspace.sending.value, true);
+  assert.equal(workspace.cancelling.value, true);
+  message.respond({ ...original, status: "running", updatedAt: "2026-10-17T03:00:00Z" });
+  await until(() => service.calls.some((call) => call.path.endsWith("/cancel")), "The acknowledged message never received its cancellation");
+  assert.equal(workspace.sending.value, true);
+  assert.equal(workspace.cancelling.value, true);
+  cancellation.respond({ ...original, status: "idle", updatedAt: "2026-10-17T03:00:01Z" });
+  assert.equal(await pending, true);
+  assert.equal(workspace.sending.value, false);
+  assert.equal(workspace.cancelling.value, false);
+  assert.equal(service.calls.filter((call) => call.path.endsWith("/cancel")).length, 1);
+  assert.equal(service.calls.filter((call) => call.path === "/api/wishes").length, 0);
+});
+
+test("a failed deferred cancellation remains visible after the created conversation loads and permits retrying stop", async () => {
+  const service = backend();
+  const { workspace } = mountWorkspace();
+  await ready(workspace);
+  const creation = service.hold("/api/wishes", "POST");
+  const cancellation = service.hold("/api/sessions/created-1/cancel", "POST");
+  const pending = workspace.sendMessage("创建并执行");
+  Object.assign(service.sessions.get("created-1"), { status: "running", updatedAt: "2026-10-17T03:00:00Z" });
+  assert.equal(await workspace.cancel(), true);
+  creation.release();
+  await until(() => service.calls.some((call) => call.path.endsWith("/cancel")), "The deferred cancellation never started");
+  cancellation.fail("停止失败，请重试");
+  assert.equal(await pending, true);
+  assert.equal(workspace.activeSessionId.value, "created-1");
+  assert.equal(workspace.activeSession.value.status, "running");
+  assert.equal(workspace.error.value, "停止失败，请重试");
+  assert.equal(workspace.cancelling.value, false);
+  assert.equal(workspace.canCancel.value, true);
+  assert.equal(workspace.sending.value, true);
+  assert.equal(await workspace.cancel(), true);
+  assert.equal(workspace.error.value, "");
+  assert.equal(service.calls.filter((call) => call.path === "/api/sessions/created-1/cancel").length, 2);
+});
+
+test("stopping after creation returns can cancel while its initial detail is still loading", async () => {
+  const service = backend();
+  const { workspace } = mountWorkspace();
+  await ready(workspace);
+  const detail = service.hold("/api/sessions/created-1");
+  const cancellation = service.hold("/api/sessions/created-1/cancel", "POST");
+  const pending = workspace.sendMessage("创建并执行");
+  await until(() => workspace.activeSessionId.value === "created-1" && workspace.loadingSession.value,
+    "The created conversation never began loading its detail");
+  assert.equal(workspace.pendingMessage.value.text, "创建并执行");
+  assert.equal(workspace.sending.value, true);
+  const stopping = workspace.cancel();
+  assert.equal(workspace.cancelling.value, true);
+  assert.equal(service.calls.filter((call) => call.path === "/api/sessions/created-1/cancel").length, 1);
+  cancellation.release();
+  assert.equal(await stopping, true);
+  assert.equal(workspace.sending.value, true);
+  assert.equal(await workspace.sendMessage("详情返回前不重复发送"), false);
+  detail.release();
+  assert.equal(await pending, true);
+  assert.equal(workspace.sending.value, false);
+  assert.equal(workspace.cancelling.value, false);
+  assert.equal(workspace.activeSessionId.value, "created-1");
+  assert.equal(service.calls.filter((call) => call.path === "/api/sessions/created-1/cancel").length, 1);
+});
+
+test("an older initial detail cannot unlock a created conversation after cancellation still reports running", async () => {
+  const service = backend();
+  const { workspace } = mountWorkspace();
+  await ready(workspace);
+  const detail = service.hold("/api/sessions/created-1");
+  const cancellation = service.hold("/api/sessions/created-1/cancel", "POST");
+  const pending = workspace.sendMessage("创建并执行");
+  await until(() => workspace.activeSessionId.value === "created-1" && workspace.loadingSession.value,
+    "The created conversation never began loading its detail");
+  const stopping = workspace.cancel();
+  cancellation.respond({ ...service.sessions.get("created-1"), status: "running", updatedAt: "2026-10-17T03:00:00Z" });
+  assert.equal(await stopping, true);
+  detail.release();
+  assert.equal(await pending, true);
+  assert.equal(workspace.activeSession.value.status, "running");
+  assert.equal(workspace.sessions.value.find((entry) => entry.id === "created-1").status, "running");
+  assert.equal(workspace.sending.value, true);
+  assert.equal(workspace.cancelling.value, true);
+  assert.equal(await workspace.cancel(), false);
+  assert.equal(await workspace.sendMessage("执行尚未结束时不能再次提交"), false);
+  service.emitSession("created-1", { type: "status", status: "idle", at: "2026-10-17T03:00:01Z" });
+  await setImmediate();
+  assert.equal(workspace.sending.value, false);
+  assert.equal(workspace.cancelling.value, false);
+});
+
+test("waiting conversations can stop and a running 202 response stays locked until the terminal live event", async () => {
+  const original = { ...session("selected"), status: "waiting" };
+  const service = backend([original]);
+  const { workspace } = mountWorkspace();
+  await ready(workspace);
+  assert.equal(workspace.canCancel.value, true);
+  assert.equal(workspace.sending.value, true);
+  assert.equal(workspace.responding.value, false);
+  const cancellation = service.hold("/api/sessions/selected/cancel", "POST");
+  const stopping = workspace.cancel();
+  assert.equal(workspace.cancelling.value, true);
+  cancellation.respond({ ...original, status: "running", updatedAt: "2026-10-17T03:00:00Z" });
+  assert.equal(await stopping, true);
+  assert.equal(workspace.activeSession.value.status, "running");
+  assert.equal(workspace.sending.value, true);
+  assert.equal(workspace.responding.value, true);
+  assert.equal(workspace.cancelling.value, true);
+  assert.equal(await workspace.cancel(), false);
+  assert.equal(service.calls.filter((call) => call.path === "/api/sessions/selected/cancel").length, 1);
+  assert.equal(await workspace.sendMessage("收到停止响应后仍等待执行结束"), false);
+  service.emitSession("selected", { type: "status", status: "idle", at: "2026-10-17T03:00:01Z" });
+  await setImmediate();
+  assert.equal(workspace.sending.value, false);
+  assert.equal(workspace.responding.value, false);
+  assert.equal(workspace.cancelling.value, false);
+  assert.equal(workspace.canCancel.value, false);
+  assert.equal(await workspace.sendMessage("执行结束后继续"), true);
+  assert.equal(service.calls.filter((call) => call.path === "/api/wishes").length, 0);
+});
+
+test("a failed send removes only its optimistic message and permits retrying the same conversation", async () => {
+  const original = session("selected");
+  original.events = [{ type: "say", text: "已有回复", at: original.createdAt }];
+  const service = backend([original]);
+  const { workspace } = mountWorkspace();
+  await ready(workspace);
+  const delay = service.hold("/api/sessions/selected/messages", "POST");
+  const pending = workspace.sendMessage("需要重试的消息");
+  assert.equal(workspace.pendingMessage.value.text, "需要重试的消息");
+  assert.equal(workspace.responding.value, true);
+  delay.fail("发送失败，请重试");
+  assert.equal(await pending, false);
+  assert.equal(workspace.error.value, "发送失败，请重试");
+  assert.equal(workspace.pendingMessage.value, undefined);
+  assert.equal(workspace.sending.value, false);
+  assert.equal(workspace.responding.value, false);
+  assert.equal(workspace.activeSession.value.events[0].text, "已有回复");
+  assert.equal(await workspace.sendMessage("需要重试的消息"), true);
+  assert.equal(workspace.error.value, "");
+  assert.equal(service.calls.filter((call) => call.path === "/api/wishes").length, 0);
+  assert.equal(service.calls.filter((call) => call.path === "/api/sessions/selected/messages").length, 2);
+});
+
+test("an obsolete send failure cannot clear another conversation's optimistic message or submission lock", async () => {
+  const service = backend([session("A", "2026-10-17T02:00:00Z"), session("B")]);
+  const { workspace } = mountWorkspace();
+  await ready(workspace);
+  const firstDelay = service.hold("/api/sessions/A/messages", "POST");
+  const first = workspace.sendMessage("A 的请求");
+  await workspace.selectSession("B");
+  const secondDelay = service.hold("/api/sessions/B/messages", "POST");
+  const second = workspace.sendMessage("B 的请求");
+  firstDelay.fail("A 失败了");
+  assert.equal(await first, false);
+  assert.equal(workspace.activeSessionId.value, "B");
+  assert.equal(workspace.error.value, "");
+  assert.equal(workspace.pendingMessage.value.text, "B 的请求");
+  assert.equal(workspace.sending.value, true);
+  assert.equal(await workspace.sendMessage("B 的重复请求"), false);
+  secondDelay.release();
+  assert.equal(await second, true);
+  assert.equal(workspace.sending.value, false);
+  assert.equal(service.calls.filter((call) => call.path === "/api/sessions/B/messages").length, 1);
+});
+
+test("an aborted old connection's send failure cannot clear a new send to the same session", async () => {
+  const service = backend([session("selected")]);
+  const { workspace } = mountWorkspace();
+  await ready(workspace);
+  const oldDelay = service.hold("/api/sessions/selected/messages", "POST");
+  const oldSend = workspace.sendMessage("旧连接中的请求");
+  const oldRequest = service.calls.find((call) => call.path.endsWith("/messages"));
+  workspace.token.value = "replacement-gateway-token";
+  assert.equal(oldRequest.signal.aborted, true);
+  await workspace.loadWorkspace();
+  await ready(workspace);
+  const newDelay = service.hold("/api/sessions/selected/messages", "POST");
+  const newSend = workspace.sendMessage("新连接中的请求");
+  assert.equal(workspace.pendingMessage.value.text, "新连接中的请求");
+  oldDelay.fail("旧连接的延迟失败");
+  assert.equal(await oldSend, false);
+  assert.equal(workspace.activeSessionId.value, "selected");
+  assert.equal(workspace.pendingMessage.value.text, "新连接中的请求");
+  assert.equal(workspace.error.value, "");
+  assert.equal(workspace.sending.value, true);
+  assert.equal(await workspace.sendMessage("新连接的重复请求"), false);
+  newDelay.release();
+  assert.equal(await newSend, true);
+  assert.equal(workspace.sending.value, false);
 });

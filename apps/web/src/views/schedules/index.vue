@@ -43,6 +43,12 @@ let saveController: AbortController | undefined;
 let version = 0;
 let editorVersion = 0;
 
+watch(schedules, (entries) => {
+  for (const schedule of entries) {
+    if (schedule.lastRun?.sessionId === launchedSessions.value[schedule.id]) delete launchedSessions.value[schedule.id];
+  }
+});
+
 function errorText(cause: unknown): string {
   return cause instanceof TypeError ? "暂时无法连接工作空间，请检查连接后重试。" : cause instanceof Error ? cause.message : "操作失败，请稍后重试。";
 }
@@ -256,7 +262,7 @@ function runSessionId(schedule: Schedule): string | undefined {
             <StringSelectOption v-for="connector in notificationTargets" :key="connector.id" :value="connector.id" :label="connector.name" />
           </ElSelect>
         </ElFormItem>
-        <ElAlert v-if="form.connectorId" title="设置推送接收方，即表示允许此任务在每次执行完成后自动发送结论；涉及数据修改的操作仍会请求确认。" type="info" show-icon :closable="false" class="form-feedback" />
+        <ElAlert v-if="form.connectorId" title="设置推送接收方，即表示允许此任务在每次执行完成后自动发送结论；数据修改默认需确认，并遵守工作空间已有的授权设置。" type="info" show-icon :closable="false" class="form-feedback" />
         <ElAlert v-if="skillsResource.error.value || connectorsResource.error.value" :title="skillsResource.error.value || connectorsResource.error.value" type="warning" show-icon :closable="false" class="form-feedback" />
         <ElFormItem label="定时执行"><ElSwitch v-model="form.enabled" active-text="启用" inactive-text="暂停" /></ElFormItem>
       </ElForm>

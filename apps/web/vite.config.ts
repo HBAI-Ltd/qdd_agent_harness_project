@@ -60,11 +60,10 @@ export default defineConfig(({ command, mode }) => {
     build: {
       outDir: "dist",
       assetsInlineLimit: Infinity,
-      rollupOptions: {
-        output: {
-          inlineDynamicImports: true,
-        },
-      },
+    },
+    optimizeDeps: {
+      // Auto-imported components are injected after Vite's dependency scan.
+      include: ["element-plus", "element-plus/es", "element-plus/es/locale/lang/zh-cn"],
     },
     plugins: [
       vue({
@@ -90,7 +89,7 @@ export default defineConfig(({ command, mode }) => {
           ElementPlusResolver({ importStyle: false }),
         ],
       }),
-      webUpdateNotice({
+      ...(command === "build" ? [webUpdateNotice({
         versionType: "build_timestamp",
         checkInterval: 24 * 60 * 60 * 1000,
         notificationProps: {
@@ -99,7 +98,7 @@ export default defineConfig(({ command, mode }) => {
           buttonText: "立即刷新",
           dismissButtonText: "忽略",
         },
-      }),
+      })] : []),
     ],
     resolve: {
       alias: {
@@ -111,6 +110,10 @@ export default defineConfig(({ command, mode }) => {
       port: FRONTEND_PORT,
       strictPort: true,
       proxy,
+      warmup: {
+        // Transform the default screen before the browser requests its modules.
+        clientFiles: ["./src/main.ts", "./src/page/layout/index.vue", "./src/views/chat/index.vue"],
+      },
     },
     preview: {
       host: "127.0.0.1",

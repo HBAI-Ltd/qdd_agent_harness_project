@@ -1,16 +1,18 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from "vue";
+import { computed, defineAsyncComponent, nextTick, onMounted, ref, watch } from "vue";
 import { ElButton, ElCard, ElInput, type InputInstance } from "element-plus";
 import type { SessionEvent } from "@qdd/shared";
 import AgentIcon from "@/components/AgentIcon.vue";
 import SessionActions from "@/components/SessionActions.vue";
-import SessionBrowser from "@/components/SessionBrowser.vue";
 import { useWorkspaceContext } from "@/composables/workspaceContext";
+
+const SessionBrowser = defineAsyncComponent(() => import("@/components/SessionBrowser.vue"));
 
 const { workspace, draft, submitMessage, notify, navigation } = useWorkspaceContext();
 const {
   activeSession, activeSessionId, revisionPageSlug, preferences, connected,
-  loadingSession, sending, cancelling, eventActionBusy, answerQuestions, resolveApproval, cancel,
+  loadingSession, sending, pendingMessage, responding, canCancel, cancelling,
+  eventActionBusy, answerQuestions, resolveApproval, cancel,
 } = workspace;
 const { openPage, openView } = navigation;
 const composer = ref<InputInstance>();
@@ -18,9 +20,24 @@ const messageList = ref<HTMLElement>();
 const browserOpen = ref(false);
 const latestBrowser = computed(() => activeSession.value?.events.findLast((event) => event.type === "browser")?.browser);
 const gapLabels = { missing_data: "缺少数据", estimate: "估测说明", unsupported: "暂不支持", permission: "需要授权" };
+const showConversation = computed(() => Boolean(activeSession.value || pendingMessage.value || responding.value || cancelling.value));
+const waitingForConfirmation = computed(() => activeSession.value?.status === "waiting" && !responding.value && !cancelling.value);
+const activityLabel = computed(() => {
+  if (cancelling.value) return "正在停止…";
+  if (pendingMessage.value && responding.value) return "正在发送…";
+  if (responding.value) return "助手正在回复…";
+  if (waitingForConfirmation.value) return "等待你的确认，完成下方的问题或授权后继续。";
+  return "";
+});
+const composerHint = computed(() => {
+  if (cancelling.value) return "正在停止 · 草稿会保留";
+  if (waitingForConfirmation.value) return "完成确认以继续 · 可点击停止结束本次执行";
+  if (responding.value) return "可先编写下一条消息 · 点击停止可结束回复";
+  return preferences.value.enterToSend ? "Enter 发送 · Shift + Enter 换行" : "点击发送 · Enter 换行";
+});
 const timeline = computed(() =>
-  (activeSession.value?.events ?? [])
-    .map((event, index) => ({ event, index }))
+  [...(activeSession.value?.events ?? []), ...(pendingMessage.value ? [pendingMessage.value] : [])]
+    .map((event, index) => ({ event, key: event === pendingMessage.value ? "pending" : index }))
     .filter(({ event }) => ["user", "say", "tool", "skill", "browser", "warn", "error", "published", "gaps"].includes(event.type)),
 );
 const suggestions = [
@@ -41,8 +58,12 @@ function handleEnter(event: Event | KeyboardEvent) {
   if (!("key" in event)) return;
   if (event.key === "Enter" && !event.shiftKey && !event.isComposing && preferences.value.enterToSend) {
     event.preventDefault();
-    void submitMessage();
+    void sendMessage();
   }
+}
+async function sendMessage() {
+  if (sending.value || loadingSession.value || !connected.value || !draft.value.trim()) return;
+  await submitMessage();
 }
 function useSuggestion(prompt: string) {
   draft.value = prompt;
@@ -67,7 +88,7 @@ watch([activeSessionId, () => activeSession.value?.id], () => {
   focusComposer();
 });
 watch(activeSessionId, () => { browserOpen.value = false; });
-watch(() => activeSession.value?.events.length, async () => {
+watch([() => timeline.value.length, activityLabel], async () => {
   const element = messageList.value;
   const nearBottom = !element || element.scrollHeight - element.scrollTop - element.clientHeight < 100;
   if (nearBottom) await scrollToLatest();
@@ -80,8 +101,8 @@ onMounted(() => {
 
 <template>
   <section class="chat-view" aria-label="门店助手对话">
-    <div v-if="loadingSession" class="chat-loading" role="status">正在加载对话…</div>
-    <div v-else-if="!activeSession" class="chat-welcome-scroll">
+    <div v-if="loadingSession && !showConversation" class="chat-loading" role="status">正在加载对话…</div>
+    <div v-else-if="!showConversation" class="chat-welcome-scroll">
       <div class="chat-welcome">
         <p class="chat-eyebrow">门店经营，从一个问题开始</p>
         <h1>把经营问题说清楚，<br /><span>让数据帮你做决定。</span></h1>
@@ -107,7 +128,7 @@ onMounted(() => {
       <div class="chat-messages">
         <article
           v-for="entry in timeline"
-          :key="entry.index"
+          :key="entry.key"
           class="chat-message"
           :class="entry.event.type === 'user' ? 'chat-message-user' : 'chat-message-assistant'">
           <span class="chat-avatar" :class="{ 'chat-avatar-assistant': entry.event.type !== 'user' }">
@@ -149,7 +170,15 @@ onMounted(() => {
             </div>
           </div>
         </article>
+        <article v-if="activityLabel" class="chat-message chat-message-assistant chat-activity" role="status" aria-live="polite" aria-atomic="true">
+          <span class="chat-avatar chat-avatar-assistant"><AgentIcon :name="waitingForConfirmation ? 'clock' : 'spark'" :size="18" /></span>
+          <div class="chat-activity-content">
+            <span v-if="responding || cancelling" class="chat-loading-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+            <span>{{ activityLabel }}</span>
+          </div>
+        </article>
         <SessionActions
+          v-if="activeSession"
           :key="activeSessionId ?? 'draft'"
           :session-id="activeSession.id"
           :events="activeSession.events"
@@ -165,7 +194,7 @@ onMounted(() => {
     <div class="chat-composer-area">
       <p v-if="!connected" class="chat-composer-note">先在 <ElButton link type="primary" @click="openView('settings')">设置</ElButton> 中填写网关地址和 token。</p>
       <p v-else-if="revisionPageSlug" class="chat-composer-note">正在修改页面：<ElButton link type="primary" @click="openPage(revisionPageSlug)">{{ revisionPageSlug }}</ElButton></p>
-      <form class="chat-composer" @submit.prevent="submitMessage">
+      <form class="chat-composer" @submit.prevent="sendMessage">
         <ElInput
           id="message-input"
           ref="composer"
@@ -175,9 +204,20 @@ onMounted(() => {
           :maxlength="8000"
           resize="none"
           aria-label="向门店助手发送消息"
-          :placeholder="activeSession?.status === 'waiting' ? '请先完成上方的问题或授权确认' : '描述你的经营需求，或继续聊聊…'"
+          :placeholder="waitingForConfirmation ? '请先完成问题或授权确认，也可以停止后继续发送' : responding ? '助手正在处理，你可以先编写下一条消息…' : '描述你的经营需求，或继续聊聊…'"
           @keydown="handleEnter" />
+        <button
+          v-if="canCancel || cancelling"
+          class="chat-send chat-stop"
+          type="button"
+          aria-label="停止回复"
+          :title="cancelling ? '正在停止…' : '停止回复'"
+          :disabled="cancelling"
+          @click="cancel">
+          <span class="chat-stop-symbol" aria-hidden="true"></span>
+        </button>
         <ElButton
+          v-else
           class="chat-send"
           type="primary"
           native-type="submit"
@@ -189,11 +229,10 @@ onMounted(() => {
       </form>
       <div class="chat-composer-footer">
         <div class="chat-conversation-actions">
-          <ElButton v-if="activeSession?.status === 'running'" link :loading="cancelling" @click="cancel"><AgentIcon v-if="!cancelling" name="stop" :size="13" />停止执行</ElButton>
           <ElButton v-if="activeSession?.slug" link type="primary" @click="openPage(activeSession.slug)">查看生成页面</ElButton>
           <ElButton v-if="latestBrowser" link @click="browserOpen = !browserOpen">{{ browserOpen ? "收起浏览器" : "查看浏览器" }}</ElButton>
         </div>
-        <p class="chat-keyboard-hint">{{ preferences.enterToSend ? "Enter 发送 · Shift + Enter 换行" : "点击发送 · Enter 换行" }}</p>
+        <p class="chat-keyboard-hint">{{ composerHint }}</p>
       </div>
     </div>
   </section>
@@ -232,6 +271,13 @@ onMounted(() => {
 .chat-message-actions :deep(.el-button) { color: var(--qdd-muted); font-size: 12px; }
 .chat-message-actions :deep(.el-button--primary) { color: var(--qdd-primary); }
 .chat-message-actions :deep(.el-button > span) { gap: 5px; }
+.chat-activity { color: var(--qdd-muted); font-size: 13px; }
+.chat-activity-content { display: flex; align-items: center; gap: 10px; min-height: 36px; line-height: 1.7; }
+.chat-loading-dots { display: flex; flex: 0 0 auto; align-items: center; gap: 4px; }
+.chat-loading-dots i { width: 5px; height: 5px; border-radius: 50%; background: var(--qdd-primary); animation: chat-loading-pulse 1.2s ease-in-out infinite; }
+.chat-loading-dots i:nth-child(2) { animation-delay: .16s; }
+.chat-loading-dots i:nth-child(3) { animation-delay: .32s; }
+@keyframes chat-loading-pulse { 0%, 80%, 100% { opacity: .35; transform: translateY(0); } 40% { opacity: 1; transform: translateY(-3px); } }
 .chat-tool { display: flex; align-items: flex-start; gap: 10px; padding: 10px 13px; border: 1px solid var(--qdd-border); border-radius: 8px; background: var(--qdd-surface); color: var(--qdd-text); font-size: 13px; line-height: 1.7; }
 .chat-tool > span { flex: 0 0 auto; margin-top: 1px; padding: 0 6px; border-radius: 4px; background: var(--qdd-bg); color: var(--qdd-muted); font-size: 11px; }
 .chat-tool > div { min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -253,7 +299,12 @@ onMounted(() => {
 .chat-composer :deep(.el-textarea) { flex: 1; align-self: center; min-width: 0; }
 .chat-composer :deep(.el-textarea__inner) { padding: 0; box-shadow: none; border: 0; border-radius: 0; background: transparent; color: var(--qdd-text); font: 14px/1.8 var(--qdd-font); outline: none; }
 .chat-composer :deep(.el-textarea__inner:focus-visible) { outline: none; }
-.chat-send.el-button { flex: 0 0 44px; width: 44px; height: 44px; padding: 0; border-radius: 10px; }
+.chat-send { flex: 0 0 44px; width: 44px; height: 44px; padding: 0; border-radius: 10px; }
+.chat-stop { display: grid; place-items: center; border: 1px solid var(--qdd-primary); background: var(--qdd-primary); color: var(--qdd-surface); cursor: pointer; }
+.chat-stop:hover { opacity: .88; }
+.chat-stop:focus-visible { outline: 2px solid var(--qdd-primary); outline-offset: 3px; }
+.chat-stop:disabled { opacity: .55; cursor: wait; }
+.chat-stop-symbol { width: 14px; height: 14px; border-radius: 2px; background: currentColor; }
 .chat-composer-note { display: flex; align-items: center; flex-wrap: wrap; gap: 3px; margin: 0 0 10px; color: var(--qdd-muted); font-size: 12px; }
 .chat-composer-note :deep(.el-button) { font-size: 12px; }
 .chat-composer-footer { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 17px; margin-top: 9px; }
@@ -261,6 +312,10 @@ onMounted(() => {
 .chat-conversation-actions :deep(.el-button) { margin: 0; color: var(--qdd-muted); font-size: 11px; }
 .chat-conversation-actions :deep(.el-button > span) { gap: 5px; }
 .chat-keyboard-hint { margin: 0 0 0 auto; text-align: right; color: var(--qdd-muted); font-size: 11px; }
+@media (prefers-reduced-motion: reduce) {
+  .chat-messages-scroll { scroll-behavior: auto; }
+  .chat-loading-dots i { animation: none; opacity: .65; }
+}
 @media (max-width: 760px) {
   .chat-welcome-scroll { padding: 26px 20px; }
   .chat-welcome h1 { font-size: 30px; }

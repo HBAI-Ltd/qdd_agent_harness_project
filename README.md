@@ -16,6 +16,9 @@ Aidol 创造营参赛项目——钱多多门店人工智能助手：店铺管�
 | 数据集 | `apps/cli/src/datasets/` | `DatasetStore` 接口 + JSONL 实现：按天分区的只追加日志、检查点、主键去重、跨进程锁、增量刷新 |
 | 计算引擎 | `packages/shared/src/compute.ts` | 零 SQL 声明式聚合 / 时间线回放 / 状态区间 / 关联；数据源侧与浏览器共用同一份代码 |
 | 会话 | `apps/cli/src/sessions.ts` | 文件存储（`workspace/sessions/`），终端与前端共享 |
+| 手机投屏 App | `apps/android-screen/` | 安卓 MediaProjection 内网连续投屏，带系统授权与停止通知 |
+| 安卓设备 MCP | `apps/android-mcp/` | 连续接收手机画面，提供电脑鼠标键盘遥控和视觉 MCP；通过 Wi-Fi 或 USB 连接 ESP32，再由 BLE HID 控制安卓 |
+| 硬件桥接 | `apps/esp/` | AI Passport ESP32-C3 的蓝牙键鼠、实体停止、中文界面和板上 Wi-Fi 密码键盘 |
 
 ### 页面如何取数
 
@@ -87,12 +90,19 @@ npm run qdd -- reply <会话id> "按周汇总"
 | `npm run build:esp` | 构建并验证 AI Passport 合并固件与匹配的调试归档，不烧录 |
 | `npm run validate:esp` | 固件完整门禁：仓库检查、宿主测试、构建与镜像验证 |
 | `npm run idf:esp -- <参数>` | 激活 IDF 后转发原生 `idf.py` 参数 |
+| `npm run android:mcp` | 启动安卓 stdio MCP；MCP 客户端配置直接使用 `node` 与编译后的入口路径 |
+| `npm run android:mcp:http` | 启动本机 Streamable HTTP MCP，无需令牌 |
+| `npm run test:android` | 安卓 MCP、连续投屏、Wi-Fi/串口键鼠、操作台与会话清理离线测试 |
+| `npm run build:android:screen` | 构建手机局域网投屏 APK（Android SDK + JDK 17） |
+| `start-android.cmd` | 启动连续投屏操作台与 MCP；ESP32 可通过 Wi-Fi 或 USB 连接电脑 |
 
 ## 目录结构
 
 ```text
 apps/cli/            harness（datasource / agent / gateway / guard / sessions）
 apps/esp/            FoloToy AI Passport ESP32-C3 固件（ESP-IDF 5.5.3，独立构建）
+apps/android-screen/ 安卓内网投屏 App（MediaProjection）
+apps/android-mcp/    手机内网画面与 ESP32 BLE 键鼠 MCP（电脑运行）
 packages/shared/     共享类型（含前端 API 契约）
 docs/api.md          前端对接文档
 workspace/           运行时生成（已 gitignore）：style.md、metrics.json、datasets/、store.json 示例数据、site/、sessions/、state/、.gateway-token
@@ -100,3 +110,6 @@ workspace/           运行时生成（已 gitignore）：style.md、metrics.jso
 
 AI Passport 环境配置与命令见 [apps/esp/README.zh_CN.md](apps/esp/README.zh_CN.md)。
 根 `npm run build` 继续只构建 TypeScript 工程；固件通过 `build:esp` 单独构建。
+
+安卓连接、配对、只读投屏及 MCP 配置见 [apps/android-mcp/README.zh_CN.md](apps/android-mcp/README.zh_CN.md)。
+该 MCP 服务直接返回手机原分辨率 JPEG 图像，需要支持 MCP 图像的视觉客户端；现有门店 harness 的文本 MCP 适配器尚不转发图像内容。

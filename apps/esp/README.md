@@ -4,10 +4,54 @@
 
 # AI Passport firmware workspace
 
-`@qdd/esp` contains the FoloToy AI Passport ESP32-C3 hardware-test baseline,
-integrated into this npm monorepo. It targets 8 MB Flash without PSRAM and uses
-ESP-IDF **5.5.3**. The baseline is a starting point for future firmware work;
-it does not yet connect the device to the QDD assistant.
+`@qdd/esp` builds the Device Controller keyboard/mouse bridge on FoloToy AI Passport
+(ESP32-C3, 8 MB Flash, no PSRAM, ESP-IDF **5.5.3**). Connect it to the computer
+over local Wi-Fi TCP or USB Serial/JTAG, and pair its BLE keyboard/mouse with Android. Android
+runs the separate Device Screen Sharing App and sends its screen to the computer
+over the local Wi-Fi network. The computer owns the MCP tools. Phone USB is
+only needed for initial App installation or diagnostics; input uses no accessibility service.
+Live previews offer turbo grayscale, fast, standard and original modes; MCP requests original-size snapshots on demand. App/PC operation requires
+no application token or connection code; Android consent and BLE system pairing remain.
+See [bridge setup and protocol](docs/android-bridge.md).
+
+The product names are Device Controller, Device Screen Sharing and Device Console. The independent
+240 x 320 dark card UI uses `#d4380d` and three fixed, theme-colored, rounded vertical markers on the right, matching UP, DOWN and OK.
+They contain no text and are not a scrolling thumb. They touch the visible right edge without a gap, following its rounded corners; the top/bottom end four pixels from the edges.
+Home has two vertical choices: Emergency stop / Cancel emergency stop, and Settings. Boot and
+returning home default to the stop item. UP/DOWN only select; short OK executes the current item.
+Confirming stop immediately inhibits input and latches it. Only local selection and confirmation
+can clear it; stop wins over an unlock observed in the same worker round. The PC cannot unlock it.
+Settings and ordinary pages use UP/DOWN, short OK and explicit vertical Back entries. Input is
+inhibited throughout settings; leaving never clears the stop or adds manual enable/pause steps.
+The key guide and Bluetooth pairing are available in Settings, preserving existing bonds. The guide follows the actual enclosure: a tall gray shell, top strap opening, upper-left screen, lower-right diagonal speaker grille and silver right-side keys. Connector lines map the keys to their navigation actions.
+Wi-Fi scanning traverses all SDK records and retains up to 64 distinct SSID/security networks,
+ordered by signal strength, with four rows per page. Duplicate mesh APs do not consume separate
+entries. This China configuration scans 2.4 GHz channels 1 through 13 with a longer dwell time;
+ESP32-C3 cannot discover 5 GHz-only networks. Scan lists stay in static storage and only single
+entries are copied to UI tasks, avoiding large stack snapshots.
+Wi-Fi password entry retains its four-page, four-row, six-column keyboard and all 95 printable
+ASCII characters: choose a row, then a character, using UP/DOWN and OK. This is the explicit
+hold exception: holding OK opens the vertical Connect/Continue/Delete/Back menu. Passwords stay masked.
+Settings also offers Reset device. Its vertical confirmation defaults to Back;
+only selecting Clear and start again with the physical OK key requests reset.
+It releases input, reboots and clears all default NVS data before BLE/Wi-Fi start,
+including Wi-Fi credentials and Bluetooth bonds, then returns to initial onboarding.
+Firmware and the embedded APK are retained. On the phone, forget the old Bluetooth
+pairing and pair again. Installing this firmware alone does not clear settings.
+The computer indicator requires a live heartbeat, rather than a plugged cable.
+Only changed labels/colors update. Licensed 14/20 px CJK subsets, reproduction
+and rendering checks are documented in [assets](assets/README.md).
+Protocol operation names and the Bluetooth identifier remain ASCII.
+
+After Wi-Fi connects, the QR page shows `http://<board-IP>:3334/` for scanning
+or browser APK download. Phone, PC and board must share the LAN. The PC can
+discover it automatically, or set `ESP_HOST` to that IPv4 and `ESP_TCP_PORT`
+to control port `3333`; omit `ESP_HOST` to use `ESP_PORT` over USB.
+Only one transport controls the board at a time. Losing it releases input.
+After reconnect, a fresh controller heartbeat and ready secure BLE link permit
+new input without another enable action; held inputs are never replayed.
+Wi-Fi credentials stay in the board's
+separate NVS profile and never clear Bluetooth bonds.
 
 Read [AGENTS.md](AGENTS.md) before development, then follow its task routing.
 The [upstream documentation index](docs/README.md) and
@@ -91,6 +135,8 @@ the npm lockfile. Compilation and host tests do not prove on-device behavior.
 
 - Source: [FoloToy/ai-passport on Gitee](https://gitee.com/FoloToy/ai-passport).
 - Imported commit: `a06235e4c94361e3f8a2d498930254101718acae`.
+- The QDD application starts in `main/qdd_main.c`; the original hardware-test
+  sources remain as unlinked references and host-test fixtures.
 - License: [MIT, Copyright (c) 2026 FoloToy](LICENSE); the upstream license and
   attribution are preserved.
 - The source is vendored under `apps/esp/` without a nested `.git` directory.

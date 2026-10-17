@@ -5,6 +5,8 @@ managed_components/
 .vscode/
 .idea/
 .idf.local.json
+.wifi.local.json
+*.wifi.local.json
 
 # Generated repository-local links; canonical skill sources live in skills/.
 /.agents/skills/passport-develop

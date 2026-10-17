@@ -1,0 +1,486 @@
+// Application-owned HOGP GATT service on ESP-IDF NimBLE; one Bluetooth host.
+#include "qdd_ble.h"
+
+#include "esp_mac.h"
+#include "esp_random.h"
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "host/ble_att.h"
+#include "host/ble_gap.h"
+#include "host/ble_gatt.h"
+#include "host/ble_hs.h"
+#include "host/ble_sm.h"
+#include "host/ble_store.h"
+#include "host/util/util.h"
+#include "nimble/nimble_port.h"
+#include "nvs_flash.h"
+#include "services/gap/ble_svc_gap.h"
+#include "services/gatt/ble_svc_gatt.h"
+#include <stdio.h>
+#include <stdatomic.h>
+#include <string.h>
+
+#define PAIRING_WINDOW_MS 120000
+#define REPORT_MODE 1
+
+// Standard HID report descriptors: relative 3-button mouse with wheel, boot
+// compatible 6-key keyboard, and one 16-bit Consumer usage (e.g. AC Home/Back).
+static const uint8_t s_report_map[] = {
+  0x05,0x01, 0x09,0x02, 0xA1,0x01, 0x85,QDD_REPORT_MOUSE,
+  0x09,0x01, 0xA1,0x00, 0x05,0x09, 0x19,0x01, 0x29,0x03,
+  0x15,0x00, 0x25,0x01, 0x95,0x03, 0x75,0x01, 0x81,0x02,
+  0x95,0x01, 0x75,0x05, 0x81,0x03,
+  0x05,0x01, 0x09,0x30, 0x09,0x31, 0x09,0x38,
+  0x15,0x81, 0x25,0x7F, 0x75,0x08, 0x95,0x03, 0x81,0x06, 0xC0,0xC0,
+  0x05,0x01, 0x09,0x06, 0xA1,0x01, 0x85,QDD_REPORT_KEYBOARD,
+  0x05,0x07, 0x19,0xE0, 0x29,0xE7, 0x15,0x00, 0x25,0x01,
+  0x75,0x01, 0x95,0x08, 0x81,0x02,
+  0x75,0x08, 0x95,0x01, 0x81,0x03,
+  0x95,0x05, 0x75,0x01, 0x05,0x08, 0x19,0x01, 0x29,0x05, 0x91,0x02,
+  0x95,0x01, 0x75,0x03, 0x91,0x03,
+  0x95,0x06, 0x75,0x08, 0x15,0x00, 0x26,0xFF,0x00,
+  0x05,0x07, 0x19,0x00, 0x2A,0xFF,0x00, 0x81,0x00, 0xC0,
+  0x05,0x0C, 0x09,0x01, 0xA1,0x01, 0x85,QDD_REPORT_CONSUMER,
+  0x15,0x00, 0x27,0xFF,0xFF,0x00,0x00,
+  0x19,0x00, 0x2A,0xFF,0xFF, 0x75,0x10, 0x95,0x01, 0x81,0x00, 0xC0
+};
+static char s_name[24];
+static uint8_t s_address_type;
+static atomic_uint_fast16_t s_connection = BLE_HS_CONN_HANDLE_NONE;
+static uint16_t s_input_handles[2][4];
+static qdd_hid_subscriptions_t s_subscriptions;
+static uint64_t s_pairing_deadline;
+static atomic_bool s_new_peer;
+static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
+static qdd_ble_status_t s_status;
+static bool s_suspended;
+static uint8_t s_keyboard_leds;
+static atomic_int s_battery = -1;
+static uint8_t s_pnp_id[7];
+
+void ble_store_config_init(void);
+static int gap_event(struct ble_gap_event *event, void *argument);
+static void on_reset(int reason);
+
+static uint64_t now_ms(void) { return (uint64_t)esp_timer_get_time() / 1000u; }
+
+const char *qdd_ble_name(void) { return s_name; }
+
+qdd_ble_status_t qdd_ble_status(void) {
+  portENTER_CRITICAL(&s_lock);
+  qdd_ble_status_t status = s_status;
+  portEXIT_CRITICAL(&s_lock);
+  return status;
+}
+
+// Caller holds s_lock. Encryption alone is not HID readiness: Android must
+// enable both active keyboard/mouse Input Report CCCDs before ARM can succeed.
+static void update_ready_locked(void) {
+  const bool secure = s_status.connected && s_status.encrypted &&
+                      s_status.authenticated && s_status.bonded && !s_suspended;
+  s_status.ready = secure && qdd_hid_subscriptions_ready(&s_subscriptions);
+  s_status.consumer_ready = secure &&
+    qdd_hid_subscriptions_notifying(&s_subscriptions, QDD_REPORT_CONSUMER);
+}
+
+typedef struct { const uint8_t *data; size_t length; } gatt_blob_t;
+static const uint8_t s_zero[8];
+static const uint8_t s_hid_info[] = {0x11, 0x01, 0x00, 0x02};
+static const uint8_t s_references[][2] = {{0,0}, {1,1}, {2,1}, {3,1}, {2,2}};
+static const gatt_blob_t s_input_blobs[] = {{s_zero,0}, {s_zero,4}, {s_zero,8}, {s_zero,2}};
+static const gatt_blob_t s_ref_blobs[] = {
+  {s_references[0],2}, {s_references[1],2}, {s_references[2],2},
+  {s_references[3],2}, {s_references[4],2}
+};
+static const gatt_blob_t s_map_blob = {s_report_map, sizeof(s_report_map)};
+static const gatt_blob_t s_info_blob = {s_hid_info, sizeof(s_hid_info)};
+static const gatt_blob_t s_boot_mouse_blob = {s_zero, 3};
+static const gatt_blob_t s_pnp_blob = {s_pnp_id, sizeof(s_pnp_id)};
+
+void qdd_ble_set_battery(int percent) {
+  atomic_store(&s_battery, percent >= 0 && percent <= 100 ? percent : -1);
+}
+
+static int battery_access(uint16_t connection, uint16_t handle,
+                           struct ble_gatt_access_ctxt *context, void *argument) {
+  (void)connection;
+  (void)handle;
+  (void)argument;
+  if (context->op != BLE_GATT_ACCESS_OP_READ_CHR) return BLE_ATT_ERR_WRITE_NOT_PERMITTED;
+  const int sample = atomic_load(&s_battery);
+  if (sample < 0) return BLE_ATT_ERR_UNLIKELY; // No valid cached battery sample.
+  const uint8_t level = (uint8_t)sample;
+  return os_mbuf_append(context->om, &level, 1) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+}
+
+static int blob_access(uint16_t connection, uint16_t handle,
+                        struct ble_gatt_access_ctxt *context, void *argument) {
+  (void)connection;
+  (void)handle;
+  const gatt_blob_t *blob = argument;
+  if (context->op != BLE_GATT_ACCESS_OP_READ_CHR &&
+      context->op != BLE_GATT_ACCESS_OP_READ_DSC) return BLE_ATT_ERR_WRITE_NOT_PERMITTED;
+  return os_mbuf_append(context->om, blob->data, blob->length) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+}
+
+static int mode_access(uint16_t connection, uint16_t handle,
+                        struct ble_gatt_access_ctxt *context, void *argument) {
+  (void)connection;
+  (void)handle;
+  const bool control_point = (uintptr_t)argument == 1;
+  if (context->op == BLE_GATT_ACCESS_OP_READ_CHR && !control_point) {
+    portENTER_CRITICAL(&s_lock);
+    const uint8_t mode = s_subscriptions.protocol_mode;
+    portEXIT_CRITICAL(&s_lock);
+    return os_mbuf_append(context->om, &mode, 1) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+  }
+  uint8_t value;
+  if (context->op != BLE_GATT_ACCESS_OP_WRITE_CHR) return BLE_ATT_ERR_READ_NOT_PERMITTED;
+  if (OS_MBUF_PKTLEN(context->om) != 1 || ble_hs_mbuf_to_flat(context->om, &value, 1, NULL) != 0) {
+    return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+  }
+  if (value > 1) return BLE_ATT_ERR_VALUE_NOT_ALLOWED;
+  portENTER_CRITICAL(&s_lock);
+  if (control_point) {
+    if (s_suspended != (value == 0)) s_status.link_epoch++;
+    s_suspended = value == 0;
+  } else {
+    if (s_subscriptions.protocol_mode != value) s_status.link_epoch++;
+    s_subscriptions.protocol_mode = value;
+  }
+  update_ready_locked();
+  portEXIT_CRITICAL(&s_lock);
+  return 0;
+}
+
+static int led_access(uint16_t connection, uint16_t handle,
+                       struct ble_gatt_access_ctxt *context, void *argument) {
+  (void)connection;
+  (void)handle;
+  (void)argument;
+  if (context->op == BLE_GATT_ACCESS_OP_READ_CHR) {
+    return os_mbuf_append(context->om, &s_keyboard_leds, 1) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+  }
+  if (context->op != BLE_GATT_ACCESS_OP_WRITE_CHR) return BLE_ATT_ERR_UNLIKELY;
+  if (OS_MBUF_PKTLEN(context->om) != 1 ||
+      ble_hs_mbuf_to_flat(context->om, &s_keyboard_leds, 1, NULL) != 0) {
+    return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+  }
+  return 0;
+}
+
+#define SECURE_READ (BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_READ_ENC | BLE_GATT_CHR_F_READ_AUTHEN)
+#define SECURE_WRITE (BLE_GATT_CHR_F_WRITE_NO_RSP | BLE_GATT_CHR_F_WRITE_ENC | BLE_GATT_CHR_F_WRITE_AUTHEN)
+#define SECURE_NOTIFY (SECURE_READ | BLE_GATT_CHR_F_NOTIFY | BLE_GATT_CHR_F_NOTIFY_INDICATE_AUTHEN)
+#define REPORT_REFERENCE(index) (struct ble_gatt_dsc_def[]) { \
+  {.uuid = BLE_UUID16_DECLARE(0x2908), .access_cb = blob_access, \
+   .att_flags = BLE_ATT_F_READ | BLE_ATT_F_READ_ENC | BLE_ATT_F_READ_AUTHEN, \
+   .arg = (void *)&s_ref_blobs[index]}, {0} }
+#define INPUT_REPORT(index) \
+  {.uuid = BLE_UUID16_DECLARE(0x2A4D), .access_cb = blob_access, \
+   .flags = SECURE_NOTIFY, .min_key_size = 16, .arg = (void *)&s_input_blobs[index], \
+   .val_handle = &s_input_handles[1][index], .descriptors = REPORT_REFERENCE(index)}
+
+// Own the public GATT definitions and GAP callback. In particular, do not
+// instantiate esp_hidd's private legacy listener: its failed-CONNECT path calls
+// conn_find on a nonexistent connection and asserts in ESP-IDF 5.5.3.
+static const struct ble_gatt_svc_def s_services[] = {
+  {.type = BLE_GATT_SVC_TYPE_PRIMARY, .uuid = BLE_UUID16_DECLARE(0x1812),
+   .characteristics = (struct ble_gatt_chr_def[]) {
+    {.uuid = BLE_UUID16_DECLARE(0x2A4A), .access_cb = blob_access,
+     .flags = SECURE_READ, .arg = (void *)&s_info_blob, .min_key_size = 16},
+    {.uuid = BLE_UUID16_DECLARE(0x2A4B), .access_cb = blob_access,
+     .flags = SECURE_READ, .arg = (void *)&s_map_blob, .min_key_size = 16},
+    {.uuid = BLE_UUID16_DECLARE(0x2A4E), .access_cb = mode_access,
+     .flags = SECURE_READ | SECURE_WRITE, .min_key_size = 16},
+    {.uuid = BLE_UUID16_DECLARE(0x2A4C), .access_cb = mode_access,
+     .flags = SECURE_WRITE, .arg = (void *)1, .min_key_size = 16},
+    INPUT_REPORT(QDD_REPORT_MOUSE), INPUT_REPORT(QDD_REPORT_KEYBOARD), INPUT_REPORT(QDD_REPORT_CONSUMER),
+    {.uuid = BLE_UUID16_DECLARE(0x2A4D), .access_cb = led_access,
+     .flags = SECURE_READ | SECURE_WRITE | BLE_GATT_CHR_F_WRITE,
+     .min_key_size = 16, .descriptors = REPORT_REFERENCE(4)},
+    {.uuid = BLE_UUID16_DECLARE(0x2A33), .access_cb = blob_access,
+     .flags = SECURE_NOTIFY, .arg = (void *)&s_boot_mouse_blob,
+     .val_handle = &s_input_handles[0][QDD_REPORT_MOUSE], .min_key_size = 16},
+    {.uuid = BLE_UUID16_DECLARE(0x2A22), .access_cb = blob_access,
+     .flags = SECURE_NOTIFY, .arg = (void *)&s_input_blobs[QDD_REPORT_KEYBOARD],
+     .val_handle = &s_input_handles[0][QDD_REPORT_KEYBOARD], .min_key_size = 16},
+    {.uuid = BLE_UUID16_DECLARE(0x2A32), .access_cb = led_access,
+     .flags = SECURE_READ | SECURE_WRITE | BLE_GATT_CHR_F_WRITE, .min_key_size = 16},
+    {0}
+   }},
+  {.type = BLE_GATT_SVC_TYPE_PRIMARY, .uuid = BLE_UUID16_DECLARE(0x180F),
+   .characteristics = (struct ble_gatt_chr_def[]) {
+    {.uuid = BLE_UUID16_DECLARE(0x2A19), .access_cb = battery_access,
+     .flags = BLE_GATT_CHR_F_READ},
+    {0}
+   }},
+  {.type = BLE_GATT_SVC_TYPE_PRIMARY, .uuid = BLE_UUID16_DECLARE(0x180A),
+   .characteristics = (struct ble_gatt_chr_def[]) {
+    {.uuid = BLE_UUID16_DECLARE(0x2A50), .access_cb = blob_access,
+     .flags = BLE_GATT_CHR_F_READ, .arg = (void *)&s_pnp_blob},
+    {0}
+   }},
+  {0}
+};
+
+static bool known_peer(const ble_addr_t *address) {
+  ble_addr_t peers[CONFIG_BT_NIMBLE_MAX_BONDS];
+  int count = 0;
+  if (ble_store_util_bonded_peers(peers, &count, CONFIG_BT_NIMBLE_MAX_BONDS) != 0) return false;
+  for (int i = 0; i < count; i++) {
+    if (peers[i].type == address->type && memcmp(peers[i].val, address->val, 6) == 0) return true;
+  }
+  return false;
+}
+
+void qdd_ble_open_pairing(void) {
+  portENTER_CRITICAL(&s_lock);
+  s_pairing_deadline = now_ms() + PAIRING_WINDOW_MS;
+  s_status.pairing_open = true;
+  portEXIT_CRITICAL(&s_lock);
+}
+
+static int advertise(void) {
+  static ble_uuid16_t hid_uuid = BLE_UUID16_INIT(0x1812);
+  struct ble_hs_adv_fields fields = {0};
+  fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
+  fields.appearance = 0x03C0; // Generic HID; Report Map declares keyboard + mouse.
+  fields.appearance_is_present = 1;
+  fields.uuids16 = &hid_uuid;
+  fields.num_uuids16 = 1;
+  fields.uuids16_is_complete = 1;
+  int rc = ble_gap_adv_set_fields(&fields);
+  if (rc != 0) return rc;
+  struct ble_hs_adv_fields scan = {0};
+  scan.name = (const uint8_t *)s_name;
+  scan.name_len = strlen(s_name);
+  scan.name_is_complete = 1;
+  rc = ble_gap_adv_rsp_set_fields(&scan);
+  if (rc != 0) return rc;
+  struct ble_gap_adv_params params = {0};
+  params.conn_mode = BLE_GAP_CONN_MODE_UND;
+  params.disc_mode = BLE_GAP_DISC_MODE_GEN;
+  return ble_gap_adv_start(s_address_type, NULL, BLE_HS_FOREVER, &params, gap_event, NULL);
+}
+
+static void update_security(uint16_t connection) {
+  struct ble_gap_conn_desc desc;
+  if (ble_gap_conn_find(connection, &desc) != 0) return;
+  portENTER_CRITICAL(&s_lock);
+  s_status.connected = true;
+  s_status.encrypted = desc.sec_state.encrypted;
+  s_status.authenticated = desc.sec_state.authenticated;
+  s_status.bonded = desc.sec_state.bonded;
+  update_ready_locked();
+  if (s_status.encrypted && s_status.authenticated && s_status.bonded) {
+    s_status.passkey_visible = false;
+    if (s_new_peer) s_status.pairing_open = false;
+  }
+  portEXIT_CRITICAL(&s_lock);
+}
+
+static int gap_event(struct ble_gap_event *event, void *argument) {
+  (void)argument;
+  switch (event->type) {
+    case BLE_GAP_EVENT_CONNECT: {
+      if (event->connect.status != 0) {
+        on_reset(event->connect.status);
+        (void)advertise();
+        return 0;
+      }
+      s_connection = event->connect.conn_handle;
+      portENTER_CRITICAL(&s_lock);
+      s_status.link_epoch++;
+      s_suspended = false;
+      qdd_hid_subscriptions_reset(&s_subscriptions);
+      update_ready_locked();
+      portEXIT_CRITICAL(&s_lock);
+      struct ble_gap_conn_desc desc;
+      if (ble_gap_conn_find(s_connection, &desc) != 0) return 0;
+      s_new_peer = !known_peer(&desc.peer_id_addr);
+      if (s_new_peer && !qdd_ble_status().pairing_open) {
+        (void)ble_gap_terminate(s_connection, BLE_ERR_REM_USER_CONN_TERM);
+        return 0;
+      }
+      update_security(s_connection);
+      const int rc = ble_gap_security_initiate(s_connection);
+      if (rc != 0 && rc != BLE_HS_EALREADY) {
+        (void)ble_gap_terminate(s_connection, BLE_ERR_REM_USER_CONN_TERM);
+      }
+      return 0;
+    }
+    case BLE_GAP_EVENT_ENC_CHANGE:
+      update_security(event->enc_change.conn_handle);
+      if (event->enc_change.status != 0 ||
+          !qdd_ble_status().authenticated || !qdd_ble_status().bonded) {
+        (void)ble_gap_terminate(event->enc_change.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+      }
+      return 0;
+    case BLE_GAP_EVENT_PASSKEY_ACTION: {
+      if (!qdd_ble_status().pairing_open || event->passkey.params.action != BLE_SM_IOACT_DISP) {
+        (void)ble_gap_terminate(event->passkey.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+        return 0;
+      }
+      const uint32_t passkey = 100000u + esp_random() % 900000u;
+      portENTER_CRITICAL(&s_lock);
+      s_status.passkey = passkey;
+      s_status.passkey_visible = true;
+      portEXIT_CRITICAL(&s_lock);
+      struct ble_sm_io io = {.action = BLE_SM_IOACT_DISP, .passkey = passkey};
+      if (ble_sm_inject_io(event->passkey.conn_handle, &io) != 0) {
+        (void)ble_gap_terminate(event->passkey.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+      }
+      return 0;
+    }
+    case BLE_GAP_EVENT_REPEAT_PAIRING:
+      // Never silently delete a stored bond. The phone must retain its keys.
+      return BLE_GAP_REPEAT_PAIRING_IGNORE;
+    case BLE_GAP_EVENT_SUBSCRIBE:
+      if (event->subscribe.conn_handle != atomic_load(&s_connection)) return 0;
+      portENTER_CRITICAL(&s_lock);
+      for (uint8_t mode = 0; mode < 2; mode++) {
+        for (uint8_t report = 1; report <= 3; report++) {
+          if (s_input_handles[mode][report] != 0 &&
+              s_input_handles[mode][report] == event->subscribe.attr_handle) {
+            qdd_hid_subscriptions_set(&s_subscriptions, mode, report,
+                                      event->subscribe.cur_notify != 0);
+          }
+        }
+      }
+      update_ready_locked();
+      portEXIT_CRITICAL(&s_lock);
+      return 0;
+    case BLE_GAP_EVENT_DISCONNECT:
+      s_connection = BLE_HS_CONN_HANDLE_NONE;
+      portENTER_CRITICAL(&s_lock);
+      s_status.link_epoch++;
+      s_status.connected = false;
+      s_status.encrypted = false;
+      s_status.authenticated = false;
+      s_status.bonded = false;
+      s_status.passkey_visible = false;
+      qdd_hid_subscriptions_reset(&s_subscriptions);
+      update_ready_locked();
+      portEXIT_CRITICAL(&s_lock);
+      (void)advertise();
+      return 0;
+    case BLE_GAP_EVENT_ADV_COMPLETE:
+      (void)advertise();
+      return 0;
+    default: return 0;
+  }
+}
+
+static void on_sync(void) {
+  if (ble_hs_util_ensure_addr(0) != 0 || ble_hs_id_infer_auto(0, &s_address_type) != 0) return;
+  ble_addr_t peers[CONFIG_BT_NIMBLE_MAX_BONDS];
+  int count = 0;
+  if (ble_store_util_bonded_peers(peers, &count, CONFIG_BT_NIMBLE_MAX_BONDS) == 0 && !count) {
+    qdd_ble_open_pairing();
+  }
+  (void)advertise();
+}
+
+static void on_reset(int reason) {
+  (void)reason;
+  portENTER_CRITICAL(&s_lock);
+  s_status.link_epoch++;
+  s_status.connected = false;
+  s_status.encrypted = false;
+  s_status.authenticated = false;
+  s_status.bonded = false;
+  s_status.passkey_visible = false;
+  qdd_hid_subscriptions_reset(&s_subscriptions);
+  update_ready_locked();
+  portEXIT_CRITICAL(&s_lock);
+  atomic_store(&s_connection, BLE_HS_CONN_HANDLE_NONE);
+}
+
+static void host_task(void *argument) {
+  (void)argument;
+  nimble_port_run();
+  vTaskDelete(NULL);
+}
+
+esp_err_t qdd_ble_start(void) {
+  qdd_hid_subscriptions_reset(&s_subscriptions);
+  if (!qdd_hid_pnp_id(s_pnp_id, CONFIG_QDD_HID_VENDOR_ID_SOURCE,
+                      CONFIG_QDD_HID_VENDOR_ID, CONFIG_QDD_HID_PRODUCT_ID,
+                      CONFIG_QDD_HID_PRODUCT_VERSION)) return ESP_ERR_INVALID_ARG;
+  // Preserve NVS and existing bonds on every failure; no erase/retry shortcut.
+  esp_err_t error = nvs_flash_init();
+  if (error != ESP_OK) return error;
+  uint8_t address[6];
+  error = esp_read_mac(address, ESP_MAC_BT);
+  if (error != ESP_OK) return error;
+  (void)snprintf(s_name, sizeof(s_name), "QDD-Passport-%02X%02X", address[4], address[5]);
+  error = nimble_port_init();
+  if (error != ESP_OK) return error;
+  ble_hs_cfg.sm_io_cap = BLE_SM_IO_CAP_DISP_ONLY;
+  ble_hs_cfg.sm_bonding = 1;
+  ble_hs_cfg.sm_mitm = 1;
+  ble_hs_cfg.sm_sc = 1;
+  ble_hs_cfg.sm_our_key_dist = BLE_SM_PAIR_KEY_DIST_ID | BLE_SM_PAIR_KEY_DIST_ENC;
+  ble_hs_cfg.sm_their_key_dist = BLE_SM_PAIR_KEY_DIST_ID | BLE_SM_PAIR_KEY_DIST_ENC;
+  // No round-robin store callback: a full bond store must not evict an owner.
+  ble_store_config_init();
+  ble_svc_gap_init();
+  ble_svc_gatt_init();
+  if (ble_gatts_count_cfg(s_services) != 0 || ble_gatts_add_svcs(s_services) != 0) {
+    return ESP_FAIL;
+  }
+  ble_hs_cfg.sync_cb = on_sync;
+  ble_hs_cfg.reset_cb = on_reset;
+  (void)ble_svc_gap_device_name_set(s_name);
+  (void)ble_svc_gap_device_appearance_set(0x03C0);
+  if (xTaskCreate(host_task, "qdd_ble", 4096, NULL, 5, NULL) != pdPASS) {
+    return ESP_ERR_NO_MEM;
+  }
+  return ESP_OK;
+}
+
+void qdd_ble_poll(void) {
+  bool expired = false;
+  portENTER_CRITICAL(&s_lock);
+  if (s_status.pairing_open && now_ms() >= s_pairing_deadline) {
+    s_status.pairing_open = false;
+    s_status.passkey_visible = false;
+    expired = true;
+  }
+  portEXIT_CRITICAL(&s_lock);
+  if (expired && s_new_peer && s_connection != BLE_HS_CONN_HANDLE_NONE &&
+      !qdd_ble_status().authenticated) {
+    (void)ble_gap_terminate(s_connection, BLE_ERR_REM_USER_CONN_TERM);
+  }
+}
+
+bool qdd_ble_report(uint8_t report_id, const uint8_t *data, size_t length, void *context) {
+  (void)context;
+  qdd_ble_poll();
+  const qdd_ble_status_t status = qdd_ble_status();
+  if (!status.connected || !status.encrypted || !status.authenticated || !status.bonded) {
+    return false;
+  }
+  bool nonzero = false;
+  for (size_t i = 0; i < length; i++) nonzero |= data[i] != 0;
+  portENTER_CRITICAL(&s_lock);
+  const uint8_t mode = s_subscriptions.protocol_mode;
+  const bool subscribed = qdd_hid_subscriptions_notifying(&s_subscriptions, report_id);
+  portEXIT_CRITICAL(&s_lock);
+  if (!subscribed) return !nonzero; // Neutral release has no recipient.
+  if (nonzero && !status.ready) return false;
+  // Allocation and missing-report errors fail closed instead of asserting.
+  if (report_id < 1 || report_id > 3 || length > 8) return false;
+  if (mode != REPORT_MODE && report_id == QDD_REPORT_MOUSE) {
+    if (length == 4 && data[3] != 0) return false; // Boot Mouse has no wheel.
+    length = 3;
+  }
+  const uint16_t handle = s_input_handles[mode == REPORT_MODE ? 1 : 0][report_id];
+  if (!handle) return false;
+  struct os_mbuf *report = ble_hs_mbuf_from_flat(data, length);
+  if (!report) return false;
+  // notify_custom consumes the mbuf on success and failure.
+  return ble_gatts_notify_custom((uint16_t)atomic_load(&s_connection), handle, report) == 0;
+}

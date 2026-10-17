@@ -17,6 +17,45 @@ Store reusable font files and generated font sources in `fonts/`.
 - Check Flash and internal-RAM impact before adding a font; the ESP32-C3 has no PSRAM.
 - Do not commit fonts whose license does not permit redistribution.
 
+### QDD Chinese controller fonts
+
+`fonts/qdd_cjk_14.c` and `fonts/qdd_cjk_20.c` are bitmap subsets derived from
+the Source Han Sans SC Normal OTF bundled with LVGL **9.5.0**. They use
+**SIL OFL 1.1**; Adobe's copyright and complete license are retained in
+[`fonts/OFL-SourceHanSans.txt`](fonts/OFL-SourceHanSans.txt). Derived font symbols
+use QDD names. The source is a pinned managed dependency, without a second
+16 MB OTF copy. Its upstream URL/SHA-256, converter version and generated-file
+hashes are in [`fonts/qdd-fonts.json`](fonts/qdd-fonts.json).
+
+After managed dependencies are available, run `node tools/generate_qdd_fonts.mjs`
+from `apps/esp/`. It uses official `lv_font_conv@1.5.3`, 4 bpp, no compression
+and no kerning. Both sizes cover printable ASCII U+0020..U+007E and 215 non-ASCII
+characters collected from the UI, setup model and application feedback in [`fonts/qdd_glyphs.txt`](fonts/qdd_glyphs.txt).
+Actual line heights are **17/24 px**, not the nominal 14/20 px sizes.
+`main/CMakeLists.txt` compiles each font once; every label selects its font.
+Bitmap/descriptor data stay constant in Flash. There is no runtime font loader,
+full CJK family, PSRAM or enlarged display buffer.
+
+The UI supports fixed Chinese messages and the full printable ASCII password
+keyboard. Scanned SSIDs keep their original 32-byte UTF-8 names for connection;
+supported glyphs display normally, long names shorten only on-screen, and an
+unsupported name displays a network number plus BSSID suffix instead of boxes.
+It does not provide arbitrary Chinese text entry. `tests/test_qdd_fonts.py` audits inventory drift,
+cmaps, negative glyphs, hashes and bindings. `tests/qdd_ui_host/` uses actual
+LVGL 9.5 glyph lookup/RGB565 rendering to check home, onboarding, key guide and setup states, wrapped-label bounds and fixed theme-indicator pixels and incremental/full redraw equality,
+the 30 px corner mask, and unchanged-refresh allocations/flushes with a 24 KiB
+pool. Physical-panel rendering and system free heap/largest block with BLE are
+separate device checks.
+With a native C/C++ compiler and CMake, configure using
+`cmake -S tests/qdd_ui_host -B build/ui-host`, then
+`cmake --build build/ui-host` from `apps/esp/`. Run `qdd_ui_host` (`.exe` on Windows)
+from an ignored output directory, passing the absolute `qdd_glyphs.txt` path;
+it writes PPM frames and reports glyph/layout/memory/refresh checks.
+The three text-free theme indicators are custom-drawn; the setup keyboard retains four custom-drawn rows instead of one LVGL widget per key.
+Before adding the reset page, the measured 24 KiB host pool peaked at 17,080 bytes; the new reset page has not been exercised because device testing was explicitly skipped. Unchanged
+home/setup refreshes allocate nothing and flush nothing. One hundred and twenty screen switches
+retain the same live allocation count and bounded allocator alignment cycle.
+
 ## Images
 
 Store reusable source images and generated display assets in `images/`.

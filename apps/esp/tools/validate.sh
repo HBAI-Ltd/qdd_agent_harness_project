@@ -42,6 +42,32 @@ run_static_checks() {
 
     test_dir="$(mktemp -d /tmp/ai-passport-host-tests.XXXXXX)"
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/test_qdd_hid.c main/qdd_hid.c \
+        -o "${test_dir}/test_qdd_hid"
+    "${test_dir}/test_qdd_hid"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/test_qdd_ui_model.c main/qdd_ui_model.c main/qdd_hid.c \
+        -o "${test_dir}/test_qdd_ui_model"
+    "${test_dir}/test_qdd_ui_model"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/test_qdd_control.c main/qdd_control.c -o "${test_dir}/test_qdd_control"
+    "${test_dir}/test_qdd_control"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/test_qdd_net_config.c main/qdd_net_config.c -o "${test_dir}/test_qdd_net_config"
+    "${test_dir}/test_qdd_net_config"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/test_qdd_setup_model.c main/qdd_setup_model.c main/qdd_net_config.c -o "${test_dir}/test_qdd_setup_model"
+    "${test_dir}/test_qdd_setup_model"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/test_qdd_onboarding_model.c main/qdd_onboarding_model.c -o "${test_dir}/test_qdd_onboarding_model"
+    "${test_dir}/test_qdd_onboarding_model"
+    "${CC:-cc}" -std=gnu11 -Wall -Wextra -Werror -Itests/qdd_onboarding_host -Imain \
+        tests/test_qdd_onboarding.c main/qdd_onboarding_model.c -o "${test_dir}/test_qdd_onboarding"
+    "${test_dir}/test_qdd_onboarding"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -pedantic -Itests/qdd_wifi_host -Imain \
+        tests/test_qdd_wifi.c main/qdd_control.c main/qdd_net_config.c -o "${test_dir}/test_qdd_wifi"
+    "${test_dir}/test_qdd_wifi"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
         tests/test_ui_pixel_math.c main/ui_pixel_math.c \
         -o "${test_dir}/test_ui_pixel_math"
     "${test_dir}/test_ui_pixel_math"
@@ -83,6 +109,9 @@ run_static_checks() {
     done
     PYTHONDONTWRITEBYTECODE=1 "${python_bin}" tests/test_deep_sleep_contract.py
     PYTHONDONTWRITEBYTECODE=1 "${python_bin}" tests/test_key_wake_contract.py
+    PYTHONDONTWRITEBYTECODE=1 "${python_bin}" tests/test_qdd_ble_contract.py
+    PYTHONDONTWRITEBYTECODE=1 "${python_bin}" tests/test_qdd_fonts.py
+    PYTHONDONTWRITEBYTECODE=1 "${python_bin}" tests/test_qdd_transport_contract.py
     PYTHONDONTWRITEBYTECODE=1 "${python_bin}" tests/test_check_repo.py
     PYTHONDONTWRITEBYTECODE=1 "${python_bin}" tests/test_verify_firmware.py
     PYTHONDONTWRITEBYTECODE=1 "${python_bin}" tests/test_archive_firmware.py

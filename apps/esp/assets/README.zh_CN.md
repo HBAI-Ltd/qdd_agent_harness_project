@@ -15,6 +15,38 @@
 - 添加字库前评估 Flash 与内部 RAM 影响；ESP32-C3 无 PSRAM。
 - 不提交许可不允许分发的字库。
 
+### QDD 中文控制器字体
+
+`fonts/qdd_cjk_14.c`、`fonts/qdd_cjk_20.c` 是应用位图子集，源自 LVGL **9.5.0**
+随附的 Source Han Sans SC Normal OTF。使用 **SIL OFL 1.1**，Adobe 版权声明和
+完整许可见 [`fonts/OFL-SourceHanSans.txt`](fonts/OFL-SourceHanSans.txt)，派生字体
+符号使用 QDD 名称。源字体来自固定版本托管依赖，不另复制一份 16 MB OTF。
+上游地址、源文件 SHA-256、转换器版本和生成文件哈希记录在
+[`fonts/qdd-fonts.json`](fonts/qdd-fonts.json)。
+
+托管依赖已就绪后，在 `apps/esp/` 运行 `node tools/generate_qdd_fonts.mjs` 可重现。
+使用官方 `lv_font_conv@1.5.3`、4 bpp、不压缩、不使用字距表。两种尺寸覆盖可打印
+ASCII U+0020..U+007E，以及从界面、配网模型和应用反馈收集到的 215 个非 ASCII 字符，清单见
+[`fonts/qdd_glyphs.txt`](fonts/qdd_glyphs.txt)。实际行高为 **17/24 px**，不能按名义
+14/20 px 排版。CMake 各编译一次，每个标签显式选择字体。位图与描述以常量放在
+Flash，未引入运行时字体加载、完整 CJK 字库、PSRAM，也未扩大显示缓冲。
+
+界面支持固定中文提示及完整可打印 ASCII 密码键盘。扫描到的 SSID 保留原始
+32 字节 UTF-8 名称用于连接；已覆盖字形正常显示，长名称仅在屏幕上缩短。
+无法显示的名称明确使用“网络序号 + BSSID 后四位”，不显示缺字方框。
+不提供任意中文手动输入。
+`tests/test_qdd_fonts.py` 检查源码清单漂移、cmap、缺字负例、哈希和字体绑定。
+`tests/qdd_ui_host/` 使用真实 LVGL 9.5 字形查询和 RGB565 渲染，验证主界面、连接助手、按键指南与配网状态、
+标签换行/高度、无文字三段提示条像素、增量/整帧重绘一致性、30 px 圆角遮罩及 24 KiB 池下重复刷新不新增分配、不触发刷屏。
+实体屏幕字形、BLE 运行时系统剩余堆和最大连续块仍需单独真机检查。
+配置好原生 C/C++ 编译器和 CMake 后，在 `apps/esp/` 执行
+`cmake -S tests/qdd_ui_host -B build/ui-host`、`cmake --build build/ui-host`。
+从已忽略的输出目录运行 `qdd_ui_host`（Windows 加 `.exe`），传入 `qdd_glyphs.txt`
+绝对路径，即可生成 PPM，并输出字形、布局、内存和刷新检查结果。
+右侧固定三段主题色提示条与键盘使用自绘；键盘保留四行，避免为每个按键创建 LVGL 控件；重置页加入前已测的 24 KiB 池峰值为 17,080 字节；本次按要求跳过测试，新重置页的运行时内存尚未验证。
+主界面与配网页面状态不变时不分配、不刷屏；一百二十次页面切换保持相同活跃分配数，
+分配器对齐带来的有界循环保持稳定。
+
 ## 图片（images）
 
 可复用的源图与生成的显示资产放在 `images/`。

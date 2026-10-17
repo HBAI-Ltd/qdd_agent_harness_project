@@ -1,0 +1,29 @@
+{
+  "name": "@qdd/android-mcp",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Android Wi-Fi LAN screen capture and ESP32 BLE HID MCP bridge",
+  "bin": {
+    "qdd-android-mcp": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "build:exe": "node tools/build-exe.mjs",
+    "test:exe": "node tools/test-exe.mjs",
+    "test:exe:soak": "node tools/soak-exe.mjs",
+    "start": "node --enable-source-maps dist/index.js",
+    "test": "tsc -b && node --test \"dist/*.test.js\" \"tests/*.test.mjs\"",
+    "clean": "tsc -b --clean"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.1",
+    "serialport": "13.0.0",
+    "ws": "8.22.0"
+  },
+  "devDependencies": {
+    "@types/ws": "8.18.2",
+    "esbuild": "0.28.2",
+    "postject": "1.0.0-alpha.6"
+  }
+}

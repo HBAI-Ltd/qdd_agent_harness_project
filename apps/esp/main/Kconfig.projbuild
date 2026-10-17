@@ -1,0 +1,38 @@
+menu "QDD Android HID bridge"
+
+config QDD_TCP_PORT
+    int "Local Wi-Fi controller TCP port"
+    range 1024 65535
+    default 3333
+    help
+        One private-LAN controller uses QDDHID/1 over a persistent TCP connection.
+        Wi-Fi credentials are configured on the device, not compiled into firmware.
+
+config QDD_HID_VENDOR_ID_SOURCE
+    int "PnP vendor ID source (1 Bluetooth SIG, 2 USB-IF)"
+    range 1 2
+    default 1
+    help
+        Select the registry for a vendor ID you are authorized to use.
+        The development default is an unknown sentinel, not an assigned ID.
+
+config QDD_HID_VENDOR_ID
+    hex "Authorized vendor ID (FFFF means unknown development identity)"
+    range 0x0 0xFFFF
+    default 0xFFFF
+    help
+        Replace only with your own assigned Bluetooth SIG Company Identifier
+        or USB-IF Vendor ID, according to the selected source. Do not use a
+        third party's assigned identifier.
+
+config QDD_HID_PRODUCT_ID
+    hex "Product ID"
+    range 0x0 0xFFFF
+    default 0x0
+
+config QDD_HID_PRODUCT_VERSION
+    hex "Product version"
+    range 0x0 0xFFFF
+    default 0x0100
+
+endmenu

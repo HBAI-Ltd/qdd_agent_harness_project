@@ -1,0 +1,13 @@
+{
+  "name": "@qdd/esp",
+  "version": "0.0.0",
+  "private": true,
+  "license": "MIT",
+  "description": "FoloToy AI Passport ESP32-C3 firmware workspace",
+  "scripts": {
+    "idf": "powershell -NoProfile -ExecutionPolicy Bypass -File tools/idf.ps1",
+    "check": "powershell -NoProfile -ExecutionPolicy Bypass -File tools/idf.ps1 --check",
+    "build": "powershell -NoProfile -ExecutionPolicy Bypass -File tools/idf.ps1 --validate --firmware",
+    "validate": "powershell -NoProfile -ExecutionPolicy Bypass -File tools/idf.ps1 --validate"
+  }
+}

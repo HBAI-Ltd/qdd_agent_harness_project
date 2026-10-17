@@ -12,7 +12,7 @@ const SessionBrowser = defineAsyncComponent(() => import("@/components/SessionBr
 
 const { workspace, draft, submitMessage, notify, navigation } = useWorkspaceContext();
 const {
-  activeSession, activeSessionId, revisionPageSlug, preferences, connected,
+  activeSession, activeSessionId, liveBlocks, revisionPageSlug, preferences, connected,
   loadingSession, sending, pendingMessage, responding, canCancel, cancelling,
   eventActionBusy, answerQuestions, resolveApproval, cancel,
 } = workspace;
@@ -37,7 +37,11 @@ const composerHint = computed(() => {
   if (responding.value) return "可先编写下一条消息 · 点击停止可结束回复";
   return preferences.value.enterToSend ? "Enter 发送 · Shift + Enter 换行" : "点击发送 · Enter 换行";
 });
-const timeline = computed(() => buildChatTimeline(activeSession.value?.events ?? [], pendingMessage.value));
+const timeline = computed(() => {
+  const session = activeSession.value;
+  const live = session && liveBlocks.value.sessionId === session.id ? liveBlocks.value.blocks : {};
+  return buildChatTimeline(session?.events ?? [], pendingMessage.value, live);
+});
 const suggestions = [
   { title: "经营看板", description: "查看销售与毛利，发现经营机会", prompt: "展示最近 30 天各品类销售额和毛利" },
   { title: "库存分析", description: "梳理库存变化，掌握门店状态", prompt: "帮我查看当前库存，并分析最近一周的变化" },
@@ -96,7 +100,7 @@ watch([
 ], () => {
   browserOpen.value = activeSession.value?.id === activeSessionId.value && latestBrowser.value?.status === "running";
 }, { immediate: true });
-watch([() => activeSession.value?.events.length, pendingMessage, activityLabel], async () => {
+watch([() => activeSession.value?.events.length, pendingMessage, activityLabel, liveBlocks], async () => {
   const element = messageList.value;
   const nearBottom = !element || element.scrollHeight - element.scrollTop - element.clientHeight < 100;
   if (nearBottom) await scrollToLatest();

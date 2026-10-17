@@ -13,6 +13,7 @@ export const DEFAULT_CONFIG: HarnessConfig = {
     maxSteps: 40,
     maxTokens: 8192,
     clarify: "required",
+    thinking: "enabled",
   },
   approvalTimeoutMin: 60,
   browser: { enabled: false, executablePath: "", permission: "confirm" },

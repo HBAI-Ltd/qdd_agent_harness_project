@@ -37,6 +37,8 @@ export interface HarnessConfig {
     maxTokens: number;
     /** required：新许愿写页面前必须先 clarify；auto：由模型判断；off：不提问 */
     clarify: "required" | "auto" | "off";
+    /** 思考模式：enabled 时请求 thinking 并以 reasoning_content 流式返回思考过程 */
+    thinking: "enabled" | "disabled";
   };
   /** 授权请求等待店长处理的时长（分钟），超时视为拒绝；工作台可集中处理。 */
   approvalTimeoutMin: number;
@@ -231,12 +233,36 @@ export interface SessionMeta {
 
 type At = { at: string };
 
+/** 一次工具调用；与 Toonflow agent 的 ToolCall 对齐，按 id 合并状态更新。 */
+export interface AgentToolCall {
+  id: string;
+  name: string;
+  args?: JsonObject;
+  status: "running" | "success" | "error";
+  /** 工具执行时的进度说明（如「查询 xx」「写入 xx」） */
+  progress?: string;
+  result?: string;
+}
+
+/**
+ * 助手回复的内容块事件，与 Toonflow agent 的 AgentEvent 对齐：
+ * blockId 为「回复 id:块序号」，同一回复的思考、正文、工具调用按序号组成一个 parts 数组。
+ * delta 只经 SSE 实时推送、不落盘；done 与 tool 事件落盘用于回放。
+ */
+export type AssistantBlockEvent =
+  | { type: "text" | "thinking"; blockId: string; delta?: string; content?: string; done?: boolean }
+  | { type: "tool"; blockId: string; tool: AgentToolCall };
+
+export type AssistantPart =
+  | { id: string; type: "text" | "thinking"; content: string; done: boolean }
+  | { id: string; type: "tool"; tool: AgentToolCall };
+
 export type SessionEvent = At &
   (
     | { type: "user"; text: string }
     | { type: "status"; status: SessionStatus }
     | { type: "say"; text: string }
-    | { type: "tool"; text: string }
+    | AssistantBlockEvent
     | { type: "warn"; text: string }
     | { type: "approval_required"; requestId: string; tool: string; source: string; args: JsonObject }
     | { type: "approval_resolved"; requestId: string; approved: boolean }

@@ -240,7 +240,13 @@ export class SessionHub {
           onEvent: (e: AgentEvent) => {
             if (e.kind === "skill") void this.emit(id, { type: "skill", skill: e.skill, action: e.action });
             else if (e.kind === "browser") void this.emit(id, { type: "browser", browser: e.state });
-            else if (e.kind !== "ok") void this.emit(id, { type: e.kind, text: e.text });
+            else if (e.kind === "text" || e.kind === "thinking") {
+              const { kind, ...block } = e;
+              // 增量只实时推送；完整内容在 done 时落盘
+              if (block.delta !== undefined) this.broadcast(id, { type: kind, ...block });
+              else void this.emit(id, { type: kind, ...block });
+            } else if (e.kind === "tool_call") void this.emit(id, { type: "tool", blockId: e.blockId, tool: e.tool });
+            else if (e.kind === "say" || e.kind === "warn") void this.emit(id, { type: e.kind, text: e.text });
           },
           authorize: (tool, args) => this.waitFor(meta, this.requestApproval(id, tool.name, tool.source, args)),
           clarify: this.unattended.has(id) ? undefined : (questions) => this.waitFor(meta, this.requestClarify(id, questions)),
@@ -343,6 +349,12 @@ export class SessionHub {
   private async emit(id: string, event: NewEvent): Promise<void> {
     const full = { ...event, at: new Date().toISOString() } as SessionEvent;
     await appendFile(this.file(id, "events.jsonl"), `${JSON.stringify(full)}\n`);
+    for (const l of this.listeners.get(id) ?? []) l(full);
+  }
+
+  /** 不落盘的实时事件（流式增量）；订阅端不应计入 since 续传偏移。 */
+  private broadcast(id: string, event: NewEvent): void {
+    const full = { ...event, at: new Date().toISOString() } as SessionEvent;
     for (const l of this.listeners.get(id) ?? []) l(full);
   }
 }

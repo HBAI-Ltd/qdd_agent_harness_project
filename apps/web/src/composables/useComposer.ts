@@ -1,5 +1,5 @@
-import { computed, ref, watch } from "vue";
-import * as api from "@/api/workspace";
+import { computed, onScopeDispose, ref, watch } from "vue";
+import * as api from "../api/workspace.ts";
 import type { useWorkspace } from "./useWorkspace";
 
 export interface ComposerAttachment {
@@ -28,19 +28,62 @@ const UPLOAD_CONCURRENCY = 4;
 export function useComposer(workspace: ReturnType<typeof useWorkspace>) {
   const { gatewayUrl, token, connected, activeSessionId, activeSession, sessions, error } = workspace;
   const catalog = ref<api.ModelCatalog | null>(null);
+  const modelLoading = ref(false);
+  const modelError = ref("");
   const draftModel = ref<string | null>(null);
   const attachments = ref<ComposerAttachment[]>([]);
   let sequence = 0;
   const controllers = new Map<string, AbortController>();
+  const pendingModels = ref(new Map<string, { id: string; version: number }>());
+  const modelRequests = new Map<string, Promise<void>>();
+  const modelControllers = new Set<AbortController>();
+  let catalogController: AbortController | undefined;
+  let contextVersion = 0;
+  let modelVersion = 0;
+  let disposed = false;
 
-  watch([connected, gatewayUrl], async ([online]) => {
-    if (!online) return;
+  async function refreshModels(): Promise<void> {
+    catalogController?.abort();
+    if (!connected.value || disposed) return;
+    const controller = new AbortController();
+    catalogController = controller;
+    modelLoading.value = true;
+    modelError.value = "";
     try {
-      catalog.value = await api.listModels(gatewayUrl.value, token.value);
-    } catch {
-      catalog.value = null;
+      const result = await api.listModels(gatewayUrl.value, token.value, controller.signal);
+      if (!controller.signal.aborted && !disposed && catalogController === controller) catalog.value = result;
+    } catch (cause) {
+      if (!controller.signal.aborted && !disposed && catalogController === controller) {
+        catalog.value = null;
+        modelError.value = cause instanceof Error ? cause.message : "加载模型失败";
+      }
+    } finally {
+      if (catalogController === controller) modelLoading.value = false;
     }
-  }, { immediate: true });
+  }
+
+  function resetModelRequests(): void {
+    contextVersion++;
+    catalogController?.abort();
+    for (const controller of modelControllers) controller.abort();
+    modelControllers.clear();
+    modelRequests.clear();
+    pendingModels.value.clear();
+    catalog.value = null;
+    modelLoading.value = false;
+    modelError.value = "";
+  }
+
+  watch([connected, gatewayUrl, token], ([online, base, key], previous) => {
+    if (base !== previous[1] || key !== previous[2]) draftModel.value = null;
+    resetModelRequests();
+    if (online) void refreshModels();
+  }, { immediate: true, flush: "sync" });
+  watch(activeSessionId, () => { modelError.value = ""; }, { flush: "sync" });
+  onScopeDispose(() => {
+    disposed = true;
+    resetModelRequests();
+  });
 
   const sessionModel = computed(() => {
     const id = activeSessionId.value;
@@ -49,21 +92,61 @@ export function useComposer(workspace: ReturnType<typeof useWorkspace>) {
   });
   const currentModel = computed(() => {
     const models = catalog.value?.models ?? [];
-    const wanted = activeSessionId.value ? sessionModel.value : draftModel.value;
+    const wanted = activeSessionId.value
+      ? pendingModels.value.get(activeSessionId.value)?.id ?? sessionModel.value
+      : draftModel.value;
     return models.find((m) => m.id === wanted) ?? models.find((m) => m.id === catalog.value?.default);
   });
+  const modelChanging = computed(() => !!activeSessionId.value && pendingModels.value.has(activeSessionId.value));
+
+  // Both APIs describe the same model IDs. Keep per-turn effort choices attached
+  // to the model displayed here, including optimistic changes while PUT waits.
+  watch([() => currentModel.value?.id, workspace.chatOptions, () => workspace.chatSelection.value?.model], ([id]) => {
+    if (id && workspace.chatSelection.value?.model !== id) workspace.selectChatModel(id);
+  }, { immediate: true, flush: "sync" });
 
   async function selectModel(id: string): Promise<void> {
+    if (disposed || !connected.value) return;
+    const model = catalog.value?.models.find((entry) => entry.id === id);
+    if (!model || !model.available) {
+      modelError.value = model ? "该模型未配置 API Key，暂不可用" : "模型不存在，请刷新模型列表";
+      return;
+    }
+    modelError.value = "";
     const sessionId = activeSessionId.value;
     if (!sessionId) {
       draftModel.value = id;
       return;
     }
-    try {
-      workspace.applyResponseMeta(await api.selectSessionModel(gatewayUrl.value, token.value, sessionId, id));
-    } catch (cause) {
-      error.value = cause instanceof Error ? cause.message : "切换模型失败";
-    }
+    const version = ++modelVersion;
+    const context = contextVersion;
+    const base = gatewayUrl.value;
+    const key = token.value;
+    pendingModels.value.set(sessionId, { id, version });
+    // Serialize writes to a session and coalesce superseded queued selections.
+    // Ignoring an old response alone cannot stop it from overwriting the server.
+    const request = (modelRequests.get(sessionId) ?? Promise.resolve()).then(async () => {
+      if (disposed || context !== contextVersion || pendingModels.value.get(sessionId)?.version !== version) return;
+      const controller = new AbortController();
+      modelControllers.add(controller);
+      try {
+        const meta = await api.selectSessionModel(base, key, sessionId, id, controller.signal);
+        if (!controller.signal.aborted && !disposed && context === contextVersion
+          && pendingModels.value.get(sessionId)?.version === version) workspace.applyResponseMeta(meta);
+      } catch (cause) {
+        if (!controller.signal.aborted && !disposed && context === contextVersion
+          && pendingModels.value.get(sessionId)?.version === version && activeSessionId.value === sessionId) {
+          modelError.value = cause instanceof Error ? cause.message : "切换模型失败";
+          error.value = modelError.value;
+        }
+      } finally {
+        modelControllers.delete(controller);
+        if (context === contextVersion && pendingModels.value.get(sessionId)?.version === version) pendingModels.value.delete(sessionId);
+      }
+    });
+    modelRequests.set(sessionId, request);
+    await request;
+    if (modelRequests.get(sessionId) === request) modelRequests.delete(sessionId);
   }
 
   const uploading = computed(() => attachments.value.some((a) => a.status === "uploading"));
@@ -123,7 +206,7 @@ export function useComposer(workspace: ReturnType<typeof useWorkspace>) {
   }
 
   return {
-    catalog, currentModel, draftModel, selectModel,
+    catalog, currentModel, draftModel, selectModel, modelLoading, modelError, modelChanging, refreshModels,
     attachments, uploading, ready, addFiles, removeAttachment, removeFolder, clearAttachments,
   };
 }

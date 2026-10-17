@@ -60,6 +60,10 @@ export class BrowserService {
     return this.runtime.getSession(this.cwd, browserSessionId);
   }
 
+  closeBrowser(sessionId: string, browserSessionId: string): Promise<BrowserSessionState> {
+    return this.runtime.closeOwnedSession(this.cwd, sessionId, browserSessionId);
+  }
+
   async closeSession(sessionId: string): Promise<void> {
     this.granted.delete(sessionId);
     await this.runtime.closeOwner(this.cwd, sessionId);

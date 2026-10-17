@@ -49,6 +49,12 @@ const dist = fileURLToPath(new URL("../apps/web/dist/", import.meta.url));
 await readFile(path.join(dist, "index.html"));
 const root = await mkdtemp(path.join(tmpdir(), "qdd-chat-composer-browser-"));
 const token = "chat-composer-browser-test-token";
+const keyEnv = "QDD_BROWSER_COMPOSER_KEY";
+const missingKeyEnv = "QDD_BROWSER_COMPOSER_MISSING_KEY";
+const previousKey = process.env[keyEnv];
+const previousMissingKey = process.env[missingKeyEnv];
+process.env[keyEnv] = "local-browser-regression-key";
+delete process.env[missingKeyEnv];
 const files = ["notes.txt", "sales.csv", "report.docx", "report.pdf"].map((name) => path.join(root, name));
 await Promise.all([
   writeFile(files[0], "附件上传浏览器验证\n库存 120 件。\n"),
@@ -57,10 +63,11 @@ await Promise.all([
   writeFile(files[3], pdfFixture()),
   writeFile(path.join(root, "harness.config.json"), JSON.stringify({
     llm: {
-      model: "browser-base", reasoningEffort: "default",
+      model: "browser-base", reasoningEffort: "default", apiKeyEnv: keyEnv,
       models: [
-        { id: "browser-base", label: "基础模型", reasoningEfforts: ["default", "none", "low"], defaultReasoningEffort: "default" },
-        { id: "browser-reasoning", label: "深度推理模型", reasoningEfforts: ["default", "low", "medium", "high"], defaultReasoningEffort: "low" },
+        { id: "browser-base", model: "browser-base-provider", provider: "基础服务", label: "基础模型", reasoningEfforts: ["default", "none", "low"], defaultReasoningEffort: "default" },
+        { id: "browser-reasoning", model: "browser-reasoning-provider", provider: "推理服务", label: "深度推理模型", reasoningEfforts: ["default", "low", "medium", "high"], defaultReasoningEffort: "low" },
+        { id: "browser-unavailable", model: "browser-unavailable-provider", provider: "未配置服务", label: "未配置模型", apiKeyEnv: missingKeyEnv },
       ],
     },
     browser: { enabled: false }, mcpServers: {},
@@ -103,6 +110,9 @@ const gateway = await startGateway(loaded, sources, {
     };
   },
 });
+const catalogResponse = await fetch(`${gateway.url}/api/models`, { headers: { Authorization: `Bearer ${token}` } });
+assert.equal(catalogResponse.status, 200);
+await writeFile(path.join(root, "model-catalog.json"), JSON.stringify(await catalogResponse.json(), null, 2));
 let browser;
 try {
   browser = await puppeteer.launch({
@@ -113,15 +123,15 @@ try {
   await page.setViewport({ width: 1365, height: 1000, deviceScaleFactor: 1 });
   const errors = [];
   const sentRequests = [];
-  const workerResponses = [];
+  const modelUpdates = [];
   page.on("pageerror", (error) => errors.push(error.message));
   page.on("request", (request) => {
     if (request.method() === "POST" && /\/api\/(wishes|sessions\/[^/]+\/messages)$/.test(new URL(request.url()).pathname)) {
       sentRequests.push(JSON.parse(request.postData()));
     }
-  });
-  page.on("response", (response) => {
-    if (response.url().includes("pdf.worker")) workerResponses.push({ url: response.url(), status: response.status() });
+    if (request.method() === "PUT" && /\/api\/sessions\/[^/]+\/model$/.test(new URL(request.url()).pathname)) {
+      modelUpdates.push(JSON.parse(request.postData()));
+    }
   });
   await page.evaluateOnNewDocument((base, value) => {
     localStorage.setItem("harness-gateway-url", base);
@@ -134,16 +144,18 @@ try {
   const chooseFiles = async (paths, expectedCount) => {
     const [chooser] = await Promise.all([
       page.waitForFileChooser(),
-      page.click('[aria-label="添加附件"]'),
+      page.click('[aria-label="添加文件"]'),
     ]);
     await chooser.accept(paths);
-    await page.waitForFunction((count) => document.querySelectorAll(".chat-attachment").length === count
-      && !document.querySelector(".chat-attachment-progress"), { timeout: 15_000 }, expectedCount);
+    await page.waitForFunction((count) => document.querySelectorAll(".chat-composer-attachments .attachment-chip").length === count
+      && !document.querySelector('.chat-composer-attachments [data-status="uploading"]')
+      && !document.querySelector('.chat-composer-attachments [data-status="error"]'), { timeout: 15_000 }, expectedCount);
   };
   await chooseFiles(files, 4);
   assert.equal(await page.$eval("#message-input", (input) => input.value), "", "Selecting files must not insert their text into the textarea");
-  await page.click('[aria-label="移除附件 sales.csv"]');
-  assert.equal(await page.$$eval(".chat-attachment", (chips) => chips.length), 3);
+  const csvChip = await page.$('.chat-composer-attachments .attachment-main[title="sales.csv"]');
+  await (await csvChip.evaluateHandle((button) => button.closest(".attachment-chip").querySelector('[aria-label="移除附件"]'))).click();
+  assert.equal(await page.$$eval(".chat-composer-attachments .attachment-chip", (chips) => chips.length), 3);
   await chooseFiles([files[1]], 4);
   await page.screenshot({ path: path.join(root, "desktop-attachments.png"), fullPage: true });
 
@@ -152,25 +164,52 @@ try {
   const sessionId = (await gateway.hub.list())[0].id;
   await gateway.hub.wait(sessionId);
   await page.waitForFunction(() => document.body.innerText.includes("浏览器验证完成 1") && !document.querySelector('[aria-label="停止回复"]'));
-  assert.deepEqual(selections[0], { model: "browser-base", reasoningEffort: "default" });
+  assert.deepEqual(selections[0], { model: "browser-base-provider", reasoningEffort: "default" });
   const first = histories[0][0];
-  assert.match(first, /## 附件：notes\\\.txt\n\n```text\n附件上传浏览器验证/);
-  assert.match(first, /## 附件：sales\\\.csv\n\n\| 门店 \| 销售额 \| 备注 \|/);
-  assert.match(first, /\| A \| 120 \| 含,逗号 \|/);
-  assert.match(first, /## 附件：report\\\.docx\n\n# 报告标题/);
-  assert.match(first, /\*\*销售增长\*\*/);
-  assert.match(first, /## 附件：report\\\.pdf\n\n### 第 1 页\n\nPDF browser attachment 120/);
+  assert.match(first, /请查看我上传的附件/);
+  assert.match(first, /店长上传的附件，共 4 个/);
   assert.equal(sentRequests.length, 1);
-  assert.ok(first.startsWith(sentRequests[0].wish), "The fake chat receives the complete submitted Markdown before gateway instructions");
-  assert.equal((await gateway.hub.detail(sessionId)).events.find((event) => event.type === "user").text, sentRequests[0].wish);
-  assert.equal(Object.hasOwn(sentRequests[0], "attachments"), false, "Gateway receives Markdown text rather than uploaded binary files");
-  assert.ok(workerResponses.some((response) => response.status === 200), "Production PDF worker must load as a separate asset");
-  assert.equal(await page.$$eval(".chat-attachment", (chips) => chips.length), 0);
+  const user = (await gateway.hub.detail(sessionId)).events.find((event) => event.type === "user");
+  assert.equal(user.text, sentRequests[0].wish);
+  assert.equal(user.attachments.length, 4);
+  assert.deepEqual(sentRequests[0].attachments, user.attachments.map((attachment) => attachment.id));
+  for (const filename of files) {
+    const attachment = user.attachments.find((item) => item.name === path.basename(filename));
+    assert.ok(attachment, `Uploaded attachment missing: ${filename}`);
+    assert.ok(first.includes(`id=${attachment.id}`), "The fake chat receives attachment references for on-demand reading");
+    const original = await readFile(filename);
+    assert.deepEqual((await gateway.hub.attachments.bytes(attachment.id)).bytes, original, "Gateway preserves the selected file bytes");
+    const modelText = await gateway.hub.attachments.readForModel(attachment.id);
+    if (attachment.name === "notes.txt") assert.match(modelText, /附件上传浏览器验证\n库存 120 件/);
+    if (attachment.name === "sales.csv") assert.match(modelText, /门店,销售额,备注\nA,120/);
+    if (attachment.name === "report.docx") assert.match(modelText, /二进制文件，无法直接读取文本内容/);
+  }
+  assert.equal(await page.$$eval(".chat-composer-attachments .attachment-chip", (chips) => chips.length), 0);
 
   await page.click('.chat-model-picker summary');
   await page.waitForSelector(".chat-model-panel", { visible: true });
   await page.click(".chat-model-panel .el-select");
-  await page.waitForSelector(".el-select-dropdown__item", { visible: true });
+  await page.waitForSelector(".el-select-dropdown__item", { visible: true, timeout: 5000 });
+  assert.deepEqual(await page.$$eval(".el-select-group__title", (titles) => titles.map((title) => title.textContent.trim())), ["基础服务", "推理服务", "未配置服务"]);
+  await page.type('.chat-model-panel input[role="combobox"]', "深度");
+  await page.waitForFunction(() => {
+    const groups = [...document.querySelectorAll(".el-select-group__wrap")].filter((group) => getComputedStyle(group).display !== "none");
+    return groups.length === 1 && groups[0].querySelector(".el-select-group__title")?.textContent === "推理服务";
+  }, { timeout: 5000 });
+  await page.screenshot({ path: path.join(root, "desktop-model-search.png"), fullPage: true });
+  await page.focus('.chat-model-panel input[role="combobox"]');
+  await page.keyboard.down("Control");
+  await page.keyboard.press("KeyA");
+  await page.keyboard.up("Control");
+  await page.keyboard.press("Backspace");
+  await page.waitForFunction(() => [...document.querySelectorAll(".el-select-group__wrap")].filter((group) => getComputedStyle(group).display !== "none").length === 3);
+  const unavailable = await page.$(".el-select-dropdown__item.is-disabled");
+  assert.ok(unavailable, "The model lacking its API key must be disabled");
+  assert.match(await unavailable.evaluate((item) => item.textContent), /未配置模型（未配置 Key）/);
+  await unavailable.click();
+  assert.equal(await page.$eval(".chat-model-name", (label) => label.textContent), "基础模型");
+  assert.equal(modelUpdates.length, 0, "Disabled choices must never update the session model");
+  await page.screenshot({ path: path.join(root, "desktop-model-catalog.png"), fullPage: true });
   const options = await page.$$(".el-select-dropdown__item");
   let chosen = false;
   for (const option of options) {
@@ -182,6 +221,9 @@ try {
   }
   assert.ok(chosen, "The production model dropdown must expose the second configured model");
   await page.waitForFunction(() => document.querySelector(".chat-model-name")?.textContent === "深度推理模型");
+  await until(async () => (await gateway.hub.meta(sessionId)).model === "browser-reasoning", "The model selector must PUT the chosen model to the current session");
+  await page.waitForFunction(() => !!document.querySelector('.chat-reasoning-options button:not([disabled])'));
+  assert.deepEqual(modelUpdates, [{ model: "browser-reasoning" }]);
   const high = await page.$$(".chat-reasoning-options button");
   for (const button of high) if (await button.evaluate((element) => element.textContent === "高")) await button.click();
   await page.waitForFunction(() => document.querySelector(".chat-model-effort")?.textContent.includes("高"));
@@ -193,7 +235,7 @@ try {
   await until(() => histories.length === 2, "Follow-up never reached the fake chat");
   await gateway.hub.wait(sessionId);
   await page.waitForFunction(() => document.body.innerText.includes("浏览器验证完成 2") && !document.querySelector('[aria-label="停止回复"]'));
-  assert.deepEqual(selections[1], { model: "browser-reasoning", reasoningEffort: "high" });
+  assert.deepEqual(selections[1], { model: "browser-reasoning-provider", reasoningEffort: "high" });
   assert.match(histories[1].at(-1), /^按高强度继续分析附件/);
   assert.equal(sentRequests[1].model, "browser-reasoning");
   assert.equal(sentRequests[1].reasoningEffort, "high");
@@ -225,10 +267,17 @@ try {
   await page.screenshot({ path: path.join(root, "mobile-attachments.png"), fullPage: true });
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "Mobile attachment chips must not cause horizontal overflow");
   assert.deepEqual(errors, [], "The production chat page must have no uncaught browser exceptions");
-  console.log(JSON.stringify({ passed: true, root, sessionId, models: selections, attachmentFormats: ["TXT", "CSV", "DOCX", "PDF"], mobile: geometry, screenshots: ["desktop-attachments.png", "desktop-model-popover.png", "mobile-model-popover.png", "mobile-attachments.png"] }, null, 2));
+  console.log(JSON.stringify({ passed: true, root, sessionId, models: selections, modelUpdates, attachmentFormats: ["TXT", "CSV", "DOCX", "PDF"], attachmentMode: "gateway references with on-demand read_attachment", unavailableModelDisabled: true, providerGroups: ["基础服务", "推理服务", "未配置服务"], searchableProviderGroups: true, mobile: geometry, screenshots: ["desktop-attachments.png", "desktop-model-search.png", "desktop-model-catalog.png", "desktop-model-popover.png", "mobile-model-popover.png", "mobile-attachments.png"] }, null, 2));
 } catch (error) {
   const page = (await browser?.pages())?.at(-1);
   await page?.screenshot({ path: path.join(root, "failure.png"), fullPage: true }).catch(() => {});
+  if (page) {
+    await writeFile(path.join(root, "failure.html"), await page.content());
+    console.error(JSON.stringify(await page.evaluate(() => ({
+      groups: [...document.querySelectorAll(".el-select-group__wrap")].map((group) => ({ text: group.textContent, display: getComputedStyle(group).display })),
+      options: [...document.querySelectorAll(".el-select-dropdown__item")].map((option) => ({ text: option.textContent, display: getComputedStyle(option).display })),
+    }))));
+  }
   console.error(`Browser regression artifacts: ${root}`);
   throw error;
 } finally {
@@ -236,4 +285,8 @@ try {
   await gateway.close();
   await sources.close();
   await new Promise((resolve) => ui.close(resolve));
+  if (previousKey === undefined) delete process.env[keyEnv];
+  else process.env[keyEnv] = previousKey;
+  if (previousMissingKey === undefined) delete process.env[missingKeyEnv];
+  else process.env[missingKeyEnv] = previousMissingKey;
 }

@@ -11,7 +11,7 @@ registerHooks({
   },
 });
 const { createBrowserViewer, emptyBrowserViewer, frameCoordinates } = await import("../src/components/browserSession.ts");
-const { browserEvents, browserInput, getBrowser } = await import("../src/api/browser.ts");
+const { browserEvents, browserInput, closeBrowser, getBrowser } = await import("../src/api/browser.ts");
 const originalFetch = globalThis.fetch;
 const stateFor = (id = "browser-1", tabId = "tab-1") => ({ browserSessionId: id, tabId, url: "https://example.com/", title: "示例页面", canGoBack: false, canGoForward: false, status: "running" });
 const frameFor = (session = stateFor()) => ({ type: "frame", sessionId: session.browserSessionId, tabId: session.tabId, data: "/9j/AA==", mimeType: "image/jpeg", width: 1280, height: 800 });
@@ -288,9 +288,14 @@ test("browser endpoints preserve bearer authentication, latest tab identity, and
   await getBrowser("https://gateway.example/qdd", " secret-token ", "browser/id", signal);
   await browserInput("https://gateway.example/qdd", "secret-token", "browser/id", "latest-tab", { type: "text", text: "中文" }, signal);
   await browserInput("https://gateway.example/qdd", "secret-token", "browser/id", "latest-tab", { type: "release" });
+  await closeBrowser("https://gateway.example/qdd", "secret-token", "browser/id", "conversation-1", signal);
   assert.equal(calls[0].url, "https://gateway.example/qdd/api/browser/browser%2Fid");
   assert.deepEqual(JSON.parse(calls[1].init.body), { type: "text", text: "中文", tabId: "latest-tab" });
   assert.equal(calls[2].init.keepalive, true);
+  assert.equal(calls[3].init.method, "DELETE");
+  assert.deepEqual(JSON.parse(calls[3].init.body), { sessionId: "conversation-1" });
+  assert.equal(calls[3].url, "https://gateway.example/qdd/api/browser/browser%2Fid");
+  assert.equal(calls[3].init.signal, signal);
   for (const call of calls) {
     assert.equal(new Headers(call.init.headers).get("Authorization"), "Bearer secret-token");
     assert.equal(call.url.includes("secret-token"), false);

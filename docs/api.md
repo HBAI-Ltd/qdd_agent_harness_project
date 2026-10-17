@@ -208,7 +208,10 @@ agent 获得 `browser` 工具（open / navigate / snapshot / read / click / hove
 GET  /api/browser/:browserSessionId          → BrowserSessionState
 GET  /api/browser/:browserSessionId/stream   → SSE BrowserStreamEvent：state / frame（base64 JPEG，1280×800）/ closed / error
 POST /api/browser/:browserSessionId/input    { "tabId": "…", "type": "click", "x": 100, "y": 200 } → BrowserSessionState
+DELETE /api/browser/:browserSessionId        { "sessionId": "所属对话 ID" } → BrowserSessionState（status: "closed"）
 ```
+
+`DELETE` 需要网关 Bearer token，且浏览器必须属于传入的对话。关闭会立即结束该浏览器上下文及全部标签页、终止画面流，并将关闭状态写入对话事件历史；不会发起新一轮 AI 对话。浏览器正在加载网页时也可关闭。旧浏览器 ID 返回 404，不会关闭同一对话后来重新打开的浏览器。对话中说“关闭浏览器”时，agent 调用 `browser` 的 `close` 动作结束实际浏览器会话；之后可通过 `open` 新建浏览器。
 
 `input` 支持 `mouse`（move/down/up）、`click`、`wheel`、`key`、`text`、`release`、`navigate`、`back`、`forward`、`reload`，坐标为画面像素（类型见 `BrowserInput`）。标签页切换或页面变化后返回 409，等待新画面后重试；画面失焦或停止观看时发送 `release` 释放按住的鼠标和按键。
 

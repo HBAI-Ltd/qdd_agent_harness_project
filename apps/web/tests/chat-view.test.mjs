@@ -34,8 +34,9 @@ const controlsUrl = "data:text/javascript," + encodeURIComponent(`
     props: ["modelValue", "disabled"], emits: ["update:modelValue"],
     setup: (props, { attrs, slots, emit }) => () => h("select", { ...attrs, value: props.modelValue, disabled: props.disabled, onChange: (event) => emit("update:modelValue", event.target.value) }, slots.default?.()),
   };
+  export const ElOptionGroup = { props: ["label"], setup: (props, { slots }) => () => h("optgroup", { label: props.label }, slots.default?.()) };
 `);
-const optionUrl = "data:text/javascript," + encodeURIComponent('import { h } from "vue"; export default { props: ["value", "label"], setup: (props) => () => h("option", { value: props.value }, props.label) };');
+const optionUrl = "data:text/javascript," + encodeURIComponent('import { h } from "vue"; export default { props: ["value", "label", "disabled"], setup: (props) => () => h("option", { value: props.value, disabled: props.disabled }, props.label) };');
 const childUrl = "data:text/javascript," + encodeURIComponent('import { h } from "vue"; export default { setup: () => () => h("span") };');
 const markdownUrl = new URL("../src/utils/markdown.ts", import.meta.url).href;
 const timelineUrl = new URL("../src/utils/chatTimeline.ts", import.meta.url).href;
@@ -50,7 +51,7 @@ const browserUrl = "data:text/javascript," + encodeURIComponent(`
       class: "session-browser",
       "data-session-id": props.sessionId,
       "data-browser-id": props.browser.browserSessionId,
-    }, [h("button", { "aria-label": "关闭实时浏览器画面", onClick: () => emit("close") }, "关闭")]),
+    }, [h("button", { "aria-label": "关闭浏览器", onClick: () => emit("close", { ...props.browser, status: "closed" }) }, "关闭")]),
   };
 `);
 const workspaceApiUrl = "data:text/javascript," + encodeURIComponent(`
@@ -149,9 +150,13 @@ async function mount(initialSession, sendResult = async () => true) {
   const currentModel = ref(catalog.value.models[0]);
   const composer = {
     attachments, catalog, currentModel,
+    modelLoading: ref(false), modelError: ref(""), modelChanging: ref(false), refreshModels() {},
     uploading: computed(() => attachments.value.some((item) => item.status === "uploading")),
     ready: computed(() => attachments.value.filter((item) => item.status === "done").map((item) => item.ref)),
-    selectModel(id) { currentModel.value = catalog.value.models.find((model) => model.id === id); },
+    selectModel(id) {
+      currentModel.value = catalog.value.models.find((model) => model.id === id);
+      workspace.selectChatModel(id);
+    },
     addFiles(files) {
       for (const { file, path } of files) attachments.value.push({
         key: path, path, size: file.size, status: "done", ref: { id: path, path, size: file.size, mime: file.type || "application/octet-stream" },
@@ -299,8 +304,6 @@ test("model selection resets effort, only supported levels render, and the submi
   assert.equal(select.props["aria-label"], "切换模型");
   select.props.onChange({ target: { value: "model-b" } });
   await nextTick();
-  workspace.chatSelection.value = { model: "model-a", reasoningEffort: "low" };
-  await nextTick();
   assert.equal(workspace.chatSelection.value.model, "model-b");
   const levels = findAll(root, (node) => node.tag === "button" && node.props["aria-pressed"] !== undefined);
   assert.deepEqual(levels.map(textContent), ["默认", "中", "高"]);
@@ -311,6 +314,42 @@ test("model selection resets effort, only supported levels render, and the submi
   await submit(root);
   assert.deepEqual(calls.selections, [{ model: "model-b", reasoningEffort: "high" }]);
   assert.equal(workspace.chatSelection.value.reasoningEffort, "high");
+});
+
+test("models are searchable inside the combined picker, grouped by provider, and unavailable models are disabled", async () => {
+  const { root, composer } = await mount(undefined);
+  composer.catalog.value.models[0].provider = "DeepSeek";
+  composer.catalog.value.models[1].provider = "阿里云百炼";
+  composer.catalog.value.models[1].available = false;
+  await nextTick();
+  const picker = findAll(root, hasClass("chat-model-picker"))[0];
+  assert.match(textContent(picker), /模型 A.*默认/s);
+  assert.equal(findAll(picker, (node) => node.tag === "summary")[0].props["aria-label"], "选择模型和思考强度");
+  const select = findAll(picker, (node) => node.tag === "select")[0];
+  assert.equal(select.props.filterable, "");
+  assert.deepEqual(findAll(select, (node) => node.tag === "optgroup").map((node) => node.props.label), ["DeepSeek", "阿里云百炼"]);
+  const unavailable = findAll(select, (node) => node.tag === "option" && node.props.value === "model-b")[0];
+  assert.equal(unavailable.props.disabled, true);
+  assert.match(textContent(unavailable), /未配置 Key/);
+  assert.equal(findAll(root, hasClass("chat-composer-footer"))[0].children.some((node) => node.tag === "select"), false);
+});
+
+test("switching a model locks sends and effort changes until confirmation and model failures remain retryable", async () => {
+  const { root, composer, draft, calls } = await mount(undefined);
+  composer.modelChanging.value = true;
+  draft.value = "分析经营数据";
+  await nextTick();
+  assert.equal(button(root, "发送消息").props.disabled, true);
+  assert.ok(findAll(root, (node) => node.tag === "button" && node.props["aria-pressed"] !== undefined).every((node) => node.props.disabled));
+  await submit(root);
+  assert.equal(calls.submit.length, 0);
+  composer.modelChanging.value = false;
+  composer.modelError.value = "暂时无法切换模型";
+  await nextTick();
+  const error = findAll(root, hasClass("chat-model-error"))[0];
+  assert.equal(error.props.role, "alert");
+  assert.match(textContent(error), /暂时无法切换模型.*重试/s);
+  assert.equal(button(root, "发送消息").props.disabled, false);
 });
 const processes = (root) => findAll(root, (node) => node.tag === "details" && hasClass("chat-process")(node));
 const summary = (node) => node.children.find((child) => child.tag === "summary");
@@ -354,14 +393,14 @@ test("a browser event automatically shows its live viewer and respects manual co
   assert.ok(panel);
   assert.equal(panel.props["data-session-id"], "session-1");
   assert.equal(panel.props["data-browser-id"], "browser-1");
-  button(root, "关闭实时浏览器画面").props.onClick();
+  findAll(root, (node) => node.tag === "button" && textContent(node) === "收起浏览器")[0].props.onClick();
   await nextTick();
   workspace.activeSession.value.events.push(browserEvent());
   assert.equal(await browserPanel(root), undefined);
   const reopen = findAll(root, (node) => node.tag === "button" && textContent(node) === "查看浏览器")[0];
   reopen.props.onClick();
   assert.ok(await browserPanel(root));
-  button(root, "关闭实时浏览器画面").props.onClick();
+  findAll(root, (node) => node.tag === "button" && textContent(node) === "收起浏览器")[0].props.onClick();
   await nextTick();
   workspace.activeSession.value.events.push(browserEvent("browser-2"));
   assert.equal((await browserPanel(root)).props["data-browser-id"], "browser-2");
@@ -381,12 +420,12 @@ test("conversation switching hides the old viewer and automatically restores the
   assert.equal(await browserPanel(root), undefined);
 });
 
-test("the browser preview is embedded in its assistant reply and state updates keep the same viewer", async () => {
+test("the browser preview stays at the conversation bottom while messages and browser state update", async () => {
   const { root, workspace } = await mount(session("running", [user("打开网页"), say("正在打开。"), browserEvent(), say("网页已打开。界面会实时更新。") ]));
   const panel = await browserPanel(root);
   const assistant = findAll(root, hasClass("chat-message-assistant"))[0];
   assert.ok(panel);
-  assert.ok(findAll(assistant, hasClass("session-browser")).includes(panel));
+  assert.equal(findAll(assistant, hasClass("session-browser")).length, 0);
   assert.ok(findAll(findAll(root, hasClass("chat-messages-scroll"))[0], hasClass("session-browser")).includes(panel));
   const firstRow = processes(root)[0];
   const update = browserEvent();
@@ -397,15 +436,21 @@ test("the browser preview is embedded in its assistant reply and state updates k
   assert.equal(processes(root)[0], firstRow);
   assert.equal(processes(root).filter((node) => node.props["data-kind"] === "browser").length, 1);
   assert.equal(findAll(root, hasClass("session-browser")).length, 1);
-  assert.equal(firstRow.parent.children.indexOf(firstRow) + 1, firstRow.parent.children.indexOf(panel.parent));
+  const list = findAll(root, hasClass("chat-messages"))[0];
+  assert.equal(list.children.filter((node) => node.tag).at(-1), panel.parent);
+  workspace.activeSession.value.events.push(user("总结一下"), say("最新一轮回复。"));
+  await nextTick();
+  assert.equal(await browserPanel(root), panel);
+  assert.equal(list.children.filter((node) => node.tag).at(-1), panel.parent);
 });
 
-test("only the most recent browser turn owns a preview and closed snapshots cannot reopen it", async () => {
+test("one bottom preview serves the whole conversation and closed snapshots cannot reopen it", async () => {
   const { root, workspace } = await mount(session("idle", [user("打开网页"), browserEvent(), say("已打开。"), user("继续浏览"), browserEvent(), say("完成。") ]));
   const panel = await browserPanel(root);
   const replies = findAll(root, hasClass("chat-message-assistant"));
   assert.equal(findAll(replies[0], hasClass("session-browser")).length, 0);
-  assert.equal(findAll(replies[1], hasClass("session-browser"))[0], panel);
+  assert.equal(findAll(replies[1], hasClass("session-browser")).length, 0);
+  assert.equal(findAll(root, hasClass("chat-messages"))[0].children.filter((node) => node.tag).at(-1), panel.parent);
   assert.equal(findAll(root, hasClass("session-browser")).length, 1);
   workspace.activeSession.value.events.push(browserEvent("browser-1", "closed"), browserEvent("browser-1"));
   assert.equal(await browserPanel(root), undefined);
@@ -426,11 +471,23 @@ test("an automatically mounted browser keeps the latest reply visible and does n
   live.workspace.activeSession.value.events.push(browserEvent());
   await browserPanel(live.root);
   assert.equal(list.scrollTop, 120);
-  button(live.root, "关闭实时浏览器画面").props.onClick();
+  findAll(live.root, (node) => node.tag === "button" && textContent(node) === "收起浏览器")[0].props.onClick();
   await nextTick();
   findAll(live.root, (node) => node.tag === "button" && textContent(node) === "查看浏览器")[0].props.onClick();
   await browserPanel(live.root);
   assert.ok(list.scrollTop > 120, "An explicit reopen should reveal the browser card");
+});
+
+test("the real close callback hides the browser without offering to reopen a closed session", async () => {
+  const { root, workspace } = await mount(session("idle", [browserEvent()]));
+  assert.ok(await browserPanel(root));
+  button(root, "关闭浏览器").props.onClick();
+  assert.equal(await browserPanel(root), undefined);
+  workspace.activeSession.value.events.push(browserEvent());
+  assert.equal(await browserPanel(root), undefined);
+  assert.equal(findAll(root, (node) => node.tag === "button" && /查看(实时画面|浏览器)/.test(textContent(node))).length, 0);
+  workspace.activeSession.value.events.push(browserEvent("browser-2"));
+  assert.equal((await browserPanel(root)).props["data-browser-id"], "browser-2");
 });
 
 test("closed browser events hide the live viewer and do not offer an obsolete connection", async () => {

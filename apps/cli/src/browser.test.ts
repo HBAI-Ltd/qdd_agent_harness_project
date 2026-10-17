@@ -5,7 +5,7 @@ import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, before, describe, test } from "node:test";
-import type { BrowserStreamEvent, PendingItem, SessionDetail, SessionEvent, SessionMeta } from "@qdd/shared";
+import type { BrowserSessionState, BrowserStreamEvent, PendingItem, SessionDetail, SessionEvent, SessionMeta } from "@qdd/shared";
 import type { ChatFn, ChatMessage } from "./agent/llm.js";
 import { loadConfig } from "./config.js";
 import { DataSources } from "./datasource/registry.js";
@@ -57,7 +57,9 @@ describe("浏览器工具（本机 Chrome）", { skip: CHROME ? false : "未找�
   let sources: DataSources;
   const outputs: string[] = [];
   let script: ((last: string) => ChatMessage)[] = [];
-  const chat: ChatFn = async (messages) => {
+  let browserDescription = "";
+  const chat: ChatFn = async (messages, tools) => {
+    browserDescription = tools.find((tool) => tool.function.name === "browser")?.function.description ?? "";
     const last = messages.at(-1)!;
     if (last.role === "tool") outputs.push(String(last.content));
     const next = script.shift();
@@ -83,7 +85,7 @@ describe("浏览器工具（本机 Chrome）", { skip: CHROME ? false : "未找�
     const reader = response.body!.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
-    void (async () => {
+    const finished = (async () => {
       for (;;) {
         const { value, done } = await reader.read().catch(() => ({ value: undefined, done: true }));
         if (done) return;
@@ -96,7 +98,7 @@ describe("浏览器工具（本机 Chrome）", { skip: CHROME ? false : "未找�
         }
       }
     })();
-    return { events, stop: () => controller.abort() };
+    return { events, finished, stop: () => controller.abort() };
   };
 
   before(async () => {
@@ -228,6 +230,123 @@ describe("浏览器工具（本机 Chrome）", { skip: CHROME ? false : "未找�
     const detail = (await (await api(`/api/sessions/${session.id}`)).json()) as SessionDetail;
     assert.equal(detail.events.findLast((event) => event.type === "browser")?.browser.url, url);
     await until(async () => browserStream.events.find((event) => event.type === "state" && event.session.url === url));
+  });
+
+  test("关闭接口校验鉴权与所属对话，结束画面流并保存关闭事件；旧 ID 不会关闭新浏览器", { timeout: 30_000 }, async (t) => {
+    script = [
+      () => call("browser", { action: "open", url: siteUrl }),
+      () => call("reply", { text: "网页已打开", gaps: [] }),
+    ];
+    const session = (await (await api("/api/wishes", { method: "POST", body: JSON.stringify({ wish: "打开浏览器" }) })).json()) as SessionMeta;
+    await gateway.hub.wait(session.id);
+    const detail = await gateway.hub.detail(session.id);
+    const state = detail.events.findLast((event) => event.type === "browser")!.browser;
+    script = [() => call("reply", { text: "另一段对话", gaps: [] })];
+    const other = await gateway.hub.create("另一段对话");
+    await gateway.hub.wait(other.id);
+    const route = `/api/browser/${state.browserSessionId}`;
+    const close = (sessionId: string) => api(route, { method: "DELETE", body: JSON.stringify({ sessionId }) });
+
+    assert.equal((await fetch(gateway.url + route, { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sessionId: session.id }) })).status, 401);
+    assert.equal((await api(route, { method: "DELETE", body: "{}" })).status, 400);
+    assert.equal((await close(other.id)).status, 404);
+    assert.equal((await api(route)).status, 200, "其他对话不能关闭此浏览器");
+    await assert.rejects(gateway.workbench.browser!.runtime.closeOwnedSession(path.join(gateway.workbench.browser!.cwd, "other"), session.id, state.browserSessionId), /不属于当前对话/);
+
+    const browserStream = await watchStream<BrowserStreamEvent>(route + "/stream");
+    const sessionStream = await watchStream<SessionEvent>(`/api/sessions/${session.id}/events?since=${detail.events.length}`);
+    t.after(() => { browserStream.stop(); sessionStream.stop(); });
+    const response = await close(session.id);
+    assert.equal(response.status, 200);
+    const closed = await response.json() as BrowserSessionState;
+    assert.equal(closed.browserSessionId, state.browserSessionId);
+    assert.equal(closed.status, "closed");
+    await until(async () => browserStream.events.find((event) => event.type === "closed"));
+    await browserStream.finished;
+    const liveClosed = await until(async () => sessionStream.events.find((event) => event.type === "browser" && event.browser.status === "closed"));
+    assert.equal(liveClosed.type, "browser");
+    assert.equal((await api(route)).status, 404);
+    assert.equal((await api(route + "/input", { method: "POST", body: JSON.stringify({ tabId: state.tabId, type: "reload" }) })).status, 404);
+    const persisted = await gateway.hub.detail(session.id);
+    assert.deepEqual(persisted.events.findLast((event) => event.type === "browser")?.browser, closed);
+    assert.equal(persisted.events.filter((event) => event.type === "user").length, detail.events.filter((event) => event.type === "user").length, "按钮关闭不应合成用户消息");
+    assert.equal(persisted.events.filter((event) => event.type === "tool").length, detail.events.filter((event) => event.type === "tool").length, "按钮关闭不应调用模型");
+    assert.equal((await gateway.hub.detail(other.id)).events.some((event) => event.type === "browser"), false);
+
+    script = [
+      () => call("browser", { action: "open", url: siteUrl }),
+      () => call("reply", { text: "重新打开浏览器", gaps: [] }),
+    ];
+    await gateway.hub.send(session.id, "重新打开浏览器");
+    assert.equal((await gateway.hub.wait(session.id)).status, "idle");
+    const reopened = (await gateway.hub.detail(session.id)).events.findLast((event) => event.type === "browser")!.browser;
+    assert.notEqual(reopened.browserSessionId, state.browserSessionId);
+    assert.equal((await close(session.id)).status, 404, "旧关闭请求必须仅针对旧浏览器 ID");
+    assert.equal((await api(`/api/browser/${reopened.browserSessionId}`)).status, 200);
+    await gateway.workbench.browser!.closeSession(session.id);
+  });
+
+  test("对话中要求关闭浏览器会调用 close 并结束实际浏览器会话", { timeout: 30_000 }, async () => {
+    script = [
+      () => call("browser", { action: "open", url: siteUrl }),
+      () => call("reply", { text: "网页已打开", gaps: [] }),
+    ];
+    const session = await gateway.hub.create("打开浏览器");
+    await gateway.hub.wait(session.id);
+    const state = (await gateway.hub.detail(session.id)).events.findLast((event) => event.type === "browser")!.browser;
+    script = [
+      (last) => {
+        assert.match(last, /关闭浏览器/);
+        assert.match(browserDescription, /用户说关闭浏览器时调用 close，结束实际会话/);
+        return call("browser", { action: "close" });
+      },
+      (last) => {
+        assert.match(last, /"status":"closed"/);
+        return call("reply", { text: "浏览器已关闭", gaps: [] });
+      },
+    ];
+    assert.equal((await api(`/api/sessions/${session.id}/messages`, { method: "POST", body: JSON.stringify({ text: "关闭浏览器" }) })).status, 202);
+    assert.equal((await gateway.hub.wait(session.id)).status, "idle");
+    const detail = await gateway.hub.detail(session.id);
+    assert.equal(detail.events.findLast((event) => event.type === "browser")?.browser.status, "closed");
+    assert.equal((await api(`/api/browser/${state.browserSessionId}`)).status, 404);
+    assert.equal((await gateway.hub.pending()).some((pending) => pending.sessionId === session.id), false, "关闭不应要求网页操作授权");
+  });
+
+  test("关闭按钮不等待尚未完成的导航操作", { timeout: 30_000 }, async (t) => {
+    let navigationStarted = false;
+    const slowSite = createServer((_req, _res) => { navigationStarted = true; });
+    await new Promise<void>((resolve) => slowSite.listen(0, "127.0.0.1", resolve));
+    const url = `http://127.0.0.1:${(slowSite.address() as { port: number }).port}/slow`;
+    let sessionId: string | undefined;
+    t.after(async () => {
+      if (sessionId) {
+        gateway.hub.cancel(sessionId);
+        await gateway.hub.wait(sessionId);
+        await gateway.workbench.browser!.closeSession(sessionId);
+      }
+      slowSite.closeAllConnections();
+      await new Promise<void>((resolve) => slowSite.close(() => resolve()));
+    });
+    script = [
+      () => call("browser", { action: "open", url }),
+      () => call("reply", { text: "已结束浏览器操作", gaps: [] }),
+    ];
+    const session = await gateway.hub.create("打开加载很慢的网页");
+    sessionId = session.id;
+    const state = await until(async () => {
+      const detail = await gateway.hub.detail(session.id);
+      return navigationStarted ? detail.events.findLast((event) => event.type === "browser")?.browser : undefined;
+    });
+    assert.equal(gateway.hub.isRunning(session.id), true);
+    const started = Date.now();
+    const response = await api(`/api/browser/${state.browserSessionId}`, { method: "DELETE", body: JSON.stringify({ sessionId: session.id }) });
+    assert.equal(response.status, 200);
+    assert.ok(Date.now() - started < 5_000, "实际关闭必须立即结束加载中的上下文，不能排在导航队列之后");
+    assert.equal((await response.json() as BrowserSessionState).status, "closed");
+    await gateway.hub.wait(session.id);
+    assert.equal((await api(`/api/browser/${state.browserSessionId}`)).status, 404);
+    assert.equal((await gateway.hub.detail(session.id)).events.findLast((event) => event.type === "browser")?.browser.status, "closed");
   });
 
   test("回归：点击下拉选项会选中；不可点击（零尺寸）的元素限时报错且不关闭会话；参数错误给出可读提示", { timeout: 60_000 }, async () => {

@@ -17,6 +17,7 @@ registerHooks({
       if (specifier === "@/components/AgentIcon.vue") return { url: "data:text/javascript,export default {}", shortCircuit: true };
       if (specifier === "@/composables/workspaceContext") return { url: context, shortCircuit: true };
       if (specifier === "./browserSession") return { url: new URL("../src/components/browserSession.ts", import.meta.url).href, shortCircuit: true };
+      if (specifier === "@/api/browser") return { url: new URL("../src/api/browser.ts", import.meta.url).href, shortCircuit: true };
     }
     if (specifier === "../api/browser" && contextInfo.parentURL?.endsWith("/browserSession.ts")) return { url: new URL("../src/api/browser.ts", import.meta.url).href, shortCircuit: true };
     if (specifier === "./workspace" && contextInfo.parentURL?.endsWith("/api/browser.ts")) return { url: new URL("../src/api/workspace.ts", import.meta.url).href, shortCircuit: true };

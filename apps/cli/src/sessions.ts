@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { appendFile, readdir, readFile } from "node:fs/promises";
 import path from "node:path";
-import type { AttachmentRef, ChatSelection, ClarifyAnswers, ClarifyQuestion, HarnessConfig, JsonObject, PendingItem, SessionDetail, SessionEvent, SessionMeta } from "@qdd/shared";
+import type { AttachmentRef, BrowserSessionState, ChatSelection, ClarifyAnswers, ClarifyQuestion, HarnessConfig, JsonObject, PendingItem, SessionDetail, SessionEvent, SessionMeta } from "@qdd/shared";
 import { runWish, WishError, type AgentEvent } from "./agent/agent.js";
 import { resolveChatSelection } from "./agent/chat-options.js";
 import type { ChatFn, ChatMessage } from "./agent/llm.js";
@@ -122,6 +122,12 @@ export class SessionHub {
     set.add(listener);
     this.listeners.set(id, set);
     return () => set.delete(listener);
+  }
+
+  /** 人工关闭浏览器等外部状态变更也写入历史，并同步给正在观看对话的客户端。 */
+  async recordBrowserState(id: string, browser: BrowserSessionState): Promise<void> {
+    await this.meta(id);
+    await this.emit(id, { type: "browser", browser });
   }
 
   onMeta(listener: (meta: SessionMeta) => void): () => void {

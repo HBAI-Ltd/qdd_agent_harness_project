@@ -73,6 +73,10 @@ const sources = await DataSources.open(loaded);
 let releaseNavigation;
 const continueNavigation = new Promise((resolve) => { releaseNavigation = resolve; });
 let step = 0;
+const firstReply = "已打开网页，实时画面显示在对话最下面。";
+const continuedReply = "可以继续对话，浏览器仍在最新消息下面。";
+const reopenedReply = "已重新打开浏览器。";
+const closedReply = "已按你的要求关闭浏览器。";
 const call = (name, args) => ({
   role: "assistant", content: null,
   tool_calls: [{ id: `preview-${step}`, type: "function", function: { name, arguments: JSON.stringify(args) } }],
@@ -86,7 +90,13 @@ const gateway = await startGateway(loaded, sources, {
       await continueNavigation;
       return call("browser", { action: "navigate", url: `${fixture}?phase=updated` });
     }
-    return call("reply", { text: "已打开网页，实时画面显示在这条回复中。", gaps: [] });
+    if (step === 3) return call("reply", { text: firstReply, gaps: [] });
+    if (step === 4) return call("reply", { text: continuedReply, gaps: [] });
+    if (step === 5) return call("browser", { action: "open", url: fixture });
+    if (step === 6) return call("reply", { text: reopenedReply, gaps: [] });
+    if (step === 7) return call("browser", { action: "close" });
+    if (step === 8) return call("reply", { text: closedReply, gaps: [] });
+    assert.fail(`Unexpected model step: ${step}`);
   },
 });
 let browser;
@@ -102,10 +112,14 @@ try {
   await page.setViewport({ width: 1365, height: 1000, deviceScaleFactor: 1 });
   const errors = [];
   const sentInputs = [];
+  const sentCloses = [];
   page.on("pageerror", (error) => errors.push(error.message));
   page.on("request", (request) => {
     if (request.method() === "POST" && /\/api\/browser\/[^/]+\/input$/.test(new URL(request.url()).pathname)) {
       sentInputs.push(JSON.parse(request.postData()));
+    }
+    if (request.method() === "DELETE" && /\/api\/browser\/[^/]+$/.test(new URL(request.url()).pathname)) {
+      sentCloses.push({ url: request.url(), body: JSON.parse(request.postData()) });
     }
   });
   // Observe the real viewer's stream abort signals without replacing network responses.
@@ -132,18 +146,36 @@ try {
     const image = document.querySelector(".browser-screen img");
     return image?.complete && image.naturalWidth > 0 && image.naturalHeight > 0;
   }, { timeout: 30_000 });
-  await page.waitForSelector(".chat-message-assistant .session-browser", { visible: true, timeout: 30_000 });
+  await page.waitForSelector(".chat-messages > .chat-browser-preview .session-browser", { visible: true, timeout: 30_000 });
   await waitForImage();
   const sessionId = (await gateway.hub.list())[0].id;
   const browserState = (await gateway.hub.detail(sessionId)).events.findLast((event) => event.type === "browser").browser;
-  const inlineGeometry = await page.$eval(".session-browser", (element) => ({
-    insideAssistant: Boolean(element.closest(".chat-message-assistant")),
-    insideMessages: Boolean(element.closest(".chat-messages-scroll")),
-    width: element.getBoundingClientRect().width,
-    height: element.getBoundingClientRect().height,
-  }));
-  assert.equal(inlineGeometry.insideAssistant, true, "The live browser must be part of the assistant reply");
-  assert.equal(inlineGeometry.insideMessages, true, "The live browser must scroll with the conversation");
+  const bottomBrowserGeometry = () => page.$eval(".session-browser", (element) => {
+    const preview = element.closest(".chat-browser-preview");
+    const messages = document.querySelector(".chat-messages");
+    const scroller = messages.closest(".chat-messages-scroll");
+    const bounds = element.getBoundingClientRect();
+    const composer = document.querySelector(".chat-composer-area").getBoundingClientRect();
+    return {
+      insideAssistant: Boolean(element.closest(".chat-message-assistant")),
+      insideMessages: Boolean(element.closest(".chat-messages-scroll")),
+      lastMessageChild: preview?.parentElement === messages && messages.lastElementChild === preview,
+      followsMessages: Boolean(preview?.previousElementSibling),
+      beforeComposer: scroller.nextElementSibling?.classList.contains("chat-composer-area") && bounds.bottom <= composer.top,
+      width: bounds.width, height: bounds.height,
+    };
+  });
+  const assertBottomBrowser = async () => {
+    const geometry = await bottomBrowserGeometry();
+    assert.equal(geometry.insideAssistant, false, "The live browser must stay below all turns instead of inside a historical reply");
+    assert.equal(geometry.insideMessages, true, "The live browser must scroll with the conversation");
+    assert.equal(geometry.lastMessageChild, true, "The browser must be the last child after messages and session actions");
+    assert.equal(geometry.followsMessages, true, "The browser must appear after the conversation messages");
+    assert.equal(geometry.beforeComposer, true, "The default browser must be visible above the composer");
+    return geometry;
+  };
+  await settleUi(page);
+  const inlineGeometry = await assertBottomBrowser();
   assert.ok(inlineGeometry.width > 200 && inlineGeometry.height > 120, JSON.stringify(inlineGeometry));
   assert.equal(await page.$$eval(".session-browser", (elements) => elements.length), 1);
   const streams = () => page.evaluate(() => window.browserPreviewStreams);
@@ -153,12 +185,31 @@ try {
 
   releaseNavigation();
   assert.equal((await gateway.hub.wait(sessionId)).status, "idle");
-  await page.waitForFunction(() => document.body.innerText.includes("已打开网页，实时画面显示在这条回复中。")
+  await page.waitForFunction((reply) => document.body.innerText.includes(reply)
     && document.querySelector(".browser-screen img")?.alt.includes("updated")
-    && !document.querySelector('[aria-label="停止回复"]'));
+    && !document.querySelector('[aria-label="停止回复"]'), {}, firstReply);
   await waitForImage();
+  await settleUi(page);
+  await assertBottomBrowser();
   assert.equal((await streams()).length, 1, "Navigation and repeated browser history events must keep one stream");
   assert.equal(await page.$$eval(".session-browser", (elements) => elements.length), 1, "Repeated browser state updates must keep one live card");
+
+  const sendMessage = async (text, reply) => {
+    await page.focus("#message-input");
+    await page.keyboard.down("Control");
+    await page.keyboard.press("A");
+    await page.keyboard.up("Control");
+    await page.type("#message-input", text);
+    await page.click('[aria-label="发送消息"]');
+    await page.waitForFunction((expected) => document.body.innerText.includes(expected)
+      && !document.querySelector('[aria-label="停止回复"]'), {}, reply);
+    assert.equal((await gateway.hub.wait(sessionId)).status, "idle");
+    await settleUi(page);
+  };
+  await sendMessage("继续回复一条消息，保持浏览器打开", continuedReply);
+  await assertBottomBrowser();
+  assert.equal(await page.$$eval(".chat-message", (elements) => elements.length), 4, "The second turn must append another user and assistant reply");
+  assert.equal((await streams()).length, 1, "Continuing the conversation must preserve the browser stream at the bottom");
 
   await page.click('[aria-label="放大浏览器画面"]');
   await page.waitForSelector('.browser-dialog', { visible: true });
@@ -184,9 +235,13 @@ try {
   await waitForImage();
   assert.equal((await streams()).length, 1, "Closing the enlargement must keep the inline viewer connected");
 
-  await page.click('[aria-label="关闭实时浏览器画面"]');
+  await page.evaluate(() => [...document.querySelectorAll(".chat-conversation-actions button")]
+    .find((button) => button.textContent.trim() === "收起浏览器").click());
   await page.waitForSelector(".session-browser", { hidden: true });
   await until(async () => (await streams())[0].aborted, "Collapsing the browser must abort its stream");
+  assert.equal((await fetch(`${gateway.url}/api/browser/${browserState.browserSessionId}`, { headers })).status, 200,
+    "The explicit collapse action must keep the real browser running");
+  assert.equal(sentCloses.length, 0, "Collapsing must not send the real close request");
   await page.evaluate(() => [...document.querySelectorAll(".chat-conversation-actions button")]
     .find((button) => button.textContent.trim() === "查看浏览器").click());
   await waitForImage();
@@ -238,14 +293,14 @@ try {
     const bounds = dialog.getBoundingClientRect();
     const image = dialog.querySelector(".browser-screen img").getBoundingClientRect();
     const atImage = document.elementFromPoint(image.left + image.width / 2, image.top + image.height / 2);
-    const close = dialog.querySelector(".el-dialog__headerbtn").getBoundingClientRect();
+    const close = dialog.querySelector('[aria-label="关闭浏览器"]').getBoundingClientRect();
     const atClose = document.elementFromPoint(close.left + close.width / 2, close.top + close.height / 2);
     return {
       viewport: innerWidth, documentWidth: document.documentElement.scrollWidth,
       left: bounds.left, right: bounds.right, top: bounds.top, bottom: bounds.bottom,
       opacity: getComputedStyle(dialog).opacity,
       imageUnobstructed: Boolean(atImage?.closest(".browser-screen")),
-      closeUsable: Boolean(atClose?.closest(".el-dialog__headerbtn")),
+      closeUsable: Boolean(atClose?.closest('[aria-label="关闭浏览器"]')),
     };
   });
   assert.ok(mobileExpanded.documentWidth <= mobileExpanded.viewport, `The enlarged mobile document overflows: ${JSON.stringify(mobileExpanded)}`);
@@ -268,6 +323,86 @@ try {
   await waitForImage();
   assert.equal((await streams()).length, 3, "Returning to the conversation must create one stream");
   assert.equal((await streams()).filter((stream) => !stream.aborted).length, 1);
+  await settleUi(page);
+  await assertBottomBrowser();
+
+  // A separate real SSE consumer proves closing ends the server stream, not just the UI subscription.
+  const observeBrowserClose = async (id) => {
+    const response = await fetch(`${gateway.url}/api/browser/${id}/stream`, { headers, signal: AbortSignal.timeout(20_000) });
+    assert.equal(response.status, 200);
+    const finished = (async () => {
+      const decoder = new TextDecoder();
+      let pending = "";
+      let closedState = false;
+      let closedEvent = false;
+      for await (const chunk of response.body) {
+        pending += decoder.decode(chunk, { stream: true });
+        let newline;
+        while ((newline = pending.indexOf("\n")) !== -1) {
+          const line = pending.slice(0, newline);
+          pending = pending.slice(newline + 1);
+          if (!line.startsWith("data: ")) continue;
+          const event = JSON.parse(line.slice(6));
+          if (event.type === "state" && event.session.browserSessionId === id && event.session.status === "closed") closedState = true;
+          if (event.type === "closed" && event.sessionId === id) closedEvent = true;
+        }
+      }
+      assert.equal(closedState, true, "Closing must deliver the final closed state to browser subscribers");
+      assert.equal(closedEvent, true, "Closing must deliver a closed event and finish the SSE response");
+    })();
+    return { finished };
+  };
+  const assertClosedBrowser = async (id) => {
+    assert.equal((await fetch(`${gateway.url}/api/browser/${id}`, { headers })).status, 404,
+      "A real close must remove the running browser from the backend");
+    const detail = await gateway.hub.detail(sessionId);
+    const latest = detail.events.findLast((event) => event.type === "browser").browser;
+    assert.equal(latest.browserSessionId, id);
+    assert.equal(latest.status, "closed", "Closing must update the conversation's latest browser state");
+    const savedEvents = (await readFile(path.join(loaded.paths.sessions, `${sessionId}.events.jsonl`), "utf8"))
+      .trim().split("\n").map((line) => JSON.parse(line));
+    assert.deepEqual(savedEvents.findLast((event) => event.type === "browser").browser, latest,
+      "The closed browser event must be persisted for conversation replay");
+    await page.waitForSelector(".session-browser", { hidden: true });
+    await page.waitForFunction(() => ![...document.querySelectorAll(".chat-conversation-actions button")]
+      .some((button) => ["查看浏览器", "收起浏览器"].includes(button.textContent.trim())));
+    await until(async () => (await streams()).every((stream) => stream.aborted), "Real close must release every UI browser stream");
+  };
+
+  const headerCloseStream = await observeBrowserClose(browserState.browserSessionId);
+  await page.click('.session-browser > .browser-heading [aria-label="关闭浏览器"]');
+  await page.waitForSelector(".session-browser", { hidden: true });
+  await headerCloseStream.finished;
+  await assertClosedBrowser(browserState.browserSessionId);
+  assert.deepEqual(sentCloses, [{ url: `${gateway.url}/api/browser/${browserState.browserSessionId}`, body: { sessionId } }],
+    "The header close button must call the real browser close endpoint with its owning conversation");
+
+  await page.click('[aria-label="新建对话"]');
+  await page.waitForSelector(".conversation-select", { visible: true });
+  await page.click(".conversation-select");
+  await page.waitForFunction((reply) => document.body.innerText.includes(reply), {}, continuedReply);
+  await settleUi(page);
+  assert.equal(await page.$$eval(".session-browser", (elements) => elements.length), 0,
+    "Returning to closed browser history must not reopen the viewer");
+  assert.equal((await streams()).length, 3, "Closed conversation history must not start a stream");
+
+  await sendMessage("重新打开浏览器并显示网页", reopenedReply);
+  await waitForImage();
+  await assertBottomBrowser();
+  const reopenedBrowser = (await gateway.hub.detail(sessionId)).events.findLast((event) => event.type === "browser").browser;
+  assert.notEqual(reopenedBrowser.browserSessionId, browserState.browserSessionId,
+    "Opening after a real close must create a new browser session");
+  assert.equal(reopenedBrowser.status, "running");
+  assert.equal((await streams()).length, 4, "Opening through chat must start exactly one new viewer stream");
+  const chatCloseStream = await observeBrowserClose(reopenedBrowser.browserSessionId);
+  await sendMessage("请关闭浏览器", closedReply);
+  await chatCloseStream.finished;
+  await assertClosedBrowser(reopenedBrowser.browserSessionId);
+  assert.equal(sentCloses.length, 1, "Closing through chat must execute the browser tool rather than the UI close endpoint");
+  const chatCloseTool = (await gateway.hub.detail(sessionId)).events.findLast((event) => event.type === "tool"
+    && event.tool.name === "browser" && event.tool.args?.action === "close");
+  assert.equal(chatCloseTool?.tool.status, "success", "A conversational close request must complete the browser close tool");
+  assert.equal(step, 8, "All scripted conversation turns must finish");
   assert.deepEqual(errors, [], "The production chat page must have no uncaught exceptions");
   console.log(JSON.stringify({ passed: true, root, sessionId, browserSessionId: browserState.browserSessionId,
     streams: (await streams()).length, inlineGeometry, mobile, mobileExpanded,

@@ -7,6 +7,10 @@ export function getBrowser(base: string, token: string, id: string, signal: Abor
   return gatewayJson(base, token, browserPath(id), { signal });
 }
 
+export function closeBrowser(base: string, token: string, id: string, sessionId: string, signal?: AbortSignal): Promise<BrowserSessionState> {
+  return gatewayJson(base, token, browserPath(id), { method: "DELETE", body: JSON.stringify({ sessionId }), signal: signal ?? null });
+}
+
 export function browserEvents(base: string, token: string, id: string, onEvent: (event: BrowserStreamEvent) => void, signal: AbortSignal): Promise<void> {
   return gatewayStream(base, token, `${browserPath(id)}/stream`, onEvent, signal);
 }

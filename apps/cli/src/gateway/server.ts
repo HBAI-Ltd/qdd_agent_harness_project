@@ -440,6 +440,14 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
         if (!state) throw new HttpError(404, "浏览器会话不存在或已关闭");
         return json(res, 200, state);
       }
+      if (!sub && m === "DELETE") {
+        const body = (await readJson(req)) as { sessionId?: unknown } | undefined;
+        if (typeof body?.sessionId !== "string" || !body.sessionId.trim()) throw new HttpError(400, "sessionId 不能为空");
+        await hub.meta(body.sessionId);
+        const state = await browser.closeBrowser(body.sessionId, id);
+        await hub.recordBrowserState(body.sessionId, state);
+        return json(res, 200, state);
+      }
       if (sub === "/stream" && m === "GET") {
         const stream = openSse(req, res);
         // 背压：写缓冲未清空时只保留最新一帧，drain 后补发

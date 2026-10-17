@@ -44,7 +44,7 @@ npm run qdd -- token
 - 设置：Element Plus 输入框、按钮和开关，用于网关连接、浅色/深色主题、发送快捷键及后端统一页面风格。
 - 修改已发布页面时，在同一对话面板恢复该页面对应的原始会话，继续其上下文，不额外创建会话。
 - 后端没有任务重命名、删除和手动状态接口，前端不提供这些操作。
-- 对话底部参考 Toonflow 的模型与思考强度组合选择器，模型列表由 `GET /api/chat/options` 返回，可搜索；只显示所选模型支持的思考档位，切换模型使用其默认档位。首次发送和续聊都会传递 `model` / `reasoningEffort`，会话重载后恢复已保存的选择。可在 `llm.models` 中配置同一服务商的其他模型与支持档位，详见根目录 `harness.config.example.json` 和 `docs/api.md`。
+- 对话底部参考 Toonflow 的模型与思考强度组合选择器，模型目录由 `GET /api/models` 返回，可搜索并按服务商分组；未配置 API Key 的模型显示原因且不可选择。思考档位来自 `GET /api/chat/options`，只显示所选模型支持的档位。已有会话切换模型调用 `PUT /api/sessions/:id/model`，下一轮生效；首次发送和续聊都会传递 `model` / `reasoningEffort`，会话重载后恢复已保存的选择。可在 `llm.models` 中配置不同服务商、模型与支持档位，详见根目录 `harness.config.example.json` 和 `docs/api.md`。
 - 附件通过选择、多选、拖放或粘贴添加，在浏览器内转换为 Markdown，并与正文合并到现有的 `wish` / `text` 字段发送；支持仅附件发送，不上传原始文件。支持 Markdown、文本、常见代码、JSON、CSV/TSV、含文字的 PDF 和 DOCX；DOCX 保留标题、强调和表格，PDF 按页提取文字，扫描件需先 OCR，图片和旧版 DOC 暂不支持。单文件上限 10 MiB，转换后的内容上限 512 KiB，每条最多 5 个附件，合并消息 JSON 上限 900 KiB。文件显示在输入框上方，可逐个移除；转换期间禁止发送。
 - 发送时立即清空输入框和附件，并在消息区展示用户消息和等待进度，发送位置切换为「停止回复」；发送失败会恢复未被编辑的草稿及附件，不覆盖发送后继续输入或主动删除的内容。附件与输入草稿按会话、网关隔离，异步转换会保留在原会话，首次会话创建时迁移后续草稿与附件。执行中或等待回答、授权时均可停止，下一条草稿可以继续编辑。停止请求被接受后仍等待真实终态再恢复发送。
 - 刷新工作空间保留正在提交的请求和当前会话；续聊、答题、授权与取消通过 SSE 原位更新，避免重载聊天记录。新建请求尚未返回会话 ID 时点击停止，会在创建确认后取消该会话。
@@ -184,4 +184,12 @@ npm run build
 npm run build:web
 node scripts/test-frontend-navigation.mjs
 node scripts/test-task-preview-browser.mjs
+```
+
+模型选择的状态与竞态回归位于 `tests/composer-model-selection.test.ts`，覆盖目录重试、不可用模型、连续切换、失败恢复及凭据变更隔离，包含在上述前端测试命令中。生产界面与真实网关的 Chrome 回归验证模型选择、思考档位、下一轮生效、刷新恢复、附件发送和移动端弹层；模型回复使用本地桩，不调用外部模型：
+
+```powershell
+npm run build
+npm run build:web
+node scripts/test-chat-composer-browser.mjs
 ```

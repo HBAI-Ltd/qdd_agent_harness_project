@@ -255,7 +255,8 @@ export function createBrowserRuntime() {
     session.closed = true;
     session.state = { ...session.state, status: "closed" };
     sessions.delete(session.state.browserSessionId);
-    void owners.get(session.ownerKey)?.then(current => { if (current === session) owners.delete(session.ownerKey); }).catch(() => {});
+    const owner = owners.get(session.ownerKey);
+    void owner?.then(current => { if (current === session && owners.get(session.ownerKey) === owner) owners.delete(session.ownerKey); }).catch(() => {});
     clearRefs(session);
     emit(session, { type: "state", session: session.state });
     emit(session, { type: "closed", sessionId: session.state.browserSessionId });
@@ -713,6 +714,15 @@ export function createBrowserRuntime() {
     hasOwner(cwd: string, ownerSessionId: string, browserSessionId: string) {
       const session = sessions.get(browserSessionId);
       return !!session && !session.closed && session.ownerKey === JSON.stringify([resolve(cwd), ownerSessionId]);
+    },
+    async closeOwnedSession(cwd: string, ownerSessionId: string, browserSessionId: string): Promise<BrowserSessionState> {
+      const session = sessions.get(browserSessionId);
+      if (!session || session.closed || session.ownerKey !== JSON.stringify([resolve(cwd), ownerSessionId])) {
+        throw Object.assign(new Error("浏览器会话不存在、已关闭或不属于当前对话"), { status: 404 });
+      }
+      // 直接关闭指定上下文，不等待正在导航/操作的队列，也不影响此后新建的浏览器。
+      await closeSession(session);
+      return { ...session.state };
     },
     subscribe(cwd: string, browserSessionId: string, listener: (event: BrowserStreamEvent) => void) {
       const session = sessions.get(browserSessionId);

@@ -9,10 +9,11 @@ import { ElTag } from "element-plus/es/components/tag/index";
 import type { BrowserInput, BrowserSessionState } from "@qdd/shared";
 import AgentIcon from "@/components/AgentIcon.vue";
 import { useWorkspaceContext } from "@/composables/workspaceContext";
+import { closeBrowser as closeBrowserSession } from "@/api/browser";
 import { createBrowserViewer, emptyBrowserViewer, frameCoordinates } from "./browserSession";
 
 const props = defineProps<{ browser: BrowserSessionState; sessionId: string }>();
-const emit = defineEmits<{ close: [] }>();
+const emit = defineEmits<{ close: [browser: BrowserSessionState] }>();
 const { workspace } = useWorkspaceContext();
 const state = reactive(emptyBrowserViewer());
 const viewer = createBrowserViewer(state, () => ({ base: workspace.gatewayUrl.value, token: workspace.token.value }));
@@ -20,6 +21,8 @@ const image = ref<HTMLImageElement>();
 const displayedFrame = ref(0);
 const expanded = ref(false);
 const expandedTarget = ref<HTMLElement>();
+const closing = ref(false);
+let closeController: AbortController | undefined;
 const address = ref("");
 const text = ref("");
 const pressedButtons = new Set<number>();
@@ -50,6 +53,9 @@ watch(() => state.frame?.sequence, () => {
     ? state.frame?.sequence ?? 0 : 0;
 });
 watch([() => props.sessionId, () => props.browser.browserSessionId, workspace.gatewayUrl, workspace.token], () => {
+  closeController?.abort();
+  closeController = undefined;
+  closing.value = false;
   text.value = "";
   startWatching();
 }, { immediate: true });
@@ -140,6 +146,40 @@ function navigate() {
 function command(type: "back" | "forward" | "reload") {
   void viewer.input({ type } as BrowserInput);
 }
+async function closeBrowser() {
+  if (closing.value) return;
+  const browser = state.session ?? props.browser;
+  const sessionId = props.sessionId;
+  const base = workspace.gatewayUrl.value;
+  const token = workspace.token.value;
+  const controller = new AbortController();
+  closeController = controller;
+  closing.value = true;
+  viewer.setManual(false);
+  const finish = () => {
+    const closed: BrowserSessionState = { ...browser, status: "closed" };
+    viewer.stop();
+    state.session = closed;
+    expanded.value = false;
+    emit("close", closed);
+  };
+  const current = () => !unmounted && !controller.signal.aborted && props.sessionId === sessionId
+    && props.browser.browserSessionId === browser.browserSessionId && workspace.gatewayUrl.value === base && workspace.token.value === token;
+  try {
+    const result = await closeBrowserSession(base, token, browser.browserSessionId, sessionId, controller.signal);
+    if (result.browserSessionId !== browser.browserSessionId || result.status !== "closed") throw new Error("浏览器未确认关闭，请重试。");
+    if (current()) finish();
+  } catch (cause) {
+    if (!current()) return;
+    if (cause instanceof Error && "status" in cause && cause.status === 404) finish();
+    else state.error = cause instanceof Error ? cause.message : "关闭浏览器失败，请重试。";
+  } finally {
+    if (closeController === controller) {
+      closeController = undefined;
+      closing.value = false;
+    }
+  }
+}
 function startWatching() {
   if (unmounted) return;
   pausedForVisibility = false;
@@ -172,6 +212,7 @@ onMounted(() => {
 });
 onBeforeUnmount(() => {
   unmounted = true;
+  closeController?.abort();
   pausedForVisibility = false;
   window.removeEventListener("blur", blur);
   window.removeEventListener("pagehide", pagehide);
@@ -185,7 +226,7 @@ onBeforeUnmount(() => {
   <section class="session-browser" aria-label="会话实时浏览器">
     <header class="browser-heading">
       <div class="browser-page-label" :title="state.session?.title || props.browser.title"><AgentIcon name="browser" :size="16" /><strong>{{ pageLabel }}</strong></div>
-      <div class="browser-heading-actions"><ElButton text size="small" aria-label="放大浏览器画面" @click="expanded = true"><AgentIcon name="expand" :size="14" />放大</ElButton><ElButton text circle size="small" aria-label="关闭实时浏览器画面" title="收起浏览器画面" @click="emit('close')"><AgentIcon name="close" :size="14" /></ElButton></div>
+      <div class="browser-heading-actions"><ElButton text size="small" aria-label="放大浏览器画面" @click="expanded = true"><AgentIcon name="expand" :size="14" />放大</ElButton><ElButton text circle size="small" aria-label="关闭浏览器" title="关闭浏览器" :loading="closing" @click="closeBrowser"><AgentIcon name="close" :size="14" /></ElButton></div>
     </header>
     <Teleport :to="expandedTarget ?? 'body'" :disabled="!expanded || !expandedTarget">
       <div class="browser-content" :class="{ 'browser-content-expanded': expanded }">
@@ -238,8 +279,8 @@ onBeforeUnmount(() => {
       <span class="browser-connection" :class="{ 'browser-connection-live': state.online }"><i aria-hidden="true"></i>{{ connectionLabel }}</span>
       <ElButton v-if="!state.online && !state.connecting && state.session?.status !== 'closed'" link size="small" aria-label="重新连接浏览器画面" @click="startWatching">重连</ElButton>
     </footer>
-    <ElDialog v-model="expanded" title="实时浏览器" class="browser-dialog" width="min(1100px, 94vw)" top="4vh" append-to-body :close-on-click-modal="false" destroy-on-close>
-      <template #header><div class="browser-dialog-heading"><AgentIcon name="browser" :size="18" /><strong>{{ pageLabel }}</strong><ElTag size="small" :type="state.manual ? 'warning' : 'info'">{{ connectionLabel }}</ElTag></div></template>
+    <ElDialog v-model="expanded" title="实时浏览器" class="browser-dialog" width="min(1100px, 94vw)" top="4vh" append-to-body :show-close="false" :close-on-press-escape="!closing" :close-on-click-modal="false" destroy-on-close>
+      <template #header><div class="browser-dialog-heading"><AgentIcon name="browser" :size="18" /><strong>{{ pageLabel }}</strong><ElTag size="small" :type="state.manual ? 'warning' : 'info'">{{ connectionLabel }}</ElTag><div class="browser-dialog-actions"><ElButton text size="small" :disabled="closing" @click="expanded = false">返回对话</ElButton><ElButton text circle aria-label="关闭浏览器" title="关闭浏览器" :loading="closing" @click="closeBrowser"><AgentIcon name="close" :size="16" /></ElButton></div></div></template>
       <div ref="expandedTarget" class="browser-expanded-target"></div>
     </ElDialog>
   </section>
@@ -273,8 +314,10 @@ onBeforeUnmount(() => {
 .browser-connection i { width: 5px; height: 5px; border-radius: 50%; background: var(--qdd-muted); }
 .browser-connection-live i { background: var(--qdd-good); }
 .browser-status :deep(.el-button) { font-size: 11px; }
-.browser-dialog-heading { display: flex; align-items: center; gap: 10px; min-width: 0; padding-right: 24px; color: var(--qdd-text); font: 14px/1.6 var(--qdd-font); }
+.browser-dialog-heading { display: flex; align-items: center; gap: 10px; min-width: 0; color: var(--qdd-text); font: 14px/1.6 var(--qdd-font); }
 .browser-dialog-heading strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.browser-dialog-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 4px; margin-left: auto; }
+.browser-dialog-actions :deep(.el-button) { margin: 0; }
 .browser-expanded-target { min-width: 0; border: 1px solid var(--qdd-border); border-radius: 10px; overflow: hidden; color: var(--qdd-text); background: var(--qdd-surface); font: 14px/1.6 var(--qdd-font); }
 .browser-content-expanded .browser-screen { height: min(60vh, 650px); aspect-ratio: auto; }
 .browser-footer { padding: 10px 14px; border-top: 1px solid var(--qdd-border); }

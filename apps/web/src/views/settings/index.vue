@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, ref, watch } from "vue";
+import { nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 import WorkspaceSettings from "@/components/WorkspaceSettings.vue";
 import WorkspaceData from "@/components/WorkspaceData.vue";
@@ -9,6 +9,7 @@ import * as gatewayApi from "@/api/workspace";
 
 const { workspace } = useWorkspaceContext();
 const route = useRoute();
+const workspaceData = ref<InstanceType<typeof WorkspaceData>>();
 const { gatewayUrl, token, preferences, connected, loadingSessions, loadingPages, error, loadWorkspace } = workspace;
 const styleText = ref("");
 const styleLoading = ref(false);
@@ -16,6 +17,17 @@ const styleSaving = ref(false);
 const styleNotice = ref("");
 let styleController: AbortController | undefined;
 let styleSaveController: AbortController | undefined;
+let disposed = false;
+
+watch(() => [route.query.record, route.hash], async ([name, hash]) => {
+  if (typeof name !== "string" && hash !== "#settings-records") return;
+  await nextTick();
+  if (disposed) return;
+  const section = document.getElementById("settings-records");
+  const panel = section?.closest<HTMLElement>(".settings-panel");
+  if (!section || !panel) return;
+  panel.scrollTo({ top: panel.scrollTop + section.getBoundingClientRect().top - panel.getBoundingClientRect().top - 24 });
+}, { immediate: true });
 
 function styleError(cause: unknown) {
   return cause instanceof TypeError ? "无法连接网关，请检查地址与跨域配置。" : cause instanceof Error ? cause.message : "风格设置请求失败。";
@@ -75,7 +87,7 @@ watch([gatewayUrl, token], () => {
   styleText.value = "";
   styleNotice.value = "";
 });
-onBeforeUnmount(stopStyleRequests);
+onBeforeUnmount(() => { disposed = true; stopStyleRequests(); });
 </script>
 
 <template>
@@ -94,7 +106,7 @@ onBeforeUnmount(stopStyleRequests);
     :style-notice="styleNotice"
     @save-style="saveStyle()"
     @reset-style="saveStyle(true)">
-    <WorkspaceData :connected="connected" :gateway-url="gatewayUrl" :token="token" />
-    <WorkspaceRecords :connected="connected" :gateway-url="gatewayUrl" :token="token" :initial-name="typeof route.query.record === 'string' ? route.query.record : undefined" />
+    <WorkspaceData ref="workspaceData" :connected="connected" :gateway-url="gatewayUrl" :token="token" />
+    <WorkspaceRecords :connected="connected" :gateway-url="gatewayUrl" :token="token" :initial-name="typeof route.query.record === 'string' ? route.query.record : undefined" @changed="workspaceData?.refresh()" />
   </WorkspaceSettings>
 </template>

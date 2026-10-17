@@ -119,6 +119,23 @@ test("a pending iframe request stops showing loading and reports a retryable tim
   assert.equal(f.frame().sent.length, 0, "a pending navigation has not started its handshake");
 });
 
+test("declared record sets open their manager while preserving the active page frame", async (t) => {
+  const f = mount(t);
+  const originalFrame = f.frame();
+  const opened = [];
+  f.props.onRecords = (name) => opened.push(name);
+  f.props.page.records = ["loss_log", "patrol_log"];
+  await nextTick();
+  const recordButton = (name) => find(f.root, (node) => node.tag === "button" && node.props["aria-label"] === `管理登记记录：${name}`);
+  assert.ok(recordButton("patrol_log"));
+  recordButton("loss_log").props.onClick();
+  assert.deepEqual(opened, ["loss_log"]);
+  assert.equal(f.frame(), originalFrame);
+  f.props.page.records = [];
+  await nextTick();
+  assert.equal(recordButton("loss_log"), undefined);
+});
+
 test("load establishes the real bridge and readiness clears both deadlines", async (t) => {
   const f = mount(t);
   await f.tick(10000);

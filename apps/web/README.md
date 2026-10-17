@@ -33,7 +33,9 @@ npm run qdd -- token
 生成的任务页面需要直接使用实际网关来源：页面级 token、cookie、SDK 注入、CSP 嵌入权限和父页面通信均由网关处理。`gateway.corsOrigins` 同时控制跨域请求、页面嵌入与 SDK 允许的主界面来源。网关 token 只存于当前浏览器会话，不放入页面地址。
 
 - 对话：支持新建对话、历史记录与会话切换，发送经营需求、续聊、查看 SSE 进度，并完成需求确认与显式授权。点击「新建对话」进入空白草稿，首次发送消息时通过 `POST /api/wishes` 建立会话；已有对话通过 `POST /api/sessions/:id/messages` 续聊。
-- 同一轮助手消息集中展示，思考、工具、技能和浏览器记录以正文上方的紧凑行独立展开。旧接口只有工具文本时显示「执行记录」；前端预留 `thinking { text }` 和工具可选 `callId`、`name`、`status`（`running/completed/failed/cancelled`）、`input`、`output` 展示字段，相同 `callId` 在本轮内合并。后端提供相应数据后才显示思考和调用状态，本次不修改后端契约。
+- 同一轮助手消息使用统一的 `parts` 按输出顺序展示，正文、思考、工具、技能与浏览器记录依次穿插，思考和工具行可独立展开。`text/thinking` 按 `blockId` 累积实时 `delta`，收到 `content/done` 后以完整内容替换；同一回复内按块序号补齐迟到的块，完成时保留原行及展开状态。结构化工具事件读取 `tool.id/name/args/status/progress/result`，按调用 id 在原位置合并进度和结果，状态区分 `running/success/error`；旧版纯文本工具记录仍可查看。
+- 回复中的 loading、等待确认和停止提示放在当前助手消息正文末尾，不单独新增头像或消息行。首个内容块尚未返回时，先展示当前轮的助手容器，随后在同一容器中继续渲染内容。
+- 实时增量不进入持久化事件数组，SSE 重连的 `since` 只计算落盘事件。切换会话、连接、开始新一轮或执行结束会清理未完成增量，重连通过完整回放恢复内容；已结束的会话不会继续显示工具调用中，明确取消时显示「已中断」。持续输出时仅在消息区接近底部时跟随滚动。
 - 助手正文与思考支持 Markdown 标题、表格、代码块、引用、任务列表和链接；用户输入保留原文。表格和代码横向滚动，原始 HTML 按文字显示，危险链接协议不渲染为链接。
 - 对话记录来自 `GET /api/sessions`，按更新时间倒序展示；切换时加载 `GET /api/sessions/:id` 并订阅该会话的 SSE。前端按网关保存当前选择，刷新或重新连接后恢复同一会话或新对话草稿状态。
 - 工作台总览：接入 `GET /api/overview` 与 `GET /api/pending`，展示真实计数、已启用定时任务、最近对话和已发布页面。可在总览直接回答问题或授权，也可进入来源对话；侧栏同步技能、任务和已连接来源数量。
@@ -48,6 +50,8 @@ npm run qdd -- token
 - 连接器：使用后端目录与安装列表，支持飞书 Webhook / 企业自建应用安装、设置、验证、测试消息和删除；内置与配置文件 MCP 来源只读展示。安装或重新验证可能发送验证消息，表单明确说明；其他未开放目录类型保持禁用与 `// TODO`。
 - 技能：技能库与模板分组展示，支持按来源筛选和搜索名称、说明、步骤及工具；详情提供运行、编辑和来源对话入口，编辑器支持步骤排序及可选工具设置。加载、断连、失败、空列表与无搜索结果分别展示对应操作。运行时以 `POST /api/wishes` 的 `skillId` 预加载技能；对话中的 `skill` 事件显示加载与保存结果，`save_skill` 授权展示实际名称、步骤与工具。
 - 定时任务：支持真实列表、新建、编辑、删除、启停、立即执行、执行结果及通知状态，可绑定技能、已发布页面和可推送连接器；高级 cron 保留已有自定义规则，空值编辑发送 `null` 解绑。cron 按网关时区执行；配置通知目标即授权该任务完成后自动推送，数据修改默认需确认，并遵守工作空间已有的授权设置。
+- 对话与总览待办中的 `define_record`、`create_schedule` 授权展示登记字段、执行规则、网关提供的下次时间、关联页面/技能及推送接收方，保留原始参数供核对。助手创建的定时任务显示创建来源，可返回创建对话。
+- 设置中的「门店登记」接入 `/api/records`，支持登记表结构创建与扩展、按日期及条数查询、填写、修改和作废记录。动态表单保留数字零、否和未填写的区别；更新不改登记时间，结构调整不删除或改类型。提交前确认，连接或选择变化后不提交过期表单；写入成功后同步刷新数据与指标。任务卡片和预览按 `PageEntry.records` 提供对应登记表入口，进入 `/settings?record=<name>#settings-records` 自动选择并定位。
 - 浏览器：收到真实 `browser` 会话事件或恢复含运行中浏览器的历史对话后，自动打开实时 JPEG 画面，展示助手正在浏览和操作的页面；用户可关闭画面，同一浏览器会话不会自行重新打开。默认只读，开启「人工接管」后可导航、点击、滚动、键盘与中文输入。按画面尺寸换算坐标，校验会话和标签标识，409 不重放输入；窗口失焦时退出人工接管并释放输入，但继续观看。页面隐藏时暂停订阅，返回后自动恢复只读观看；切会话、停止观看和卸载时释放输入并关闭订阅，已关闭浏览器不会自动重连。
 - 数据同步：全局 SSE 的 `skills_changed`、`schedules_changed`、`connectors_changed`、`pending_changed` 更新对应资源及总览；重连后重新拉取。切换 token 或网关会取消旧请求并清空资源，迟到响应不会覆盖新连接。
 - 任务详情继续通过 iframe 加载后端提供的 `PageView.url`，主界面顶部提供「通过对话修改」，不在前端重建原型动画中的经营图表。
@@ -110,6 +114,13 @@ node --test apps/web/tests/*.test.*
 
 ```powershell
 node --test apps/web/tests/chat-view.test.mjs apps/web/tests/chat-timeline.test.ts apps/web/tests/markdown.test.ts
+```
+
+流式消息状态与 SSE 游标回归位于 `tests/workspace-conversation.test.mjs`，登记接口、真实登记表单、任务登记入口与设置联动覆盖如下：
+
+```powershell
+node --test apps/web/tests/workspace-conversation.test.mjs apps/web/tests/records-api.test.ts apps/web/tests/workspace-records.test.mjs apps/web/tests/settings-records-integration.test.mjs apps/web/tests/task-pages-view.test.mjs apps/web/tests/task-preview.test.mjs
+node --test apps/web/tests/approval-preview.test.ts apps/web/tests/session-approval-preview.test.mjs apps/web/tests/schedules-actions.test.mjs
 ```
 
 技能界面交互回归位于 `tests/skills-view.test.mjs`，直接编译实际 Vue 模板，覆盖来源与步骤搜索、加载和失败重试、模板自定义、步骤排序与校验、编辑草稿及工具保留、运行和删除：

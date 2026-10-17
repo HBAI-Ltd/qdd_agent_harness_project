@@ -10,6 +10,7 @@ import type { RecordField, RecordInput, RecordSchema, Row } from "@qdd/shared";
 import { addRecords, defineRecordSet, listRecordSets, queryRecords, updateRecord, voidRecord, type RecordDefinitionInput, type RecordSet } from "@/api/records";
 
 const props = defineProps<{ connected: boolean; gatewayUrl: string; token: string; initialName?: string | undefined }>();
+const emit = defineEmits<{ changed: [] }>();
 const sets = ref<RecordSet[]>([]);
 const selectedName = ref("");
 const selected = computed(() => sets.value.find((set) => set.name === selectedName.value));
@@ -43,7 +44,14 @@ let disposed = false;
 
 const unavailable = computed(() => !props.connected || busy.value || listLoading.value || rowsLoading.value);
 const display = (value: unknown) => value === null || value === undefined ? "—" : value === true ? "是" : value === false ? "否" : String(value);
-const date = (value: string | null | undefined) => value ? display(value).replace("T", " ").replace(/\.\d+Z$/, "Z") : "尚无记录";
+function date(value: string | null | undefined): string {
+  if (!value) return "尚无记录";
+  if (/^\d{4}-\d{2}-\d{2}T.*(?:Z|[+-]\d{2}:\d{2})$/.test(value)) {
+    const instant = new Date(value);
+    if (!Number.isNaN(instant.getTime())) return instant.toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false });
+  }
+  return value;
+}
 const errorText = (cause: unknown) => cause instanceof TypeError ? "无法连接网关，请检查连接后重试。" : cause instanceof Error ? cause.message : "记录请求失败，请重试。";
 const inputValue = (event: Event) => (event.target as HTMLInputElement).value;
 function stopRequests() {
@@ -98,7 +106,13 @@ async function loadRows() {
     if (rowsController === controller) { rowsController = undefined; rowsLoading.value = false; }
   }
 }
-async function reload() { const currentVersion = version; await loadSets(); if (!disposed && props.connected && currentVersion === version) await loadRows(); }
+async function reload() {
+  if (unavailable.value) return;
+  const currentVersion = version;
+  await loadSets();
+  if (!disposed && props.connected && currentVersion === version) await loadRows();
+}
+function filterRows() { if (!busy.value && !listLoading.value) return loadRows(); }
 function openEntry(row?: Row) {
   if (unavailable.value || !schema.value) return;
   entryId.value = row ? String(row.id) : "";
@@ -138,6 +152,7 @@ function schemaInput(): RecordDefinitionInput {
   const name = draft.name.trim();
   const label = draft.label.trim();
   if (!/^[a-z][a-z0-9_]{0,39}$/.test(name)) throw new Error("记录名须为小写英文开头的字母、数字或下划线，最多 40 字符。");
+  if (!extending.value && sets.value.some((set) => set.name === name)) throw new Error("该登记表已存在，请选择后使用「调整登记表」。");
   if (!label || label.length > 20) throw new Error("中文名称须为 1–20 字。");
   if (draft.description.trim().length > 200) throw new Error("说明最多 200 字。");
   if (draft.fields.length < 1 || draft.fields.length > 30) throw new Error("请设置 1–30 个字段。");
@@ -170,10 +185,11 @@ async function mutate(title: string, detail: string, operation: (base: string, t
   busy.value = true;
   actionError.value = notice.value = "";
   try {
-    await ElMessageBox.confirm(detail, title, { confirmButtonText: "确认提交", cancelButtonText: "取消", type: "warning" });
+    await ElMessageBox.confirm(detail, title, { confirmButtonText: "确认提交", cancelButtonText: "取消", type: "warning", customClass: "qdd-record-confirmation" });
     if (!current()) return;
     await operation(base, token, controller.signal);
     if (!current()) return;
+    emit("changed");
     entryOpen.value = schemaOpen.value = false;
     notice.value = success;
     await loadSets();
@@ -247,7 +263,7 @@ onBeforeUnmount(() => { disposed = true; stopRequests(); });
       <template v-if="sets.length">
         <label class="record-label" for="record-set">登记表<select id="record-set" v-model="selectedName" :disabled="busy || listLoading"><option v-for="set in sets" :key="set.name" :value="set.name">{{ set.schema.label }}（{{ set.name }}）</option></select></label>
         <p class="records-muted record-description">{{ selected?.description }}<br>数据截至：{{ date(selected?.watermark) }} · 最近更新：{{ date(selected?.updatedAt) }}</p>
-        <form class="record-filters" @submit.prevent="loadRows"><label class="record-label">开始日期<input v-model="from" type="date" aria-label="开始日期" :disabled="busy" /></label><label class="record-label">结束日期<input v-model="to" type="date" aria-label="结束日期" :disabled="busy" /></label><label class="record-label">显示条数<input v-model.number="limit" type="number" min="1" max="1000" step="1" aria-label="显示条数" :disabled="busy" /></label><ElButton native-type="submit" :disabled="busy || listLoading" :loading="rowsLoading">查询记录</ElButton></form>
+        <form class="record-filters" @submit.prevent="filterRows"><label class="record-label">开始日期<input v-model="from" type="date" aria-label="开始日期" :disabled="busy" /></label><label class="record-label">结束日期<input v-model="to" type="date" aria-label="结束日期" :disabled="busy" /></label><label class="record-label">显示条数<input v-model.number="limit" type="number" min="1" max="1000" step="1" aria-label="显示条数" :disabled="busy" /></label><ElButton native-type="submit" :disabled="busy || listLoading" :loading="rowsLoading">查询记录</ElButton></form>
         <ElAlert v-if="rowsError" :title="rowsError" type="error" :closable="false" show-icon />
         <div class="records-heading record-summary"><span aria-live="polite">匹配 {{ total }} 条 · 当前显示 {{ rows.length }} 条<span v-if="total > rows.length">，可调整日期或显示条数</span></span><div class="record-actions"><ElButton :disabled="unavailable || !schema" @click="openSchema(true)">调整登记表</ElButton><ElButton type="primary" plain :disabled="unavailable || !schema" @click="openEntry()">新增记录</ElButton></div></div>
         <p v-if="rowsLoading" class="records-muted" role="status">正在查询记录…</p>
@@ -312,5 +328,6 @@ onBeforeUnmount(() => { disposed = true; stopRequests(); });
 .record-schema-field > :deep(.el-button) { justify-self:start; }
 .record-checkbox { display:flex; align-items:center; gap:7px; min-height:35px; font-size:13px; }
 .visually-hidden { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
+:global(.qdd-record-confirmation .el-message-box__message) { white-space:pre-wrap; overflow-wrap:anywhere; max-height:50vh; overflow:auto; }
 @media (max-width:600px) { .record-filters { grid-template-columns:repeat(2,minmax(0,1fr)); } .record-field-grid { grid-template-columns:minmax(0,1fr); } .record-schema-field { padding:12px; } }
 </style>

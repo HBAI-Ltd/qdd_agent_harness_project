@@ -110,7 +110,7 @@ function mount(Component, props = {}) {
 }
 
 function context(entries) {
-  const calls = { pin: [], view: [], page: [] };
+  const calls = { pin: [], view: [], page: [], records: [] };
   const workspace = {
     pages: ref(entries), activePageSlug: ref(null), activePage: ref(null),
     preferences: ref({ theme: "light" }), gatewayUrl: ref("https://gateway.example"),
@@ -124,6 +124,7 @@ function context(entries) {
     navigation: {
       async newConversation() {}, async editPage() { return true; },
       async openPage(slug) { calls.page.push(slug); },
+      async openRecords(name) { calls.records.push(name); },
       async openView(view) { calls.view.push(view); },
     },
   });
@@ -189,6 +190,20 @@ test("sidebar labels pinned task pages and keeps server ordering", () => {
   assert.deepEqual(entries.map((node) => node.props["aria-label"]), ["打开已置顶定时任务页面：置顶周报", "打开一次性任务页面：新分析"]);
   assert.match(textContent(entries[0]), /置顶/);
   assert.equal(findAll(entries[0], (node) => node.props?.["data-icon"] === "clock").length, 1);
+});
+
+test("task cards find declared record sets and open their manager without changing page data", async () => {
+  const entries = [page("报损登记", { records: ["loss_log"] }), page("库存分析")];
+  const { calls } = context(entries);
+  const root = mount(TasksView);
+  findAll(root, (node) => node.tag === "input")[0].props.onInput({ target: { value: "loss_log" } });
+  await nextTick();
+  assert.deepEqual(titles(root), ["报损登记"]);
+  await labeled(root, "管理登记记录：loss_log").props.onClick();
+  assert.deepEqual(calls.records, ["loss_log"]);
+  assert.deepEqual(calls.pin, []);
+  assert.deepEqual(calls.page, []);
+  assert.deepEqual(entries[0].records, ["loss_log"]);
 });
 
 test("preview exposes pin and schedule navigation without changing the page frame", async () => {

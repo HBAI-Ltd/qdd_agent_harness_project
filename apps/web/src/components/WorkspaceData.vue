@@ -115,6 +115,7 @@ watch(() => [props.connected, props.gatewayUrl, props.token], () => {
   if (props.connected) void load();
 }, { immediate: true, flush: "sync" });
 onBeforeUnmount(() => { disposed = true; stopRequests(); });
+defineExpose({ refresh: load });
 </script>
 
 <template>

@@ -24,7 +24,7 @@ const pageKinds = computed(() => [
 const taskPageContext = computed(() => ({ theme: preferences.value.theme, locale: "zh-CN" }));
 const filteredPages = computed(() =>
   pages.value.filter((page) => (pageKind.value === "all" || page.kind === pageKind.value)
-    && `${page.title} ${page.summary} ${page.schedules.map((schedule) => schedule.name).join(" ")}`
+    && `${page.title} ${page.summary} ${page.schedules.map((schedule) => schedule.name).join(" ")} ${page.records?.join(" ") ?? ""}`
       .toLocaleLowerCase().includes(pageQuery.value.trim().toLocaleLowerCase())),
 );
 

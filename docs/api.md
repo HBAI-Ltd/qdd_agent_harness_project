@@ -40,7 +40,8 @@ POST /api/sessions/:id/cancel        → 202
 | `user` | `text` | 店长的消息 |
 | `status` | `status`: `running` / `waiting` / `idle` / `error` | 本轮开始/结束；`waiting` 表示在等店长回答问题或授权 |
 | `say` | `text` | agent 的回复 |
-| `tool` | `text` | 数据查询、快照、写文件等进度 |
+| `text` / `thinking` | `blockId, delta?, content?, done?` | 助手正文 / 思考内容块；增量只实时推送，完整 `content` 在 `done: true` 时落盘 |
+| `tool` | `blockId, tool: {id,name,args?,status,progress?,result?}` | 工具调用，状态为 `running` / `success` / `error`；按 `tool.id` 合并进度与结果 |
 | `warn` | `text` | 守卫拦截、工具失败等 |
 | `approval_required` | `requestId, tool, source, args` | 写入类工具、保存技能（`tool: save_skill`）、推送消息（`tool: send_notification`, `source: connector:<id>`）等待授权；`approvalTimeoutMin`（默认 60）分钟未处理视为拒绝，也可在工作台待办中统一处理 |
 | `skill` | `skill: {id,name}, action: loaded \| saved` | 技能已加载 / 已保存 |
@@ -50,6 +51,17 @@ POST /api/sessions/:id/cancel        → 202
 | `gaps` | `gaps: CapabilityGap[]` | 本轮的能力缺口声明（同时写入页面并由网关强制展示） |
 | `published` | `page, files` | 页面已发布，可刷新展示 |
 | `error` | `message` | 本轮失败 |
+
+`blockId` 为「回复 id:块序号」，同一回复的思考、正文与工具调用可组成 `AssistantPart[]`，按块序号排列。工具状态和完整文本事件保存在历史中，旧会话中的 `say {text}` 与纯文本 `tool {text}` 仍需兼容。实时文本块示例：
+
+```json
+{"type":"thinking","blockId":"reply-1:0","delta":"先核对库存","at":"2026-10-17T03:00:00Z"}
+{"type":"thinking","blockId":"reply-1:0","content":"先核对库存。","done":true,"at":"2026-10-17T03:00:01Z"}
+{"type":"tool","blockId":"reply-1:2","tool":{"id":"call-1","name":"store__get_inventory","status":"running","args":{},"progress":"正在查询"},"at":"2026-10-17T03:00:02Z"}
+{"type":"tool","blockId":"reply-1:2","tool":{"id":"call-1","name":"store__get_inventory","status":"success","result":"查询结果"},"at":"2026-10-17T03:00:03Z"}
+```
+
+带 `delta` 的事件不能追加到持久化历史数组或计入 `since`；重连偏移仅为已收到的落盘事件数。完整 `content/done` 替换同一块的实时内容，避免重复拼接；切换会话、开始新一轮或结束执行时清理未完成实时块。正文与思考可按 Markdown 渲染，原始 HTML 应作为文字处理。
 
 ### 引导式提问（需求对齐）
 

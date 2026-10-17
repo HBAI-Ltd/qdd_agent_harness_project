@@ -3,9 +3,9 @@
   "llm": { "model": "deepseek-chat", "maxSteps": 40 },
   "gateway": {
     "host": "127.0.0.1",
-    "port": 5173,
+    "port": 3000,
     "tokenEnv": "QDD_GATEWAY_TOKEN",
-    "corsOrigins": ["http://localhost:3000"]
+    "corsOrigins": ["http://127.0.0.1:5177"]
   },
   "datasets": { "refreshIntervalSec": 300 },
   "cdnAllowlist": ["cdn.jsdelivr.net", "unpkg.com", "cdnjs.cloudflare.com", "fonts.googleapis.com", "fonts.gstatic.com"],

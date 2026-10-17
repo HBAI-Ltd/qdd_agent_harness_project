@@ -9,6 +9,7 @@ import Components from "unplugin-vue-components/vite";
 import { ElementPlusResolver } from "unplugin-vue-components/resolvers";
 
 import { webUpdateNotice } from "@plugin-web-update-notification/vite";
+import { resolveGatewayTarget } from "./gateway.config";
 
 const envDir = fileURLToPath(new URL("../..", import.meta.url));
 const FRONTEND_PORT = 5177;
@@ -33,18 +34,7 @@ function gatewayAddress(): { host?: string; port?: number } {
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, envDir, "");
   const gateway = gatewayAddress();
-  const host = env.HOST ?? gateway.host ?? "127.0.0.1";
-  const proxyHost = host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host;
-  const displayHost = proxyHost.includes(":") ? `[${proxyHost}]` : proxyHost;
-  let target: string;
-  try {
-    const url = new URL(env.API_PROXY_TARGET ?? `http://${displayHost}:3000`);
-    if (!/^https?:$/.test(url.protocol) || url.username || url.password
-      || url.pathname !== "/" || url.search || url.hash) throw new Error("Invalid gateway URL");
-    target = url.origin;
-  } catch {
-    throw new Error("网关代理地址无效，请检查 API_PROXY_TARGET 或 HOST、PORT。");
-  }
+  const target = resolveGatewayTarget(env, gateway);
   const proxy = {
     "/api": {
       target,
@@ -58,6 +48,8 @@ export default defineConfig(({ mode }) => {
 
   return {
     envDir,
+    // Only expose the validated public address; environment credentials stay server-side.
+    define: { __QDD_GATEWAY_URL__: JSON.stringify(target) },
     build: {
       outDir: "dist",
       assetsInlineLimit: Infinity,

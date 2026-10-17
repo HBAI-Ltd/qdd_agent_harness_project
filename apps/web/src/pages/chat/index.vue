@@ -278,7 +278,8 @@ onBeforeUnmount(() => {
         <form class="settings-card gateway-settings" @submit.prevent="loadWorkspace">
           <h2><AgentIcon name="sliders" :size="19" />网关连接</h2>
           <label for="gateway-url">网关地址</label>
-          <el-input id="gateway-url" v-model="gatewayUrl" type="url" placeholder="http://127.0.0.1:5173" required />
+          <el-input id="gateway-url" v-model="gatewayUrl" type="url" :placeholder="gatewayApi.DEFAULT_GATEWAY_URL" required />
+          <div class="gateway-address-help"><span>配置地址：{{ gatewayApi.DEFAULT_GATEWAY_URL }}</span><el-button link type="primary" :disabled="loadingSessions || loadingPages" @click="gatewayUrl = gatewayApi.DEFAULT_GATEWAY_URL">使用配置地址</el-button></div>
           <label for="gateway-token">网关 token</label>
           <el-input id="gateway-token" v-model="token" type="password" autocomplete="off" placeholder="填写网关访问 token" required />
           <p class="settings-info">网关 token 可通过终端命令 <code>npm run qdd -- token</code> 获取，仅保留在当前浏览器会话中。网关需允许当前前端来源访问。</p>

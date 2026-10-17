@@ -13,6 +13,7 @@ declare module 'vue' {
   export interface GlobalComponents {
     AgentIcon: typeof import('./../components/AgentIcon.vue')['default']
     ElButton: typeof import('element-plus/es')['ElButton']
+    ElCard: typeof import('element-plus/es')['ElCard']
     ElInput: typeof import('element-plus/es')['ElInput']
     ElSwitch: typeof import('element-plus/es')['ElSwitch']
     RouterLink: typeof import('vue-router')['RouterLink']

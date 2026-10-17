@@ -3,8 +3,9 @@
 This is the `@qdd/web` Vue 3 SPA in the root npm workspace. Run `npm ci`
 from the repository root; the root `package-lock.json` is the only lockfile.
 
-- `npm run dev` at the root starts the backend and frontend together.
-- `npm run dev:web` starts Vite on `http://127.0.0.1:5177`.
+- `npm run dev` at the root builds and starts only the backend gateway.
+- `npm start` starts the backend gateway after it has been built.
+- `npm run dev:web` starts Vite on `http://127.0.0.1:5177` in a separate terminal.
 - `npm run typecheck --workspace @qdd/web` checks Vue SFCs and Vite configuration.
 - `npm run build:web` checks types and emits the bundle to `apps/web/dist`.
 - `npm run preview --workspace @qdd/web` previews the production bundle on port 5177.
@@ -20,16 +21,34 @@ Pinia, Vue Router APIs, and Element Plus components use the auto-import resolver
 Vite plugins; update source/configuration rather than editing them manually.
 
 Import shared contracts through `@qdd/shared`, using type-only imports where
-appropriate. The health client in `src/api/health.ts` calls `/api/health`.
+appropriate. The health client in `src/api/health.ts` calls `/health`.
 The shared Axios instance and `window.$axios` return response bodies and reject
-with the original error. Authentication is not implemented; the user store is
-an empty placeholder. Do not assume a token or login route exists.
+with the original error. Gateway requests in `src/api/workspace.ts` use Bearer
+authentication. Obtain the gateway token with `npm run qdd -- token`; keep it
+in the current browser session and out of URLs and generated page context.
+The user store is an empty placeholder; there is no separate login route.
 
-Vite reads the repository root `.env`. Its development and preview proxy strip
-`/api` and forward to `HOST`/`PORT`, or `API_PROXY_TARGET` when set. Production
-hosting needs the equivalent reverse proxy and SPA history fallback; the Node
-server currently serves JSON only. Routes use browser history; `/` shows the
-chat workspace, `/test` checks connectivity, and unmatched routes display 404.
+Vite reads the repository root `.env`. The configured frontend gateway default
+and development/preview proxy target use `API_PROXY_TARGET`, otherwise the
+effective `HOST`/`PORT` and `harness.config.json` gateway address, with the backend
+defaults as fallback. Environment `HOST`/`PORT` override the backend JSON values.
+Both example files use gateway port 3000. The `/api` and `/health` proxies preserve
+their paths; they do not strip `/api`. `API_PROXY_TARGET` changes the frontend
+target only and does not start or reconfigure the gateway. Restart Vite after
+configuration changes; rebuild when using a previously built frontend bundle.
+If a browser retains an old gateway URL, the settings reset action restores the
+configured address. Validate it against the actual gateway startup address.
+
+The gateway must explicitly allow the frontend origin in `gateway.corsOrigins`,
+such as `http://127.0.0.1:5177`. Match frontend/gateway hostname and protocol for
+page cookies. This allowlist also controls page CSP embedding and SDK parent
+origins. Generated pages must retain the actual gateway origin, page-scoped
+authentication, SDK injection, and source-checked bridge; do not proxy them into
+the shell origin or bypass authorization. The gateway serves APIs and generated
+pages, while frontend production hosting needs its own SPA history fallback
+and appropriate proxy/origin configuration. Routes use browser history; `/`
+shows the chat workspace, `/test` checks connectivity, and unmatched routes
+display 404.
 
 The existing build inlines dynamic imports and imported assets. User-facing
 labels are Simplified Chinese. Vue's compiler treats `media-*` tags as custom

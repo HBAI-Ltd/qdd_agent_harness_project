@@ -209,3 +209,28 @@ body,
 .gateway-settings .el-button + .el-button {
   margin-left: 0;
 }
+
+.gateway-address-help {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 12px;
+  margin-top: 8px;
+  color: var(--qdd-muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.gateway-address-help .el-button {
+  min-height: 28px;
+  padding: 4px 0;
+  border: 0;
+  background: transparent;
+  color: var(--qdd-primary);
+}
+
+.gateway-address-help .el-button:hover {
+  background: transparent;
+  color: var(--qdd-primary-hover);
+}

@@ -55,10 +55,14 @@ Aidol 创造营参赛项目——钱多多门店人工智能助手：店铺管�
 ```powershell
 npm ci
 Copy-Item .env.example .env                              # 填写 DEEPSEEK_API_KEY
-Copy-Item harness.config.example.json harness.config.json  # 配置 MCP、CORS（可选）
+Copy-Item harness.config.example.json harness.config.json  # 前端直连需配置 CORS，MCP 按需配置
 npm run dev                                              # 构建并启动网关
 npm run qdd -- token                                     # 查看网关 token，交给前端
 ```
+
+另开终端运行 `npm run dev:web`，打开 `http://127.0.0.1:5177`。
+前端默认地址会跟随后端的 `HOST`、`PORT` 配置；若浏览器保留旧地址，在设置中点击「使用配置地址」。
+`gateway.corsOrigins` 必须包含当前前端来源。没有 MCP 服务时，可只保留该网关配置并移除示例 `erp` 项。
 
 终端也可直接许愿，会话与前端共享：
 

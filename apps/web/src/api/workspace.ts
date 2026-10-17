@@ -13,7 +13,10 @@ import type {
 
 export type { ClarifyAnswers, GatewayEvent, PageView, SessionDetail, SessionEvent, SessionMeta } from "@qdd/shared";
 
-export const DEFAULT_GATEWAY_URL = "http://127.0.0.1:5173";
+declare const __QDD_GATEWAY_URL__: string;
+
+export const DEFAULT_GATEWAY_URL = typeof __QDD_GATEWAY_URL__ === "string"
+  ? __QDD_GATEWAY_URL__ : "http://127.0.0.1:5173";
 
 export class GatewayError extends Error {
   readonly status: number;

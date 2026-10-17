@@ -1,0 +1,27 @@
+import { inject, type InjectionKey, type Ref } from "vue";
+import type { useWorkspace } from "./useWorkspace";
+
+export type WorkspaceView = "overview" | "chat" | "tasks" | "settings" | "schedules" | "skills" | "connectors";
+
+export interface WorkspaceContext {
+  workspace: ReturnType<typeof useWorkspace>;
+  draft: Ref<string>;
+  submitMessage: () => Promise<boolean>;
+  notify: (message: string) => void;
+  navigation: {
+    openConversation: () => Promise<void>;
+    openSession: (id: string) => Promise<void>;
+    newConversation: () => Promise<void>;
+    openPage: (slug: string) => Promise<void>;
+    openView: (view: WorkspaceView) => Promise<void>;
+    editPage: (slug: string) => Promise<boolean>;
+  };
+}
+
+export const WORKSPACE_CONTEXT: InjectionKey<WorkspaceContext> = Symbol("workspace");
+
+export function useWorkspaceContext(): WorkspaceContext {
+  const context = inject(WORKSPACE_CONTEXT);
+  if (!context) throw new Error("Workspace views require the workspace layout.");
+  return context;
+}

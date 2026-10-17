@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { ElButton, ElTag } from "element-plus";
 import type { JsonValue as PageBridgePayload, PageView } from "@qdd/shared";
 import AgentIcon from "@/components/AgentIcon.vue";
 import { createTaskPageBridge, type TaskPageEvent } from "@/utils/taskPageBridge";
@@ -112,11 +113,12 @@ watch(
       <div class="preview-heading">
         <AgentIcon name="code" :size="15" />
         <strong>{{ page.title }}</strong>
-        <span class="preview-label">任务页面</span>
+        <ElTag class="preview-label" type="info" effect="plain" size="small">v{{ page.version }}</ElTag>
       </div>
-      <button class="preview-reload" type="button" @click="reload">
+      <ElButton class="preview-reload" text size="small" @click="reload">
+        <AgentIcon name="refresh" :size="14" />
         重新加载
-      </button>
+      </ElButton>
     </header>
     <p v-if="page.stale" class="preview-notice" role="status">
       待复核：{{ page.stale }}
@@ -176,7 +178,7 @@ watch(
 
 .preview-heading strong {
   overflow: hidden;
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 500;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -185,7 +187,7 @@ watch(
 .preview-label {
   flex-shrink: 0;
   color: var(--qdd-muted);
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .preview-reload {

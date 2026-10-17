@@ -1,6 +1,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type { ClarifyAnswers, PageView, SessionDetail, SessionEvent, SessionMeta } from "@qdd/shared";
 import * as api from "@/api/workspace";
+import { createConversationSelection } from "./conversationSelection";
 
 export type { PageView, SessionDetail, SessionEvent, SessionMeta } from "@qdd/shared";
 
@@ -47,21 +48,34 @@ export function useWorkspace() {
   const loadingSession = ref(false);
   const error = ref("");
   const connected = ref(false);
-  const pendingSend = ref(false);
-  const sending = computed(() => pendingSend.value || activeSession.value?.status === "running" || activeSession.value?.status === "waiting");
-  const cancelling = ref(false);
-  const eventActionBusy = ref(false);
+  const selectionVersion = ref(0);
+  const pendingSends = ref(new Set<string>());
+  const pendingCancellations = ref(new Set<string>());
+  const pendingActions = ref(new Set<string>());
+  const sendTarget = () => activeSessionId.value ?? `draft:${selectionVersion.value}`;
+  const pendingSend = computed(() => pendingSends.value.has(sendTarget()));
+  const conversationStatus = computed(() => activeSession.value?.status
+    ?? sessions.value.find((session) => session.id === activeSessionId.value)?.status);
+  const sending = computed(() => pendingSend.value || conversationStatus.value === "running" || conversationStatus.value === "waiting");
+  const cancelling = computed(() => !!activeSessionId.value && pendingCancellations.value.has(activeSessionId.value));
+  const eventActionBusy = computed(() => !!activeSessionId.value && pendingActions.value.has(activeSessionId.value));
   let disposed = false;
   let connectionVersion = 0;
-  let selectionVersion = 0;
   let workspaceController: AbortController | undefined;
   let pageController: AbortController | undefined;
   let detailController: AbortController | undefined;
   let globalController: AbortController | undefined;
   let sessionController: AbortController | undefined;
-  let sendController: AbortController | undefined;
+  const sendControllers = new Set<AbortController>();
   const actionControllers = new Set<AbortController>();
   const reconnectingStreams = new Set<AbortController>();
+  let conversationStorage: Storage | undefined;
+  try { conversationStorage = localStorage; } catch { /* Retain the choice in memory if storage is unavailable. */ }
+  const conversationSelection = createConversationSelection(conversationStorage);
+
+  function normalizedGateway(base = gatewayUrl.value): string | null {
+    try { return api.normalizeGatewayUrl(base); } catch { return null; }
+  }
 
   try {
     const saved: unknown = JSON.parse(localStorage.getItem(PREFERENCES_KEY) || "null");
@@ -88,14 +102,14 @@ export function useWorkspace() {
 
   function stopConnections() {
     connectionVersion++;
-    selectionVersion++;
+    selectionVersion.value++;
     workspaceController?.abort();
     pageController?.abort();
     detailController?.abort();
     globalController?.abort();
     sessionController?.abort();
-    sendController?.abort();
-    sendController = undefined;
+    for (const controller of sendControllers) controller.abort();
+    sendControllers.clear();
     for (const controller of actionControllers) controller.abort();
     actionControllers.clear();
     reconnectingStreams.clear();
@@ -103,19 +117,21 @@ export function useWorkspace() {
     loadingSessions.value = false;
     loadingPages.value = false;
     loadingSession.value = false;
-    pendingSend.value = false;
-    cancelling.value = false;
-    eventActionBusy.value = false;
+    pendingSends.value.clear();
+    pendingCancellations.value.clear();
+    pendingActions.value.clear();
   }
 
-  watch([token, gatewayUrl], () => {
+  watch([token, gatewayUrl], ([, nextGateway], [, previousGateway]) => {
+    const previousKey = normalizedGateway(previousGateway);
+    const sameGateway = previousKey !== null && previousKey === normalizedGateway(nextGateway);
     stopConnections();
     sessions.value = [];
     pages.value = [];
     activeSessionId.value = null;
     activeSession.value = undefined;
     activePageSlug.value = null;
-    revisionPageSlug.value = null;
+    if (!sameGateway) revisionPageSlug.value = null;
     error.value = "";
     try { sessionStorage.setItem(TOKEN_KEY, token.value); } catch { /* token 不写入 localStorage。 */ }
     try { localStorage.setItem(GATEWAY_KEY, gatewayUrl.value); } catch { /* 地址仍可在当前页面使用。 */ }
@@ -131,6 +147,12 @@ export function useWorkspace() {
     else sessions.value[index] = entry;
     sessions.value.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
     if (activeSession.value?.id === meta.id) activeSession.value = { ...activeSession.value, ...entry };
+  }
+
+  function applyResponseMeta(meta: SessionMeta) {
+    const current = sessions.value.find((session) => session.id === meta.id);
+    // Live events may advance the session before a mutation response arrives.
+    if (!current || meta.updatedAt >= current.updatedAt) applyMeta(meta);
   }
 
   async function refreshPages() {
@@ -213,6 +235,7 @@ export function useWorkspace() {
     if (event.type === "published") {
       session.slug = event.page.slug;
       session.title = event.page.title;
+      if (revisionPageSlug.value === event.page.slug) revisionPageSlug.value = null;
       void refreshPages();
     }
     session.updatedAt = event.at;
@@ -239,33 +262,36 @@ export function useWorkspace() {
 
   async function selectSession(id: string): Promise<void> {
     if (!connected.value || disposed) return;
-    selectionVersion++;
+    const selection = ++selectionVersion.value;
     detailController?.abort();
     sessionController?.abort();
     if (sessionController) reconnectingStreams.delete(sessionController);
     const controller = new AbortController();
     detailController = controller;
+    if (activeSessionId.value !== id) revisionPageSlug.value = null;
     activeSessionId.value = id;
+    const gateway = normalizedGateway();
+    if (gateway) conversationSelection.remember(gateway, id);
     activeSession.value = undefined;
-    revisionPageSlug.value = null;
     loadingSession.value = true;
     error.value = "";
     try {
       const detail = await api.getSession(gatewayUrl.value, token.value, id, controller.signal);
-      if (controller.signal.aborted || disposed || activeSessionId.value !== id) return;
+      if (controller.signal.aborted || disposed || selection !== selectionVersion.value) return;
       activeSession.value = detail;
       applyMeta(detail);
       sessionController = new AbortController();
       void followSession(id, sessionController);
     } catch (cause) {
-      if (!controller.signal.aborted && !disposed) error.value = errorMessage(cause);
+      if (!controller.signal.aborted && !disposed && selection === selectionVersion.value) error.value = errorMessage(cause);
     } finally {
       if (detailController === controller) loadingSession.value = false;
     }
   }
 
-  function startConversation() {
-    selectionVersion++;
+  function startNewConversation(): void {
+    if (disposed) return;
+    selectionVersion.value++;
     detailController?.abort();
     sessionController?.abort();
     if (sessionController) reconnectingStreams.delete(sessionController);
@@ -274,16 +300,51 @@ export function useWorkspace() {
     revisionPageSlug.value = null;
     loadingSession.value = false;
     error.value = "";
+    const gateway = normalizedGateway();
+    if (gateway) conversationSelection.remember(gateway, null);
   }
 
-  function revisePage(slug: string) {
-    startConversation();
+  async function openConversation(): Promise<void> {
+    if (!connected.value || disposed || pendingSend.value || loadingSession.value) return;
+    const gateway = normalizedGateway();
+    if (!gateway) return;
+    const id = conversationSelection.choose(gateway, sessions.value, activeSessionId.value);
+    if (id && (activeSessionId.value !== id || !activeSession.value)) await selectSession(id);
+  }
+
+  async function revisePage(slug: string): Promise<boolean> {
+    revisionPageSlug.value = null;
+    if (!connected.value || disposed) {
+      error.value = "请先连接网关，再通过对话修改页面。";
+      return false;
+    }
+    if (pendingSend.value || loadingSession.value) {
+      error.value = "正在加载或发送当前对话，请稍后重试。";
+      return false;
+    }
+    const page = pages.value.find((entry) => entry.slug === slug);
+    const current = activeSession.value ?? sessions.value.find((session) => session.id === activeSessionId.value);
+    const origin = current?.slug === slug ? current
+      : page?.sessionId ? sessions.value.find((session) => session.id === page.sessionId) : undefined;
+    if (!page || !origin) {
+      error.value = "这个页面的原始对话尚不可用，请刷新工作空间后重试；不会为此新增对话。";
+      return false;
+    }
+    const selection = activeSession.value?.id !== origin.id
+      ? selectSession(origin.id) : undefined;
+    const version = selectionVersion.value;
+    await selection;
+    if (version !== selectionVersion.value) return false;
+    if (!activeSession.value || activeSession.value.id !== origin.id || activeSession.value.slug !== slug) {
+      if (!error.value) error.value = "页面与原始对话的关联尚不可用，请刷新工作空间后重试。";
+      return false;
+    }
     revisionPageSlug.value = slug;
+    return true;
   }
 
   async function loadWorkspace(): Promise<void> {
     if (disposed) return;
-    const selectedId = activeSessionId.value;
     stopConnections();
     error.value = "";
     if (!token.value.trim()) {
@@ -312,9 +373,12 @@ export function useWorkspace() {
       connected.value = true;
       globalController = new AbortController();
       void followGateway(globalController);
-      const id = sessionList.find((session) => session.id === selectedId)?.id ?? sessionList[0]?.id;
+      const id = conversationSelection.choose(gatewayUrl.value, sessionList, activeSessionId.value);
       if (id) await selectSession(id);
-      else startConversation();
+      else {
+        activeSessionId.value = null;
+        activeSession.value = undefined;
+      }
     } catch (cause) {
       if (!controller.signal.aborted && !disposed) error.value = errorMessage(cause);
     } finally {
@@ -332,11 +396,24 @@ export function useWorkspace() {
       error.value = "请在设置中连接网关后发送消息。";
       return false;
     }
+    const gateway = normalizedGateway();
+    if (!gateway) return false;
     const id = activeSessionId.value;
-    const selection = selectionVersion;
+    const meta = activeSession.value ?? sessions.value.find((session) => session.id === id);
+    if (meta?.status === "running" || meta?.status === "waiting") {
+      error.value = "请先完成当前对话的问题、授权确认或执行。";
+      return false;
+    }
+    if (revisionPageSlug.value && (!id || meta?.slug !== revisionPageSlug.value)) {
+      revisionPageSlug.value = null;
+      error.value = "页面与当前对话的关联已变化，请重新打开页面的原始对话后修改。";
+      return false;
+    }
+    const selection = selectionVersion.value;
+    const target = sendTarget();
     const controller = new AbortController();
-    sendController = controller;
-    pendingSend.value = true;
+    sendControllers.add(controller);
+    pendingSends.value.add(target);
     error.value = "";
     try {
       const meta = id
@@ -345,35 +422,43 @@ export function useWorkspace() {
           wish: text, ...(revisionPageSlug.value ? { slug: revisionPageSlug.value } : {}),
         }, controller.signal);
       if (controller.signal.aborted || disposed) return false;
-      applyMeta(meta);
-      if (selection === selectionVersion) await selectSession(meta.id);
+      // Keep the identity even if the following detail/SSE request fails.
+      applyResponseMeta(meta);
+      if (selection === selectionVersion.value) {
+        conversationSelection.remember(gateway, meta.id);
+        activeSessionId.value = meta.id;
+        revisionPageSlug.value = null;
+        await selectSession(meta.id);
+      }
       return true;
     } catch (cause) {
-      if (!controller.signal.aborted && !disposed) error.value = errorMessage(cause);
+      if (!controller.signal.aborted && !disposed && selection === selectionVersion.value) error.value = errorMessage(cause);
       return false;
     } finally {
-      if (sendController === controller) pendingSend.value = false;
+      sendControllers.delete(controller);
+      if (!controller.signal.aborted) pendingSends.value.delete(target);
     }
   }
 
   async function eventAction(action: (id: string, signal: AbortSignal) => Promise<void>): Promise<boolean> {
     const id = activeSessionId.value;
     if (!id || !connected.value || eventActionBusy.value || disposed) return false;
+    const selection = selectionVersion.value;
     const controller = new AbortController();
     actionControllers.add(controller);
-    eventActionBusy.value = true;
+    pendingActions.value.add(id);
     error.value = "";
     try {
       await action(id, controller.signal);
       if (controller.signal.aborted || disposed) return false;
-      if (activeSessionId.value === id) await selectSession(id);
+      if (selection === selectionVersion.value) await selectSession(id);
       return true;
     } catch (cause) {
-      if (!controller.signal.aborted && !disposed) error.value = errorMessage(cause);
+      if (!controller.signal.aborted && !disposed && selection === selectionVersion.value) error.value = errorMessage(cause);
       return false;
     } finally {
       actionControllers.delete(controller);
-      if (!controller.signal.aborted) eventActionBusy.value = false;
+      if (!controller.signal.aborted) pendingActions.value.delete(id);
     }
   }
 
@@ -388,22 +473,23 @@ export function useWorkspace() {
   async function cancel(): Promise<boolean> {
     const id = activeSessionId.value;
     if (!id || !connected.value || cancelling.value || disposed) return false;
+    const selection = selectionVersion.value;
     const controller = new AbortController();
     actionControllers.add(controller);
-    cancelling.value = true;
+    pendingCancellations.value.add(id);
     error.value = "";
     try {
       const meta = await api.cancelSession(gatewayUrl.value, token.value, id, controller.signal);
       if (controller.signal.aborted || disposed) return false;
-      applyMeta(meta);
-      if (activeSessionId.value === id) await selectSession(id);
+      applyResponseMeta(meta);
+      if (selection === selectionVersion.value) await selectSession(id);
       return true;
     } catch (cause) {
-      if (!controller.signal.aborted && !disposed) error.value = errorMessage(cause);
+      if (!controller.signal.aborted && !disposed && selection === selectionVersion.value) error.value = errorMessage(cause);
       return false;
     } finally {
       actionControllers.delete(controller);
-      if (!controller.signal.aborted) cancelling.value = false;
+      if (!controller.signal.aborted) pendingCancellations.value.delete(id);
     }
   }
 
@@ -419,6 +505,7 @@ export function useWorkspace() {
     sessions, activeSessionId, activeSession, pages, activePageSlug, activePage, revisionPageSlug,
     preferences, token, gatewayUrl, loadingSessions, loadingPages, loadingSession,
     error, connected, sending, cancelling, eventActionBusy,
-    loadWorkspace, selectSession, startConversation, sendMessage, answerQuestions, resolveApproval, cancel, revisePage,
+    loadWorkspace, openConversation, selectSession, startNewConversation,
+    sendMessage, answerQuestions, resolveApproval, cancel, revisePage,
   };
 }

@@ -12,14 +12,12 @@ export {}
 declare module 'vue' {
   export interface GlobalComponents {
     AgentIcon: typeof import('./../components/AgentIcon.vue')['default']
-    ElButton: typeof import('element-plus/es')['ElButton']
-    ElCard: typeof import('element-plus/es')['ElCard']
-    ElInput: typeof import('element-plus/es')['ElInput']
-    ElSwitch: typeof import('element-plus/es')['ElSwitch']
     RouterLink: typeof import('vue-router')['RouterLink']
     RouterView: typeof import('vue-router')['RouterView']
     SessionActions: typeof import('./../components/SessionActions.vue')['default']
     StoreOverview: typeof import('./../components/StoreOverview.vue')['default']
     TaskPreview: typeof import('./../components/TaskPreview.vue')['default']
+    WorkspaceSettings: typeof import('./../components/WorkspaceSettings.vue')['default']
+    WorkspaceSidebar: typeof import('./../components/WorkspaceSidebar.vue')['default']
   }
 }

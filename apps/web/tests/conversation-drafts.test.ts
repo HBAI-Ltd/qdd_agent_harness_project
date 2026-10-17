@@ -1,0 +1,183 @@
+import assert from "node:assert/strict";
+import { test, type TestContext } from "node:test";
+import { effectScope, ref } from "vue";
+import { useConversationDrafts } from "../src/composables/useConversationDrafts.ts";
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+function setup(t: TestContext, send: (text: string) => Promise<boolean>, initialId: string | null = "a") {
+  const scope = effectScope();
+  const gatewayUrl = ref("http://127.0.0.1:3000");
+  const activeSessionId = ref<string | null>(initialId);
+  const drafts = scope.run(() => useConversationDrafts(gatewayUrl, activeSessionId, send));
+  assert.ok(drafts);
+  t.after(() => { scope.stop(); });
+  const select = (id: string | null) => {
+    drafts.beginSelection();
+    activeSessionId.value = id;
+  };
+  return { ...drafts, gatewayUrl, activeSessionId, select };
+}
+
+test("switching sessions and gateways restores their independent unsent drafts", (t) => {
+  const state = setup(t, async () => true);
+  state.draft.value = "draft a";
+  state.select("b");
+  state.draft.value = "draft b";
+  state.select("a");
+  assert.equal(state.draft.value, "draft a");
+  state.gatewayUrl.value = "http://127.0.0.1:4000";
+  assert.equal(state.draft.value, "");
+  state.draft.value = "other gateway";
+  state.gatewayUrl.value = "http://127.0.0.1:3000";
+  assert.equal(state.draft.value, "draft a");
+  state.select("b");
+  assert.equal(state.draft.value, "draft b");
+});
+
+test("a successful background send clears only its original saved draft", async (t) => {
+  const pending = deferred<boolean>();
+  const state = setup(t, async (text) => {
+    assert.equal(text, "send a");
+    return pending.promise;
+  });
+  state.draft.value = "send a";
+  const request = state.submitMessage();
+  state.select("b");
+  state.draft.value = "keep b";
+  pending.resolve(true);
+  assert.equal(await request, true);
+  assert.equal(state.draft.value, "keep b");
+  state.select("a");
+  assert.equal(state.draft.value, "");
+});
+
+test("edits made during an existing-session send survive success and later switches", async (t) => {
+  const pending = deferred<boolean>();
+  const state = setup(t, () => pending.promise);
+  state.draft.value = "send a";
+  const request = state.submitMessage();
+  state.draft.value = "next question";
+  state.select("b");
+  pending.resolve(true);
+  await request;
+  state.select("a");
+  assert.equal(state.draft.value, "next question");
+});
+
+test("first creation clears the submitted text and carries new unsent input to the created session", async (t) => {
+  const pending = deferred<boolean>();
+  const state = setup(t, () => pending.promise, null);
+  state.draft.value = "first question";
+  const request = state.submitMessage();
+  state.draft.value = "next question";
+  state.activeSessionId.value = "created";
+  assert.equal(state.draft.value, "next question");
+  pending.resolve(true);
+  await request;
+  state.select("b");
+  state.select("created");
+  assert.equal(state.draft.value, "next question");
+});
+
+test("an unchanged first message is cleared when its session is created", async (t) => {
+  const pending = deferred<boolean>();
+  const state = setup(t, () => pending.promise, null);
+  state.draft.value = "first question";
+  const request = state.submitMessage();
+  state.activeSessionId.value = "created";
+  assert.equal(state.draft.value, "");
+  pending.resolve(true);
+  await request;
+  assert.equal(state.draft.value, "");
+});
+
+test("manual selection while creating never migrates the pending draft into history", async (t) => {
+  const pending = deferred<boolean>();
+  const state = setup(t, () => pending.promise, null);
+  state.select("history");
+  state.draft.value = "keep history";
+  state.startNewDraft();
+  state.activeSessionId.value = null;
+  state.draft.value = "new question";
+  const request = state.submitMessage();
+  state.draft.value = "unsent follow-up";
+  state.select("history");
+  assert.equal(state.draft.value, "keep history");
+  pending.resolve(true);
+  await request;
+  assert.equal(state.draft.value, "keep history");
+});
+
+test("starting a new draft before resetting an existing id preserves that session's input", (t) => {
+  const state = setup(t, async () => true);
+  state.draft.value = "keep a";
+  state.startNewDraft();
+  assert.equal(state.draft.value, "");
+  state.activeSessionId.value = null;
+  assert.equal(state.draft.value, "");
+  state.draft.value = "new question";
+  state.select("a");
+  assert.equal(state.draft.value, "keep a");
+});
+
+test("a repeated new-conversation click isolates late results even when the new text is identical", async (t) => {
+  const pending = deferred<boolean>();
+  const state = setup(t, () => pending.promise, null);
+  state.draft.value = "same question";
+  const request = state.submitMessage();
+  state.startNewDraft();
+  state.draft.value = "same question";
+  pending.resolve(true);
+  await request;
+  assert.equal(state.draft.value, "same question");
+});
+
+test("out-of-order creates leave the latest conversation and its edited draft intact", async (t) => {
+  const first = deferred<boolean>();
+  const second = deferred<boolean>();
+  let calls = 0;
+  const state = setup(t, () => (++calls === 1 ? first.promise : second.promise), null);
+  state.draft.value = "older question";
+  const older = state.submitMessage();
+  state.startNewDraft();
+  state.draft.value = "latest question";
+  const latest = state.submitMessage();
+  state.draft.value = "latest follow-up";
+  state.activeSessionId.value = "latest-created";
+  second.resolve(true);
+  await latest;
+  first.resolve(true);
+  await older;
+  assert.equal(state.activeSessionId.value, "latest-created");
+  assert.equal(state.draft.value, "latest follow-up");
+});
+
+test("failed sends keep the original draft after switching away and back", async (t) => {
+  const pending = deferred<boolean>();
+  const state = setup(t, () => pending.promise);
+  state.draft.value = "retry this";
+  const request = state.submitMessage();
+  state.select("b");
+  state.draft.value = "keep b";
+  pending.resolve(false);
+  assert.equal(await request, false);
+  state.select("a");
+  assert.equal(state.draft.value, "retry this");
+});
+
+test("clearing credentials invalidates pending draft cleanup for the same session", async (t) => {
+  const pending = deferred<boolean>();
+  const state = setup(t, () => pending.promise);
+  state.draft.value = "same text";
+  const request = state.submitMessage();
+  state.clear();
+  state.draft.value = "same text";
+  pending.resolve(true);
+  await request;
+  assert.equal(state.draft.value, "same text");
+});

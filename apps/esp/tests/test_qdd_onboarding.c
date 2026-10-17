@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <limits.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -16,10 +17,26 @@ static struct {
     qdd_ble_status_t ble;
     char peer[16], status[48], content_type[80], response[8192], hash[65];
     size_t response_size, receive_chunk;
+    ssize_t content_length;
+    const char *sent_body;
     unsigned critical_depth, starts, stops, route_count, chunks, yields, closes, sends, receives;
-    unsigned tasks;
+    unsigned tasks, nodelay_calls, http_sends, override_calls, native_sends;
+    size_t native_limit, native_max, native_bytes;
+    unsigned native_delay;
+    bool native_zero, native_error;
+    int native_errno;
+    int8_t rssi;
+    uint8_t channel;
+    wifi_ps_type_t ps;
+    size_t free_heap, largest_heap;
+    bool fail_ap, fail_ps;
+    unsigned ap_queries;
+    httpd_send_func_t send_override;
+    httpd_handle_t override_handle;
+    int peer_family;
+    bool native_ipv6, short_peer;
     int fail_route, fail_chunk;
-    bool fail_start, fail_stop, fail_bind, fail_socket, fail_task, fail_recv, fail_peer, register_on_stop;
+    bool fail_start, fail_stop, fail_bind, fail_socket, fail_task, fail_recv, fail_peer, fail_send, register_on_stop;
     httpd_uri_t routes[5];
     const char *packet;
     unsigned packet_count;
@@ -30,11 +47,18 @@ static void reset(void) {
     memset(&m, 0, sizeof(m));
     m.fail_route = -1;
     m.fail_chunk = -1;
+    m.peer_family = AF_INET;
     strcpy(m.peer, "10.65.201.94");
     strcpy(m.wifi.ip, "10.65.201.147");
     m.wifi.connected = true;
     m.wifi.port = 3333;
     m.receive_chunk = 256;
+    m.native_limit = 2048;
+    m.rssi = -55;
+    m.channel = 6;
+    m.ps = WIFI_PS_NONE;
+    m.free_heap = 40000;
+    m.largest_heap = 22000;
     s_http = NULL;
     s_http_ready = false;
     s_udp = -1;
@@ -42,6 +66,13 @@ static void reset(void) {
     s_retry_at = 0;
     s_task = NULL;
     qdd_onboarding_model_clear(&s_model);
+    atomic_store(&s_last_send_errno, 0);
+    atomic_store(&s_last_send_error, 0);
+    atomic_store(&s_last_download_result, 0);
+    atomic_store(&s_last_download_ms, 0);
+    atomic_store(&s_download_successes, 0);
+    atomic_store(&s_download_failures, 0);
+    atomic_flag_clear(&s_status_ap_busy);
 }
 
 void qdd_test_enter_critical(portMUX_TYPE *lock) { assert(lock == &s_lock); m.critical_depth++; }
@@ -51,6 +82,28 @@ int64_t esp_timer_get_time(void) { return (int64_t)m.now * 1000; }
 qdd_wifi_view_t qdd_wifi_view(void) { return m.wifi; }
 qdd_ble_status_t qdd_ble_status(void) { return m.ble; }
 const char *qdd_ble_name(void) { return "QDD-Passport-A1BA"; }
+esp_err_t esp_wifi_sta_get_ap_info(wifi_ap_record_t *record) {
+    assert(record == &s_status_ap && !m.critical_depth);
+    m.ap_queries++;
+    if (m.fail_ap) return ESP_FAIL;
+    record->rssi = m.rssi;
+    record->primary = m.channel;
+    return ESP_OK;
+}
+esp_err_t esp_wifi_get_ps(wifi_ps_type_t *mode) {
+    assert(mode && !m.critical_depth);
+    if (m.fail_ps) return ESP_FAIL;
+    *mode = m.ps;
+    return ESP_OK;
+}
+size_t heap_caps_get_free_size(uint32_t caps) {
+    assert(caps == (MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    return m.free_heap;
+}
+size_t heap_caps_get_largest_free_block(uint32_t caps) {
+    assert(caps == (MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    return m.largest_heap;
+}
 int xTaskCreate(void (*entry)(void *), const char *name, unsigned stack, void *context,
     unsigned priority, TaskHandle_t *handle) {
     assert(entry == worker && strcmp(name, "qdd_onboard") == 0 && stack == 3072 && !context && priority == 1);
@@ -87,6 +140,13 @@ esp_err_t httpd_register_uri_handler(httpd_handle_t handle, const httpd_uri_t *u
     return ESP_OK;
 }
 int httpd_req_to_sockfd(httpd_req_t *request) { assert(request); return 9; }
+esp_err_t httpd_sess_set_send_override(httpd_handle_t handle, int descriptor, httpd_send_func_t callback) {
+    assert(descriptor == 9 && callback == bounded_send);
+    m.override_calls++;
+    m.send_override = callback;
+    m.override_handle = handle;
+    return ESP_OK;
+}
 esp_err_t httpd_resp_set_status(httpd_req_t *request, const char *status) {
     assert(request); strcpy(m.status, status); return ESP_OK;
 }
@@ -100,8 +160,21 @@ esp_err_t httpd_resp_set_hdr(httpd_req_t *request, const char *key, const char *
 }
 esp_err_t httpd_resp_send(httpd_req_t *request, const char *body, ssize_t length) {
     assert(request);
+    m.http_sends++;
+    m.content_length = length;
+    m.sent_body = body;
+    if (m.fail_send) return ESP_FAIL;
     const size_t size = length == HTTPD_RESP_USE_STRLEN ? strlen(body) : (size_t)length;
     assert(size < sizeof(m.response));
+    if (m.send_override) {
+        size_t position = 0;
+        while (position < size) {
+            const int written = m.send_override(m.override_handle, 9, body + position, size - position, 0);
+            if (written < 0) return ESP_ERR_HTTPD_RESP_SEND;
+            assert(written > 0 && (size_t)written <= size - position);
+            position += (size_t)written;
+        }
+    }
     memcpy(m.response, body, size);
     m.response[size] = 0;
     m.response_size = size;
@@ -149,11 +222,47 @@ int qdd_test_bind(int descriptor, const struct sockaddr *address, socklen_t size
     assert(descriptor == 7 && size == sizeof(*in) && in->sin_family == AF_INET && in->sin_port == 3335);
     return m.fail_bind ? -1 : 0;
 }
+static void mock_ipv4(void *address) {
+    unsigned octets[4];
+    assert(sscanf(m.peer, "%u.%u.%u.%u", &octets[0], &octets[1], &octets[2], &octets[3]) == 4);
+    uint8_t *bytes = address;
+    for (unsigned i = 0; i < 4; i++) bytes[i] = (uint8_t)octets[i];
+}
 int qdd_test_getpeername(int descriptor, struct sockaddr *address, socklen_t *size) {
-    assert(descriptor == 9 && *size == sizeof(struct sockaddr_in));
+    assert(descriptor == 9 && *size == sizeof(struct sockaddr_storage));
     if (m.fail_peer) return -1;
-    ((struct sockaddr_in *)address)->sin_family = AF_INET;
+    if (m.peer_family == AF_INET6) {
+        struct sockaddr_in6 *peer = (struct sockaddr_in6 *)address;
+        peer->sin6_family = AF_INET6;
+        if (m.native_ipv6) peer->sin6_addr.bytes[0] = 0xfd;
+        else peer->sin6_addr.bytes[10] = peer->sin6_addr.bytes[11] = 0xff;
+        mock_ipv4(peer->sin6_addr.bytes + 12);
+        *size = sizeof(*peer);
+    } else {
+        struct sockaddr_in *peer = (struct sockaddr_in *)address;
+        peer->sin_family = (uint16_t)m.peer_family;
+        mock_ipv4(&peer->sin_addr);
+        *size = sizeof(*peer);
+    }
+    if (m.short_peer) *size = 2;
     return 0;
+}
+int qdd_test_setsockopt(int descriptor, int level, int option, const void *value, socklen_t size) {
+    assert(descriptor == 9 && level == IPPROTO_TCP && option == TCP_NODELAY);
+    assert(value && size == sizeof(int) && *(const int *)value == 1);
+    m.nodelay_calls++;
+    return 0;
+}
+ssize_t qdd_test_send(int descriptor, const void *bytes, size_t size, int flags) {
+    assert(descriptor == 9 && bytes && size > 0 && size <= 2048 && flags == 0);
+    m.native_sends++;
+    m.now += m.native_delay;
+    if (size > m.native_max) m.native_max = size;
+    if (m.native_zero) return 0;
+    if (m.native_error) { errno = m.native_errno; return -1; }
+    if (size > m.native_limit) size = m.native_limit;
+    m.native_bytes += size;
+    return (ssize_t)size;
 }
 ssize_t qdd_test_recvfrom(int descriptor, void *bytes, size_t size, int flags,
     struct sockaddr *address, socklen_t *address_size) {
@@ -165,6 +274,7 @@ ssize_t qdd_test_recvfrom(int descriptor, void *bytes, size_t size, int flags,
     if (length > size) length = size;
     memcpy(bytes, m.packet, length);
     ((struct sockaddr_in *)address)->sin_family = AF_INET;
+    mock_ipv4(&((struct sockaddr_in *)address)->sin_addr);
     return (ssize_t)length;
 }
 ssize_t qdd_test_sendto(int descriptor, const void *bytes, size_t size, int flags,
@@ -179,8 +289,9 @@ ssize_t qdd_test_sendto(int descriptor, const void *bytes, size_t size, int flag
 uint16_t qdd_test_htons(uint16_t value) { return value; }
 uint32_t qdd_test_htonl(uint32_t value) { return value; }
 const char *qdd_test_inet_ntop(int family, const void *source, char *dest, socklen_t size) {
-    assert(family == AF_INET && source && strlen(m.peer) < size);
-    strcpy(dest, m.peer);
+    assert(family == AF_INET && source && size >= 16);
+    const uint8_t *bytes = source;
+    snprintf(dest, size, "%u.%u.%u.%u", bytes[0], bytes[1], bytes[2], bytes[3]);
     return dest;
 }
 int qdd_test_fcntl(int descriptor, int command, ...) {
@@ -200,6 +311,9 @@ static void test_handlers(void) {
     assert(m.routes[3].user_ctx && !m.routes[4].user_ctx);
     httpd_req_t request = {0};
     assert(page_handler(&request) == ESP_OK);
+    assert(m.nodelay_calls == 1 && m.override_calls == 1);
+    assert(m.http_sends == 1 && m.chunks == 0 && m.content_length > 0);
+    assert((size_t)m.content_length == m.response_size);
     assert(strstr(m.response, "class=\"tip\"") && strstr(m.response, "仅支持同一局域网"));
     assert(strstr(m.response, "手机、电脑和 ESP 必须连接同一局域网"));
     assert(strstr(m.response, "手机浏览器") && strstr(m.response, "IP:3334"));
@@ -207,6 +321,7 @@ static void test_handlers(void) {
     assert(strstr(m.response, "http://127.0.0.1:8790") && !strstr(m.response, "http://10.65.201.147:8790"));
     assert(!qdd_onboarding_view().downloaded);
     assert(status_handler(&request) == ESP_OK && strcmp(m.status, "200 OK") == 0);
+    assert(m.nodelay_calls == 2);
     assert(strstr(m.response, "\"service\":\"qdd-esp-onboarding\"") && strstr(m.response, "\"tcpPort\":3333"));
     assert(strstr(m.response, "\"boardUrl\":\"http://10.65.201.147:3334\"") && m.response_size < 1024);
     m.ble.connected = m.ble.encrypted = m.ble.authenticated = m.ble.bonded = m.ble.ready = true;
@@ -215,6 +330,7 @@ static void test_handlers(void) {
     request.origin = "http://10.65.201.147:3334";
     m.receive_chunk = 3;
     assert(registration_handler(&request) == ESP_OK && strcmp(m.status, "200 OK") == 0);
+    assert(m.nodelay_calls == 4);
     assert(qdd_onboarding_view().pc_fresh && strcmp(qdd_onboarding_view().pc_ip, m.peer) == 0);
     request = registration("{\"deviceId\":\"28c16ea2-c6ee-4b5d-8307-29b20df14bab\",\"port\":8791,\"projecting\":true}", true);
     assert(registration_handler(&request) == ESP_OK && qdd_onboarding_view().phone_projecting);
@@ -256,14 +372,120 @@ static void test_registration_rejections(void) {
 static void test_apk(void) {
     reset();
     httpd_req_t request = {0};
-    m.fail_chunk = 1;
+    m.fail_send = true;
     assert(apk_handler(&request) == ESP_FAIL && !qdd_onboarding_view().downloaded);
-    m.fail_chunk = -1;
-    m.chunks = 0;
-    m.response_size = 0;
+    assert(m.http_sends == 1 && m.content_length == QDD_ONBOARDING_APK_SIZE);
+    assert(m.sent_body == (const char *)qdd_apk_start && m.response_size == 0);
+    m.fail_send = false;
     assert(apk_handler(&request) == ESP_OK && qdd_onboarding_view().downloaded);
-    assert(m.response_size == QDD_ONBOARDING_APK_SIZE && m.chunks == 4 && m.response[0] == 'P' && m.response[1] == 'K');
-    assert(strcmp(m.hash, QDD_ONBOARDING_APK_SHA256) == 0 && m.yields == 4);
+    assert(m.nodelay_calls == 2);
+    assert(m.http_sends == 2 && m.content_length == QDD_ONBOARDING_APK_SIZE);
+    assert(m.sent_body == (const char *)qdd_apk_start && m.chunks == 0 && m.yields == 0);
+    assert(m.response_size == QDD_ONBOARDING_APK_SIZE && m.response[0] == 'P' && m.response[1] == 'K');
+    assert(memcmp(m.response, qdd_test_apk, QDD_ONBOARDING_APK_SIZE) == 0);
+    assert(strcmp(m.hash, QDD_ONBOARDING_APK_SHA256) == 0);
+}
+
+static void test_dual_stack_peer(void) {
+    reset();
+    m.peer_family = AF_INET6;
+    httpd_req_t request = {0};
+    // The real ESP-IDF listener uses IPv6 sockets, including for IPv4 QR URLs.
+    assert(page_handler(&request) == ESP_OK && strstr(m.response, "下载设备投屏"));
+    m.response_size = 0;
+    assert(apk_handler(&request) == ESP_OK && m.response_size == QDD_ONBOARDING_APK_SIZE);
+    assert(qdd_onboarding_view().downloaded);
+    assert(status_handler(&request) == ESP_OK && strcmp(m.status, "200 OK") == 0);
+    request = registration("{\"port\":8790}", false);
+    assert(registration_handler(&request) == ESP_OK && qdd_onboarding_view().pc_fresh);
+    assert(m.nodelay_calls == 4); // Mapped IPv4 peers also receive TCP_NODELAY.
+    assert(strcmp(qdd_onboarding_view().pc_ip, "10.65.201.94") == 0);
+    strcpy(m.peer, "8.8.8.8");
+    assert(page_handler(&request) == ESP_FAIL && strcmp(m.status, "403 Forbidden") == 0);
+    strcpy(m.peer, "192.168.1.2");
+    m.short_peer = true;
+    assert(status_handler(&request) == ESP_FAIL);
+    m.short_peer = false;
+    m.native_ipv6 = true;
+    assert(status_handler(&request) == ESP_FAIL);
+    m.native_ipv6 = false;
+    m.peer_family = 99;
+    assert(status_handler(&request) == ESP_FAIL);
+    m.peer_family = AF_INET;
+    m.fail_peer = true;
+    assert(status_handler(&request) == ESP_FAIL);
+    assert(m.nodelay_calls == 4); // Rejected peers never reach socket tuning.
+    assert(m.override_calls == 4);
+}
+
+static void test_bounded_socket_send_and_diagnostics(void) {
+    reset();
+    httpd_req_t request = {.handle = (void *)2};
+    m.native_limit = 17; // Real partial positive writes must advance send_all.
+    m.native_delay = 1;
+    assert(apk_handler(&request) == ESP_OK);
+    assert(m.override_handle == request.handle && m.native_max == 2048);
+    assert(m.native_sends > QDD_ONBOARDING_APK_SIZE / 17 && m.native_bytes == QDD_ONBOARDING_APK_SIZE);
+    assert(memcmp(m.response, qdd_test_apk, QDD_ONBOARDING_APK_SIZE) == 0);
+    assert(atomic_load(&s_download_successes) == 1 && atomic_load(&s_download_failures) == 0);
+    assert(atomic_load(&s_last_download_result) == ESP_OK);
+    assert(atomic_load(&s_last_download_ms) == m.native_sends);
+    assert(atomic_load(&s_last_send_error) == 0 && atomic_load(&s_last_send_errno) == 0);
+
+    reset();
+    m.native_zero = true;
+    assert(apk_handler(&request) == ESP_ERR_HTTPD_RESP_SEND);
+    assert(m.native_sends == 1 && !qdd_onboarding_view().downloaded); // Zero cannot spin send_all.
+    assert(atomic_load(&s_last_send_error) == HTTPD_SOCK_ERR_FAIL && atomic_load(&s_last_send_errno) == 0);
+    assert(atomic_load(&s_download_successes) == 0 && atomic_load(&s_download_failures) == 1);
+
+    reset();
+    m.native_error = true;
+    m.native_errno = EAGAIN;
+    assert(apk_handler(&request) == ESP_ERR_HTTPD_RESP_SEND);
+    assert(m.native_sends == 1 && !qdd_onboarding_view().downloaded);
+    assert(atomic_load(&s_last_send_error) == -1 && atomic_load(&s_last_send_errno) == EAGAIN);
+    assert(atomic_load(&s_last_download_result) == ESP_ERR_HTTPD_RESP_SEND);
+    m.native_error = false;
+    assert(status_handler(&request) == ESP_OK);
+    assert(strstr(m.response, "\"lastSendError\":-1") && strstr(m.response, "\"downloadFailures\":1"));
+    assert(strstr(m.response, "\"downloadSuccesses\":0") && strstr(m.response, "\"lastDownloadMs\":0"));
+
+    // Keep the existing 1 KiB status buffer even at maximal diagnostic values.
+    strcpy(m.wifi.ip, "192.168.255.253");
+    m.wifi.port = 65535;
+    qdd_onboarding_phone_t phone = {.device_id = "28c16ea2-c6ee-4b5d-8307-29b20df14bab", .port = 65535, .projecting = true};
+    assert(qdd_onboarding_model_phone(&s_model, "192.168.255.254", &phone, m.now));
+    assert(qdd_onboarding_model_pc(&s_model, "192.168.255.252", 65535, m.now));
+    atomic_store(&s_last_send_errno, INT_MIN);
+    atomic_store(&s_last_send_error, INT_MIN);
+    atomic_store(&s_last_download_result, INT_MIN);
+    atomic_store(&s_last_download_ms, UINT_MAX);
+    atomic_store(&s_download_successes, UINT_MAX);
+    atomic_store(&s_download_failures, UINT_MAX);
+    m.rssi = -127;
+    m.channel = UINT8_MAX;
+    m.free_heap = m.largest_heap = UINT_MAX;
+    char body[1024];
+    const size_t size = status_json(body, sizeof(body));
+    assert(size > 0 && size < sizeof(body) && strlen(body) == size);
+}
+
+static void test_wifi_memory_diagnostics(void) {
+    reset();
+    httpd_req_t request = {0};
+    assert(status_handler(&request) == ESP_OK);
+    assert(strstr(m.response, "\"rssi\":-55") && strstr(m.response, "\"channel\":6"));
+    assert(strstr(m.response, "\"ps\":0") && strstr(m.response, "\"heap\":40000") && strstr(m.response, "\"largest\":22000"));
+    m.fail_ap = m.fail_ps = true;
+    assert(status_handler(&request) == ESP_OK);
+    assert(strstr(m.response, "\"rssi\":-127") && strstr(m.response, "\"channel\":0") && strstr(m.response, "\"ps\":-1"));
+    m.fail_ap = m.fail_ps = false;
+    const unsigned before = m.ap_queries;
+    assert(!atomic_flag_test_and_set(&s_status_ap_busy));
+    assert(status_handler(&request) == ESP_OK && m.ap_queries == before);
+    assert(strstr(m.response, "\"rssi\":-127") && strstr(m.response, "\"channel\":0"));
+    atomic_flag_clear(&s_status_ap_busy);
 }
 
 static void test_udp_and_lifecycle(void) {
@@ -291,6 +513,9 @@ static void test_udp_and_lifecycle(void) {
     strcpy(m.peer, "8.8.8.8");
     poll_udp();
     assert(m.sends == 2);
+    qdd_onboarding_phone_t phone = {.device_id = "28c16ea2-c6ee-4b5d-8307-29b20df14bab", .port = 8791, .projecting = true};
+    assert(qdd_onboarding_model_phone(&s_model, "10.0.0.2", &phone, m.now));
+    s_model.view.downloaded = true;
     m.register_on_stop = true;
     m.wifi.connected = false;
     m.fail_stop = true;
@@ -300,10 +525,15 @@ static void test_udp_and_lifecycle(void) {
     poll_network(6000);
     assert(!s_http && s_udp == -1 && m.stops == 2 && m.closes == 1);
     assert(!qdd_onboarding_view().pc_fresh && !s_model.pc_registered);
+    qdd_onboarding_view_t stopped = qdd_onboarding_view();
+    assert(stopped.downloaded && stopped.phone_seen && !stopped.phone_fresh && !stopped.phone_projecting);
+    assert(!stopped.phone_ip[0] && !stopped.phone_device_id[0] && !stopped.phone_port && !stopped.pc_ip[0] && !stopped.pc_port);
     m.wifi.connected = true;
     strcpy(m.wifi.ip, "192.168.1.147");
     poll_network(6100);
     assert(s_http && s_udp == 7 && strcmp(s_ip, "192.168.1.147") == 0);
+    assert(qdd_onboarding_view().downloaded && qdd_onboarding_view().phone_seen);
+    assert(!qdd_onboarding_view().phone_fresh && !qdd_onboarding_view().pc_fresh);
     reset();
     m.fail_route = 2;
     assert(start_http() == ESP_FAIL && !s_http && m.stops == 1);
@@ -329,6 +559,9 @@ int main(void) {
     test_handlers();
     test_registration_rejections();
     test_apk();
+    test_dual_stack_peer();
+    test_bounded_socket_send_and_diagnostics();
+    test_wifi_memory_diagnostics();
     test_udp_and_lifecycle();
     puts("QDD onboarding production handlers, APK download, UDP discovery and lifecycle tests: PASS");
     return 0;

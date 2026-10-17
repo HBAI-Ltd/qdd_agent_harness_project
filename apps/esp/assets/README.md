@@ -29,7 +29,7 @@ hashes are in [`fonts/qdd-fonts.json`](fonts/qdd-fonts.json).
 
 After managed dependencies are available, run `node tools/generate_qdd_fonts.mjs`
 from `apps/esp/`. It uses official `lv_font_conv@1.5.3`, 4 bpp, no compression
-and no kerning. Both sizes cover printable ASCII U+0020..U+007E and 215 non-ASCII
+and no kerning. Both sizes cover all 95 printable ASCII characters U+0020..U+007E and 222 non-ASCII
 characters collected from the UI, setup model and application feedback in [`fonts/qdd_glyphs.txt`](fonts/qdd_glyphs.txt).
 Actual line heights are **17/24 px**, not the nominal 14/20 px sizes.
 `main/CMakeLists.txt` compiles each font once; every label selects its font.

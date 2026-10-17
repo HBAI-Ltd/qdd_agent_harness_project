@@ -1,4 +1,6 @@
 import { isIP } from "node:net";
+import { existsSync } from "node:fs";
+import { writeFile } from "node:fs/promises";
 
 export const CONFIG_FIELDS = ["ANDROID_SCREEN_URL", "ANDROID_DEVICE_ID", "ESP_HOST", "ESP_PORT", "ESP_TCP_PORT", "ANDROID_MCP_PORT", "ESP_SETUP_URL"];
 
@@ -51,4 +53,21 @@ export function normalizeDesktopConfig(value) {
 
 export function safeDesktopDefaults(value) {
   return Object.fromEntries(CONFIG_FIELDS.filter((key) => typeof value[key] === "string").map((key) => [key, value[key]]));
+}
+
+/** Build-time seeding only; the local user's saved transport always wins. */
+export async function writePortableConfigIfAbsent(path, values) {
+  if (existsSync(path)) return false;
+  const defaults = safeDesktopDefaults(values);
+  // Without a real LAN address the first run must show LAN setup, rather
+  // than turning a convenience COM default into an implicit USB choice.
+  if (!defaults.ESP_HOST?.trim()) return false;
+  const config = normalizeDesktopConfig(defaults);
+  try {
+    await writeFile(path, `${JSON.stringify(config, null, 2)}\n`, { flag: "wx" });
+    return true;
+  } catch (error) {
+    if (error.code === "EEXIST") return false;
+    throw error;
+  }
 }

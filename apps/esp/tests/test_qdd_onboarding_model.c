@@ -83,8 +83,9 @@ static void test_registration_and_expiry(void) {
     assert(strcmp(view.phone_device_id, UUID) == 0 && view.phone_port == 8791 && view.pc_port == 8790);
     view = qdd_onboarding_model_view(&model, 15000);
     assert(view.phone_seen && !view.phone_fresh && !view.phone_projecting && view.pc_fresh);
+    assert(!view.phone_ip[0] && !view.phone_device_id[0] && !view.phone_port);
     view = qdd_onboarding_model_view(&model, 15002);
-    assert(!view.pc_fresh);
+    assert(!view.pc_fresh && !view.pc_ip[0] && !view.pc_port);
     phone.projecting = false;
     assert(qdd_onboarding_model_phone(&model, "172.20.10.2", &phone, 20000));
     view = qdd_onboarding_model_view(&model, 20000);
@@ -110,11 +111,41 @@ static void test_registration_and_expiry(void) {
     assert(!view.phone_seen);
 }
 
+static void test_network_invalidation_keeps_installation(void) {
+    qdd_onboarding_model_t model = {0};
+    qdd_onboarding_phone_t phone;
+    assert(qdd_onboarding_parse_phone(PHONE, strlen(PHONE), &phone));
+    model.view.downloaded = true;
+    assert(qdd_onboarding_model_phone(&model, "10.0.0.2", &phone, 100));
+    assert(qdd_onboarding_model_pc(&model, "10.0.0.3", 8790, 100));
+    qdd_onboarding_model_invalidate_network(&model);
+    qdd_onboarding_view_t view = qdd_onboarding_model_view(&model, 101);
+    assert(view.downloaded && view.phone_seen && !view.phone_fresh && !view.pc_fresh && !view.phone_projecting);
+    assert(!view.phone_ip[0] && !view.phone_device_id[0] && !view.phone_port && !view.pc_ip[0] && !view.pc_port);
+    assert(!model.phone_registered && !model.pc_registered && !model.phone_seen_ms && !model.pc_seen_ms);
+    // A different network requires fresh registration, not an old endpoint.
+    phone.projecting = false;
+    assert(qdd_onboarding_model_phone(&model, "192.168.1.2", &phone, 200));
+    view = qdd_onboarding_model_view(&model, 200);
+    assert(view.phone_seen && view.phone_fresh && !view.phone_projecting && !view.pc_fresh);
+    assert(strcmp(view.phone_ip, "192.168.1.2") == 0);
+    phone.projecting = true;
+    assert(qdd_onboarding_model_phone(&model, "192.168.1.2", &phone, 201));
+    assert(qdd_onboarding_model_pc(&model, "192.168.1.3", 8790, 201));
+    view = qdd_onboarding_model_view(&model, 201);
+    assert(view.phone_projecting && view.phone_fresh && view.pc_fresh && view.downloaded);
+    qdd_onboarding_model_clear(&model); // Only full clear removes the milestones.
+    view = qdd_onboarding_model_view(&model, 201);
+    assert(!view.downloaded && !view.phone_seen && !view.phone_fresh && !view.pc_fresh);
+    qdd_onboarding_model_invalidate_network(NULL);
+}
+
 int main(void) {
     test_parse_phone();
     test_parse_pc();
     test_private_addresses();
     test_registration_and_expiry();
+    test_network_invalidation_keeps_installation();
     puts("QDD onboarding bounded JSON, peer address, registration and expiry tests: PASS");
     return 0;
 }

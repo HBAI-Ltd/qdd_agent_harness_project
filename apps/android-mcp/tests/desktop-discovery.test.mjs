@@ -38,7 +38,7 @@ test("broadcast scan covers each private interface and excludes loopback/public 
   ["255.255.255.255", "192.168.101.255", "10.65.201.255"]);
 });
 
-test("real UDP discovery verifies board HTTP status once and retains exact registered phone identity", async (context) => {
+test("real UDP discovery accepts complete matching status without another HTTP request", async (context) => {
   const app = await fixture(context); let discoveryRequest;
   app.udp.on("message", (bytes, peer) => {
     discoveryRequest = bytes.toString();
@@ -46,15 +46,63 @@ test("real UDP discovery verifies board HTTP status once and retains exact regis
     for (let index = 0; index < 3; index++) app.udp.send(reply, peer.port, peer.address);
   });
   const results = await discoverBoards({ broadcasts: ["127.0.0.1"], udpPort: app.udpPort, timeoutMs: 150 });
-  assert.equal(discoveryRequest, "QDD-DISCOVER/1"); assert.equal(results.length, 1); assert.equal(app.requests, 1);
+  assert.equal(discoveryRequest, "QDD-DISCOVER/1"); assert.equal(results.length, 1); assert.equal(app.requests, 0);
   assert.equal(results[0].phone.deviceId, deviceId); assert.equal(results[0].ip, "127.0.0.1");
+});
+
+test("a valid UDP board remains discoverable when its HTTP status endpoint stalls", async (context) => {
+  const app = await fixture(context, () => {});
+  app.udp.on("message", (_bytes, peer) => app.udp.send(JSON.stringify({ ...state(), boardUrl: app.boardUrl }), peer.port, peer.address));
+  const results = await discoverBoards({ broadcasts: ["127.0.0.1"], udpPort: app.udpPort, timeoutMs: 120 });
+  assert.equal(results.length, 1);
+  assert.equal(results[0].phone.deviceId, deviceId);
+  assert.equal(app.requests, 0);
+});
+
+test("discovery sends three bounded neutral probes and survives a lost first UDP response", async (context) => {
+  const app = await fixture(context); const requests = [];
+  app.udp.on("message", (bytes, peer) => {
+    requests.push({ payload: bytes.toString(), port: peer.port });
+    if (requests.length === 1) return; // The first request/reply is lost on the LAN.
+    app.udp.send(JSON.stringify({ ...state(), boardUrl: app.boardUrl }), peer.port, peer.address);
+  });
+  const results = await discoverBoards({ broadcasts: ["127.0.0.1"], udpPort: app.udpPort, timeoutMs: 300 });
+  assert.equal(results.length, 1); assert.equal(results[0].phone.deviceId, deviceId);
+  assert.equal(requests.length, 3);
+  assert.deepEqual([...new Set(requests.map((request) => request.payload))], ["QDD-DISCOVER/1"]);
+  assert.equal(new Set(requests.map((request) => request.port)).size, 1, "Retries use the same UDP socket.");
+  assert.equal(app.requests, 0);
+});
+
+test("aborting discovery after its first UDP send cancels later probes", async (context) => {
+  const app = await fixture(context); const controller = new AbortController(); let requests = 0;
+  app.udp.on("message", () => { requests++; controller.abort(); });
+  const started = performance.now();
+  assert.deepEqual(await discoverBoards({ broadcasts: ["127.0.0.1"], udpPort: app.udpPort,
+    timeoutMs: 300, signal: controller.signal }), []);
+  assert.ok(performance.now() - started < 150);
+  await new Promise((done) => setTimeout(done, 350));
+  assert.equal(requests, 1);
+  assert.equal(app.requests, 0);
+});
+
+test("a slower HTTP hint cannot replace valid UDP registration with stale phone state", async (context) => {
+  const app = await fixture(context, (_request, response) => {
+    setTimeout(() => response.end(JSON.stringify({ ...state(), phone: { ...state().phone, fresh: false } })), 60);
+  });
+  app.udp.on("message", (_bytes, peer) => app.udp.send(JSON.stringify({ ...state(), boardUrl: app.boardUrl }), peer.port, peer.address));
+  const results = await discoverBoards({ hints: [app.boardUrl], broadcasts: ["127.0.0.1"], udpPort: app.udpPort, timeoutMs: 150 });
+  assert.equal(results.length, 1); assert.equal(app.requests, 1);
+  assert.equal(results[0].phone?.deviceId, deviceId);
 });
 
 test("unrelated, oversized, public and mismatched UDP adverts cannot initiate status requests", async (context) => {
   const app = await fixture(context);
   app.udp.on("message", (_bytes, peer) => {
     for (const reply of ["x".repeat(2049), "not json", JSON.stringify({ ...state(), service: "other", boardUrl: app.boardUrl }),
-      JSON.stringify({ ...state(), boardUrl: "http://8.8.8.8:3334" }), JSON.stringify({ ...state(), boardUrl: "http://192.168.1.99:3334" })]) app.udp.send(reply, peer.port, peer.address);
+      JSON.stringify({ ...state(), boardUrl: "http://8.8.8.8:3334" }), JSON.stringify({ ...state(), boardUrl: "http://192.168.1.99:3334" }),
+      JSON.stringify({ ...state(), ip: "192.168.1.99", boardUrl: app.boardUrl }), JSON.stringify({ ...state(), tcpPort: 0, boardUrl: app.boardUrl }),
+      JSON.stringify({ ...state(), version: 2, boardUrl: app.boardUrl }), JSON.stringify({ ...state(), boardUrl: `${app.boardUrl}/unexpected` })]) app.udp.send(reply, peer.port, peer.address);
   });
   assert.deepEqual(await discoverBoards({ broadcasts: ["127.0.0.1"], udpPort: app.udpPort, timeoutMs: 100 }), []);
   assert.equal(app.requests, 0);
@@ -73,9 +121,9 @@ test("saved board HTTP hint works without UDP and malformed/oversized/redirected
 test("cancellation closes discovery's UDP socket and slow HTTP response within the caller deadline", async (context) => {
   const app = await fixture(context, (_request, response) => { response.writeHead(200); response.write("{"); });
   let senderPort;
-  app.udp.on("message", (_bytes, peer) => { senderPort = peer.port; app.udp.send(JSON.stringify({ ...state(), boardUrl: app.boardUrl }), peer.port, peer.address); });
+  app.udp.on("message", (_bytes, peer) => { senderPort = peer.port; });
   const controller = new AbortController(), started = performance.now();
-  const discovery = discoverBoards({ broadcasts: ["127.0.0.1"], udpPort: app.udpPort, timeoutMs: 1400, signal: controller.signal });
+  const discovery = discoverBoards({ hints: [app.boardUrl], broadcasts: ["127.0.0.1"], udpPort: app.udpPort, timeoutMs: 1400, signal: controller.signal });
   await new Promise((done) => setTimeout(done, 50)); controller.abort();
   assert.deepEqual(await discovery, []); assert.ok(performance.now() - started < 500);
   const replacement = createSocket("udp4"); replacement.bind(senderPort, "0.0.0.0"); await once(replacement, "listening"); replacement.close();

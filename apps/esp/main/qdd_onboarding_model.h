@@ -41,6 +41,7 @@ bool qdd_onboarding_private_ipv4(const char *ip);
 bool qdd_onboarding_parse_phone(const char *body, size_t size, qdd_onboarding_phone_t *phone);
 bool qdd_onboarding_parse_pc(const char *body, size_t size, uint16_t *port);
 void qdd_onboarding_model_clear(qdd_onboarding_model_t *model);
+void qdd_onboarding_model_invalidate_network(qdd_onboarding_model_t *model);
 bool qdd_onboarding_model_phone(qdd_onboarding_model_t *model, const char *peer_ip,
     const qdd_onboarding_phone_t *phone, uint64_t now_ms);
 bool qdd_onboarding_model_pc(qdd_onboarding_model_t *model, const char *peer_ip,

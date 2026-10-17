@@ -21,17 +21,22 @@ Home has two vertical choices: Emergency stop / Cancel emergency stop, and Setti
 returning home default to the stop item. UP/DOWN only select; short OK executes the current item.
 Confirming stop immediately inhibits input and latches it. Only local selection and confirmation
 can clear it; stop wins over an unlock observed in the same worker round. The PC cannot unlock it.
+Before step one on an unconfigured device, the key guide explains the physical buttons. Short OK on Start connection continues to the existing Wi-Fi step without starting a scan. The guide remains available in Settings.
 Settings and ordinary pages use UP/DOWN, short OK and explicit vertical Back entries. Input is
 inhibited throughout settings; leaving never clears the stop or adds manual enable/pause steps.
-The key guide and Bluetooth pairing are available in Settings, preserving existing bonds. The guide follows the actual enclosure: a tall gray shell, top strap opening, upper-left screen, lower-right diagonal speaker grille and silver right-side keys. Connector lines map the keys to their navigation actions.
+The key guide and Bluetooth pairing are available in Settings, preserving existing bonds. The pairing page immediately shows the open window and phone instructions; reopening it gives visible confirmation. It updates from actual Bluetooth state, hides expired passkeys and distinguishes a connected phone from keyboard/mouse readiness. The guide follows the actual enclosure: a tall gray shell, top strap opening, upper-left screen, lower-right diagonal speaker grille and silver right-side keys. Connector lines map the keys to their navigation actions.
 Wi-Fi scanning traverses all SDK records and retains up to 64 distinct SSID/security networks,
 ordered by signal strength, with four rows per page. Duplicate mesh APs do not consume separate
 entries. This China configuration scans 2.4 GHz channels 1 through 13 with a longer dwell time;
 ESP32-C3 cannot discover 5 GHz-only networks. Scan lists stay in static storage and only single
 entries are copied to UI tasks, avoiding large stack snapshots.
+Opening the scan list immediately shows a 40 x 40 animated spinner, a scanning message and a
+usual 3–5 second estimate. While scanning, short OK returns to Settings and the scan continues
+in the background; UP/DOWN cannot select stale networks. Completion, failure or leaving the page
+removes the spinner and its animations.
 Wi-Fi password entry retains its four-page, four-row, six-column keyboard and all 95 printable
 ASCII characters: choose a row, then a character, using UP/DOWN and OK. This is the explicit
-hold exception: holding OK opens the vertical Connect/Continue/Delete/Back menu. Passwords stay masked.
+hold exception: holding OK opens the vertical Connect/Continue/Delete one/Clear password/Back menu. Clear password wipes the entire buffer and returns to the keyboard, preserving the selected network and keyboard position. Passwords stay masked.
 Settings also offers Reset device. Its vertical confirmation defaults to Back;
 only selecting Clear and start again with the physical OK key requests reset.
 It releases input, reboots and clears all default NVS data before BLE/Wi-Fi start,
@@ -43,8 +48,27 @@ Only changed labels/colors update. Licensed 14/20 px CJK subsets, reproduction
 and rendering checks are documented in [assets](assets/README.md).
 Protocol operation names and the Bluetooth identifier remain ASCII.
 
+An unconfigured board starts on step 1 of the connection guide. It does not open Wi-Fi settings or scan automatically; select Settings and then Wi-Fi to begin.
+The guide omits Emergency stop. QR/App-installation and Bluetooth-pairing instructions can be
+skipped, with Settings still available. Skip choices only live in RAM for the current boot and
+reset after restart/reset; they do not fabricate download, Bluetooth or input readiness.
+Phone control still requires a ready secure BLE connection. The normal control page retains
+the locally confirmed emergency stop.
+
 After Wi-Fi connects, the QR page shows `http://<board-IP>:3334/` for scanning
-or browser APK download. Phone, PC and board must share the LAN. The PC can
+or browser APK download. The landing page and embedded APK use fixed-length SDK responses;
+the APK response declares its exact embedded length, and the download flag is set only after
+the send succeeds. Active Wi-Fi stays in `WIFI_PS_NONE`
+from initialization, including USB use and after a TCP controller disconnects.
+During initial onboarding, a successful App registration records that the App has been opened.
+This milestone and a completed download survive a Wi-Fi disconnection within the current boot;
+they are separate from the 15-second phone/PC registration freshness limit. Leaving the App for
+Bluetooth settings or missing its heartbeat no longer returns the guide to the download QR.
+Expired registrations hide the old endpoints and projection state; a Wi-Fi disconnection also
+invalidates live registrations. After pairing, or when the user skips the pairing instructions, step 5 asks the user to return to the App
+and resume screen sharing. Completing initial onboarding still requires fresh phone registration,
+active screen sharing and a live controller heartbeat. Restart/reset clears these in-memory milestones.
+Phone, PC and board must share the LAN. The PC can
 discover it automatically, or set `ESP_HOST` to that IPv4 and `ESP_TCP_PORT`
 to control port `3333`; omit `ESP_HOST` to use `ESP_PORT` over USB.
 Only one transport controls the board at a time. Losing it releases input.
@@ -52,6 +76,11 @@ After reconnect, a fresh controller heartbeat and ready secure BLE link permit
 new input without another enable action; held inputs are never replayed.
 Wi-Fi credentials stay in the board's
 separate NVS profile and never clear Bluetooth bonds.
+Initial association retries up to four attempts with 500/1000/2000 ms backoff, remaining in the
+connecting state until success or exhaustion. Transient configuration-state conflicts retry after
+250 ms; immediate connection-API errors also retry. The board scans all channels, selects by RSSI
+without pinning a BSSID, rejects stale/wrong-interface/wrong-SSID IP events, and retains bounded
+backoff when reconnecting a previously connected network.
 
 Read [AGENTS.md](AGENTS.md) before development, then follow its task routing.
 The [upstream documentation index](docs/README.md) and

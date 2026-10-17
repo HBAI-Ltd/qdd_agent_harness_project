@@ -26,7 +26,7 @@
 
 托管依赖已就绪后，在 `apps/esp/` 运行 `node tools/generate_qdd_fonts.mjs` 可重现。
 使用官方 `lv_font_conv@1.5.3`、4 bpp、不压缩、不使用字距表。两种尺寸覆盖可打印
-ASCII U+0020..U+007E，以及从界面、配网模型和应用反馈收集到的 215 个非 ASCII 字符，清单见
+ASCII U+0020..U+007E 的全部 95 个字符，以及从界面、配网模型和应用反馈收集到的 222 个非 ASCII 字符，清单见
 [`fonts/qdd_glyphs.txt`](fonts/qdd_glyphs.txt)。实际行高为 **17/24 px**，不能按名义
 14/20 px 排版。CMake 各编译一次，每个标签显式选择字体。位图与描述以常量放在
 Flash，未引入运行时字体加载、完整 CJK 字库、PSRAM，也未扩大显示缓冲。

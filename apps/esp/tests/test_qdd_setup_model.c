@@ -26,10 +26,11 @@ static void test_list(void) {
     qdd_setup_model_t model = {0};
     assert(qdd_setup_enter(&model) == QDD_SETUP_SCAN);
     assert(model.page == QDD_SETUP_LIST && model.selection == 0);
-    assert(qdd_setup_key(&model, QDD_SETUP_OK, 0, true) == QDD_SETUP_NONE);
-    assert(strcmp(model.error, "正在搜索，请稍候") == 0);
     assert(qdd_setup_key(&model, QDD_SETUP_DOWN, 0, true) == QDD_SETUP_NONE);
-    assert(model.selection == 1 && model.error == NULL);
+    assert(model.selection == 0 && model.error == NULL);
+    model.selection = 40;
+    assert(qdd_setup_key(&model, QDD_SETUP_UP, 64, true) == QDD_SETUP_NONE);
+    assert(model.selection == 0 && model.error == NULL);
     assert(qdd_setup_key(&model, QDD_SETUP_OK, 0, true) == QDD_SETUP_NONE);
     assert(model.page == QDD_SETUP_MENU);
 
@@ -43,7 +44,9 @@ static void test_list(void) {
     for (unsigned i = 0; i < 3; i++) (void)key(&model, QDD_SETUP_DOWN);
     assert(model.selection == 3);
     assert(qdd_setup_key(&model, QDD_SETUP_OK, 3, true) == QDD_SETUP_NONE);
-    assert(model.page == QDD_SETUP_LIST);
+    assert(model.page == QDD_SETUP_MENU); // Busy OK always returns, never rescans/selects.
+    (void)qdd_setup_enter(&model);
+    model.selection = 3;
     (void)key(&model, QDD_SETUP_DOWN);
     assert(key(&model, QDD_SETUP_OK) == QDD_SETUP_NONE);
     assert(model.page == QDD_SETUP_MENU);
@@ -79,6 +82,26 @@ static void test_short_press_menu_navigation(void) {
     select_network(&model, false); qdd_setup_error(&model, "连接失败，请重试");
     key(&model, QDD_SETUP_DOWN); key(&model, QDD_SETUP_OK);
     assert(model.page == QDD_SETUP_LIST); password_is_clear(&model);
+}
+
+static void test_first_connection_intro(void) {
+    qdd_setup_model_t model = {0};
+    select_network(&model, false);
+    assert(qdd_setup_append(&model, "12345678"));
+    qdd_setup_intro(&model);
+    assert(model.page == QDD_SETUP_HELP && model.intro_to_onboarding);
+    password_is_clear(&model);
+    assert(key(&model, QDD_SETUP_UP) == QDD_SETUP_NONE && model.page == QDD_SETUP_HELP);
+    assert(key(&model, QDD_SETUP_DOWN) == QDD_SETUP_NONE && model.page == QDD_SETUP_HELP);
+    assert(key(&model, QDD_SETUP_LONG_OK) == QDD_SETUP_NONE && model.intro_to_onboarding);
+    assert(key(&model, QDD_SETUP_OK) == QDD_SETUP_EXIT && model.page == QDD_SETUP_HOME);
+    assert(!model.intro_to_onboarding && !model.credentials.ssid[0]);
+    qdd_setup_help(&model);
+    assert(!model.intro_to_onboarding && model.page == QDD_SETUP_HELP);
+    assert(key(&model, QDD_SETUP_OK) == QDD_SETUP_NONE && model.page == QDD_SETUP_MENU && model.selection == 2);
+    qdd_setup_intro(&model);
+    qdd_setup_menu(&model);
+    assert(!model.intro_to_onboarding); // A new settings context never inherits intro routing.
 }
 
 static void test_keyboard_reachability(void) {
@@ -303,7 +326,7 @@ static void test_back_error_and_wiping(void) {
     assert(qdd_setup_append(&model, "test password"));
     (void)key(&model, QDD_SETUP_LONG_OK);
     (void)key(&model, QDD_SETUP_UP);
-    assert(model.action_index == 3);
+    assert(model.action_index == 4);
     (void)key(&model, QDD_SETUP_DOWN);
     assert(model.action_index == 0);
     (void)key(&model, QDD_SETUP_UP);
@@ -378,10 +401,39 @@ static void test_all_sixty_four_networks_and_actions_are_reachable(void) {
     assert(qdd_setup_key(&model, QDD_SETUP_OK, 64, false) == QDD_SETUP_NONE && model.page == QDD_SETUP_MENU);
 }
 
+static void test_clear_entire_password_returns_to_keyboard(void) {
+    qdd_setup_model_t model = {0}; select_network(&model, false);
+    assert(qdd_setup_append(&model, "中国abc"));
+    model.credentials.password[60] = '!'; // Stale bytes after NUL must also be erased.
+    model.row = 7; model.column = 2; model.choosing_column = true;
+    assert(key(&model, QDD_SETUP_LONG_OK) == QDD_SETUP_NONE);
+    for (unsigned i = 0; i < 3; i++) assert(key(&model, QDD_SETUP_DOWN) == QDD_SETUP_NONE);
+    assert(model.action_index == 3);
+    assert(key(&model, QDD_SETUP_OK) == QDD_SETUP_NONE);
+    assert(model.page == QDD_SETUP_PASSWORD && !model.choosing_column && model.error == NULL);
+    assert(model.row == 7 && model.column == 2);
+    assert(strcmp(model.credentials.ssid, "Test network") == 0);
+    password_is_clear(&model);
+    assert(qdd_setup_append(&model, "again")); // Ready to enter a replacement immediately.
+    assert(key(&model, QDD_SETUP_LONG_OK) == QDD_SETUP_NONE);
+    for (unsigned i = 0; i < 3; i++) key(&model, QDD_SETUP_DOWN);
+    key(&model, QDD_SETUP_OK); password_is_clear(&model);
+    assert(key(&model, QDD_SETUP_LONG_OK) == QDD_SETUP_NONE);
+    for (unsigned i = 0; i < 3; i++) key(&model, QDD_SETUP_DOWN);
+    assert(key(&model, QDD_SETUP_OK) == QDD_SETUP_NONE); // Clearing an empty password is safe.
+    password_is_clear(&model);
+    assert(model.page == QDD_SETUP_PASSWORD);
+    assert(qdd_setup_append(&model, "中国a"));
+    key(&model, QDD_SETUP_LONG_OK); key(&model, QDD_SETUP_DOWN); key(&model, QDD_SETUP_DOWN);
+    assert(model.action_index == 2); key(&model, QDD_SETUP_OK);
+    assert(strcmp(model.credentials.password, "中国") == 0); // Single-character delete is retained.
+}
+
 int main(void) {
     test_list();
     test_all_sixty_four_networks_and_actions_are_reachable();
     test_short_press_menu_navigation();
+    test_first_connection_intro();
     test_reset_requires_explicit_local_confirmation();
     test_keyboard_reachability();
     test_focus_and_last_row();
@@ -389,6 +441,7 @@ int main(void) {
     test_ssid_validation();
     test_save_validation();
     test_back_error_and_wiping();
+    test_clear_entire_password_returns_to_keyboard();
     puts("QDD native Wi-Fi setup ASCII reachability, focus, UTF-8 bounds, validation and secret-wipe tests: PASS");
     return 0;
 }

@@ -52,15 +52,16 @@ export function broadcastAddresses(interfaces = networkInterfaces()) {
 export async function discoverBoards(options = {}) {
   const controller = new AbortController(), socket = createSocket("udp4");
   const found = new Map(), probed = new Set(), pending = new Set();
+  const resendTimers = [];
   let finished = false, timer;
   const deadline = Date.now() + Math.max(100, Math.min(5000, options.timeoutMs ?? 1400));
-  const probe = (candidate, sender) => {
+  const probe = (candidate) => {
     if (finished || probed.size >= 8) return;
     let url;
-    try { url = normalizeBoardUrl(candidate); if (sender && new URL(url).hostname !== sender) return; } catch { return; }
+    try { url = normalizeBoardUrl(candidate); } catch { return; }
     if (probed.has(url)) return; probed.add(url);
     const task = fetchBoardStatus(url, { timeoutMs: Math.max(1, deadline - Date.now()), signal: controller.signal })
-      .then((value) => { if (!finished) found.set(url, value); }).catch(() => {}).finally(() => pending.delete(task));
+      .then((value) => { if (!finished && !found.has(url) && found.size < 8) found.set(url, value); }).catch(() => {}).finally(() => pending.delete(task));
     pending.add(task);
   };
   let complete;
@@ -68,13 +69,22 @@ export async function discoverBoards(options = {}) {
   const finish = () => {
     if (finished) return;
     finished = true; clearTimeout(timer); controller.abort();
+    for (const resend of resendTimers) clearTimeout(resend);
+    resendTimers.length = 0;
     try { socket.close(() => complete()); } catch { complete(); }
   };
   options.signal?.addEventListener("abort", finish, { once: true });
   socket.on("error", () => finish());
   socket.on("message", (bytes, peer) => {
-    if (bytes.length > 2048 || !privateIpv4(peer.address)) return;
-    try { const value = JSON.parse(bytes.toString("utf8")); if (value.service === "qdd-esp-onboarding" && value.version === 1) probe(value.boardUrl, peer.address); } catch { /* Ignore unrelated LAN datagrams. */ }
+    if (finished || bytes.length > 2048 || !privateIpv4(peer.address)) return;
+    try {
+      const value = JSON.parse(bytes.toString("utf8"));
+      const status = boardStatus(value, value.boardUrl);
+      if (status.ip !== peer.address || (!found.has(status.boardUrl) && found.size >= 8)) return;
+      // Discovery already carries the complete bounded status. Do not make a
+      // valid UDP result depend on a second HTTP round trip or a slow hint.
+      found.set(status.boardUrl, status);
+    } catch { /* Ignore unrelated or mismatched LAN datagrams. */ }
   });
   timer = setTimeout(finish, Math.max(1, deadline - Date.now()));
   if (options.signal?.aborted) finish();
@@ -84,7 +94,19 @@ export async function discoverBoards(options = {}) {
       if (finished) return;
       try {
         socket.setBroadcast(true);
-        for (const address of options.broadcasts ?? broadcastAddresses()) socket.send("QDD-DISCOVER/1", options.udpPort ?? 3335, address, () => {});
+        const addresses = [...new Set(options.broadcasts ?? broadcastAddresses())];
+        const send = () => {
+          if (finished || Date.now() >= deadline) return;
+          for (const address of addresses) {
+            try { socket.send("QDD-DISCOVER/1", options.udpPort ?? 3335, address, () => {}); }
+            catch { /* One unavailable interface must not prevent the others. */ }
+          }
+        };
+        send();
+        // Compensate for individual UDP loss within the original scan window.
+        // Neither HTTP hints nor any controller/input operation is retried.
+        const remaining = Math.max(1, deadline - Date.now());
+        for (const part of [1, 2]) resendTimers.push(setTimeout(send, Math.max(1, Math.floor(remaining * part / 3))));
       } catch { /* Known HTTP hints can still succeed when UDP broadcast is unavailable. */ }
     });
   }

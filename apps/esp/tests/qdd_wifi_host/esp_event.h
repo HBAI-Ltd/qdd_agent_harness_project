@@ -15,6 +15,8 @@ extern const char qdd_test_ip_event[];
 #define WIFI_EVENT_SCAN_DONE 2
 #define IP_EVENT_STA_GOT_IP 3
 #define IP_EVENT_STA_LOST_IP 4
+#define WIFI_EVENT_STA_CONNECTED 5
+#define WIFI_EVENT_STA_BEACON_TIMEOUT 6
 
 esp_err_t esp_event_loop_create_default(void);
 esp_err_t esp_event_handler_instance_register(esp_event_base_t base, int32_t id,

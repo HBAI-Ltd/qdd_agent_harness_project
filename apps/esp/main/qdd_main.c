@@ -11,6 +11,7 @@
 #include "qdd_ble.h"
 #include "qdd_hid.h"
 #include "qdd_ui.h"
+#include "qdd_ui_model.h"
 #include "qdd_control.h"
 #include "qdd_net_config.h"
 #include "qdd_setup_model.h"
@@ -28,11 +29,17 @@
 #define EVENT_CONFIG_DOWN 64u
 #define EVENT_CONFIG_OK 128u
 #define EVENT_CONFIG_LONG 256u
+#define EVENT_SKIP_APP 512u
+#define EVENT_SKIP_BLUETOOTH 1024u
+#define SKIP_APP 1u
+#define SKIP_BLUETOOTH 2u
 
 static atomic_uint s_events;
+static atomic_bool s_buttons_ready;
 static atomic_bool s_physical_stop;
 static atomic_bool s_configuring;
 static atomic_uint s_home_selection;
+static atomic_uint s_onboarding_skips;
 static qdd_hid_state_t s_state;
 static qdd_stream_t s_usb_stream, s_tcp_stream;
 static qdd_control_t s_control;
@@ -66,6 +73,7 @@ static void ui_feedback(const char *message) {
 static void on_key(bsp_btn_t button, bsp_btn_ev_t event, void *context) {
   (void)context;
   // esp_timer callback: bounded atomic operations only, never BLE/LVGL/I/O.
+  if (!atomic_load(&s_buttons_ready)) return;
   if (atomic_load(&s_configuring)) {
     if (event == BSP_BTN_PRESS && button == BSP_BTN_UP) atomic_fetch_or(&s_events, EVENT_CONFIG_UP);
     else if (event == BSP_BTN_PRESS && button == BSP_BTN_DOWN) atomic_fetch_or(&s_events, EVENT_CONFIG_DOWN);
@@ -76,12 +84,16 @@ static void on_key(bsp_btn_t button, bsp_btn_ev_t event, void *context) {
   if (event == BSP_BTN_PRESS && (button == BSP_BTN_UP || button == BSP_BTN_DOWN)) {
     // Two vertical choices: update synchronously so a rapid navigation + OK
     // sequence never acts on a worker's older selection snapshot.
-    atomic_fetch_xor(&s_home_selection, 1u);
+    if (qdd_ui_home_choices(qdd_ui_guide_step()) > 1) atomic_fetch_xor(&s_home_selection, 1u);
   } else if (button == BSP_BTN_OK && event == BSP_BTN_CLICK) {
-    if (atomic_load(&s_home_selection) == 1) {
+    const qdd_ui_home_action_t action = qdd_ui_home_action(qdd_ui_guide_step(),
+        atomic_load(&s_home_selection), atomic_load(&s_physical_stop));
+    if (action == QDD_UI_HOME_SETTINGS) {
       atomic_store(&s_configuring, true);
       atomic_fetch_or(&s_events, EVENT_MENU);
-    } else if (atomic_load(&s_physical_stop)) {
+    } else if (action == QDD_UI_HOME_SKIP_APP || action == QDD_UI_HOME_SKIP_BLUETOOTH) {
+      atomic_fetch_or(&s_events, action == QDD_UI_HOME_SKIP_APP ? EVENT_SKIP_APP : EVENT_SKIP_BLUETOOTH);
+    } else if (action == QDD_UI_HOME_UNLOCK) {
       atomic_fetch_or(&s_events, EVENT_UNLOCK);
     } else {
       atomic_store(&s_physical_stop, true);
@@ -113,6 +125,7 @@ static void drop_controller(qdd_source_t source) {
 
 static void setup_action(qdd_setup_action_t action) {
   if (action == QDD_SETUP_RESET_DEVICE) {
+    atomic_store(&s_onboarding_skips, 0);
     // Settings already blocks nonzero reports. Release before committing the
     // local-only reset request; no live BLE/Wi-Fi task ever erases storage.
     atomic_store(&s_physical_stop, true);
@@ -130,6 +143,7 @@ static void setup_action(qdd_setup_action_t action) {
     qdd_ble_open_pairing();
     ui_feedback("PAIRING");
   } else if (action == QDD_SETUP_SCAN) {
+    atomic_store(&s_onboarding_skips, 0);
     if (qdd_wifi_scan() != ESP_OK) qdd_setup_error(&s_setup, "暂时找不到网络，请重试");
   } else if (action == QDD_SETUP_SELECT) {
     const qdd_wifi_view_t wifi = qdd_wifi_view();
@@ -138,6 +152,7 @@ static void setup_action(qdd_setup_action_t action) {
       qdd_setup_select(&s_setup, ap.ssid, ap.open);
     }
   } else if (action == QDD_SETUP_SAVE) {
+    atomic_store(&s_onboarding_skips, 0);
     if (qdd_wifi_save(&s_setup.credentials) != ESP_OK) qdd_setup_error(&s_setup, "连接失败，请检查密码");
   } else if (action == QDD_SETUP_EXIT) {
     // Exiting never clears the physical stop latch or authorizes input.
@@ -171,6 +186,13 @@ static void sync_safety(void) {
   }
   qdd_hid_tick(&s_state, now_ms(), controller_live());
   const unsigned events = atomic_exchange(&s_events, 0);
+  if (events & (EVENT_SKIP_APP | EVENT_SKIP_BLUETOOTH)) {
+    unsigned skipped = 0;
+    if (events & EVENT_SKIP_APP) skipped |= SKIP_APP;
+    if (events & EVENT_SKIP_BLUETOOTH) skipped |= SKIP_BLUETOOTH;
+    atomic_fetch_or(&s_onboarding_skips, skipped);
+    atomic_store(&s_home_selection, 0);
+  }
   if ((events & EVENT_STOP) || atomic_load(&s_physical_stop)) {
     if (!s_state.locked || s_state.armed) qdd_hid_pause(&s_state, true);
     if (events & EVENT_STOP) ui_feedback("PHYSICAL_STOP");
@@ -212,7 +234,7 @@ static void on_net_line(const char *line, qdd_source_t source) {
   qdd_net_command_t command = {0};
   const char *error = qdd_net_parse(line, &command) ? NULL : "BAD_COMMAND";
   if (!error && source != QDD_SOURCE_USB) error = "USB_ONLY";
-  if (!error && command.operation != QDD_NET_STATUS) {
+  if (!error && command.operation != QDD_NET_STATUS && command.operation != QDD_NET_DIAGNOSTICS) {
     if (!qdd_control_usb_config(&s_control, s_state.armed)) error = "CONTROL_BUSY";
     else if (atomic_load(&s_configuring)) error = "CONFIGURING";
     else {
@@ -242,6 +264,22 @@ static void on_net_line(const char *line, qdd_source_t source) {
       }
       if (result != ESP_OK) error = "WIFI_FAILED";
     }
+  }
+  if (!error && command.operation == QDD_NET_DIAGNOSTICS) {
+    // Only this main worker uses the diagnostic reply. Keep the larger JSON
+    // off its stack and separate from HTTP/UDP buffers and control replies.
+    static char diagnostic[512];
+    const int prefix = snprintf(diagnostic, sizeof(diagnostic), "QDDNET/1 %lu OK ", (unsigned long)command.id);
+    const size_t size = prefix > 0 && (size_t)prefix < sizeof(diagnostic) - 2 ?
+        qdd_wifi_diagnostics(diagnostic + prefix, sizeof(diagnostic) - (size_t)prefix - 2) : 0;
+    if (size) {
+      diagnostic[(size_t)prefix + size] = '\n';
+      diagnostic[(size_t)prefix + size + 1] = 0;
+      memset(&command, 0, sizeof(command));
+      (void)write_reply(source, diagnostic);
+      return;
+    }
+    error = "WIFI_FAILED";
   }
   const qdd_wifi_view_t wifi = qdd_wifi_view();
   char reply[QDD_REPLY_MAX];
@@ -303,6 +341,8 @@ static void display_task(void *context) {
     const qdd_setup_model_t setup = s_view_setup;
     portEXIT_CRITICAL(&s_view_lock);
     if (bsp_lvgl_lock(10)) {
+      const unsigned skipped = atomic_load(&s_onboarding_skips);
+      qdd_ui_onboarding_skips((skipped & SKIP_APP) != 0, (skipped & SKIP_BLUETOOTH) != 0);
       qdd_ui_home_selection(atomic_load(&s_home_selection));
       qdd_ui_wifi(&setup, qdd_wifi_view());
       qdd_ui_refresh(&state, qdd_ble_status(), control_live, battery, now_ms(), message, message_ms);
@@ -351,14 +391,20 @@ void app_main(void) {
   if (qdd_onboarding_start() != ESP_OK) ui_feedback("STARTUP_FAILED");
   if (!qdd_wifi_view().configured) {
     qdd_ui_require_onboarding(true);
+    qdd_setup_intro(&s_setup);
     atomic_store(&s_configuring, true);
-    qdd_wifi_allow_reconnect(false);
-    setup_action(qdd_setup_enter(&s_setup));
+    // Publish the guide before the presentation worker's first snapshot.
+    // Confirming it returns to step one without scanning or changing NVS.
+    s_view_setup = s_setup;
+    if (!bsp_lvgl_lock(1000)) return;
+    qdd_ui_wifi(&s_setup, qdd_wifi_view());
+    bsp_lvgl_unlock();
   }
   if (xTaskCreate(display_task, "qdd_ui", 4096, NULL, 2, NULL) != pdPASS) {
     ESP_LOGE("qdd", "Presentation task failed; bridge remains disabled");
     return;
   }
+  atomic_store(&s_buttons_ready, true);
   vTaskPrioritySet(NULL, 6);
   for (;;) {
     qdd_wifi_poll(now_ms());

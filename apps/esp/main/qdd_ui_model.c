@@ -1,6 +1,49 @@
 #include "qdd_ui_model.h"
 #include <string.h>
 
+unsigned qdd_ui_home_choices(unsigned guide_step) {
+    return guide_step > 0 && (guide_step < 2 || guide_step > 4) ? 1u : 2u;
+}
+
+qdd_ui_home_action_t qdd_ui_home_action(unsigned guide_step, unsigned selection, bool locked) {
+    if (guide_step) {
+        if (selection == 1) return QDD_UI_HOME_SETTINGS;
+        if (guide_step == 2 || guide_step == 3) return QDD_UI_HOME_SKIP_APP;
+        if (guide_step == 4) return QDD_UI_HOME_SKIP_BLUETOOTH;
+        return QDD_UI_HOME_SETTINGS;
+    }
+    if (selection == 1) return QDD_UI_HOME_SETTINGS;
+    return locked ? QDD_UI_HOME_UNLOCK : QDD_UI_HOME_STOP;
+}
+
+qdd_ui_pairing_view_t qdd_ui_pairing_model(bool connected, bool secure, bool ready,
+    bool pairing_open, bool passkey_visible, uint32_t passkey,
+    uint64_t now_ms, const char *feedback, uint64_t feedback_ms) {
+    const bool fresh_feedback = pairing_open && feedback && strcmp(feedback, "PAIRING") == 0 &&
+        now_ms >= feedback_ms && now_ms - feedback_ms < QDD_UI_NOTICE_MS;
+    qdd_ui_pairing_view_t view = {.action = pairing_open ? "重新开启配对" : "开启手机配对"};
+    if (connected && secure) {
+        view.detail = "手机已连接";
+        view.notice = ready ? "可以返回继续连接电脑" : "正在准备键盘鼠标";
+    } else if (pairing_open && passkey_visible && passkey <= 999999) {
+        view.show_passkey = true;
+        view.detail = "请在手机输入配对码";
+        view.notice = "按手机提示完成配对";
+    } else if (connected) {
+        view.detail = "手机配对中";
+        view.notice = "请按手机提示完成配对";
+    } else if (pairing_open) {
+        view.detail = "配对已开启，等待手机";
+        view.notice = fresh_feedback ? "配对已重新开启" : "手机蓝牙中选择本设备";
+    } else {
+        view.detail = "配对窗口已关闭";
+        view.notice = "确认开启手机配对";
+    }
+    if (fresh_feedback) view.notice = "配对已重新开启";
+    view.flash_feedback = fresh_feedback && now_ms - feedback_ms < 600u;
+    return view;
+}
+
 static const char *notice(const char *feedback) {
     if (!feedback || !*feedback) return "";
     static const struct { const char *code; const char *text; } notes[] = {
@@ -84,6 +127,10 @@ qdd_ui_view_t qdd_ui_onboarding_model(const qdd_hid_state_t *state, bool compute
     qdd_ui_view_t view = qdd_ui_model(state, computer_live, pairing_open, passkey_visible,
                                     passkey, now_ms, feedback, feedback_ms);
     if (state->locked) return view;
+    if (onboarding->completed) {
+        view.onboarding_step = 6;
+        return view; // Real link/lease state remains visible on the normal page.
+    }
     // A working earlier installation remains usable without repeating setup.
     // Once the new App registers, its projection state controls the guide.
     if (!onboarding->require_full && !onboarding->phone_seen && view.computer_online && view.phone_secure && state->ready) {
@@ -96,26 +143,26 @@ qdd_ui_view_t qdd_ui_onboarding_model(const qdd_hid_state_t *state, bool compute
         view.title = "连接无线网络";
         view.detail = "上下选设置，确认进入";
         view.next = "选择无线网络并连接";
-    } else if (!onboarding->phone_fresh) {
-        view.stage = onboarding->downloaded || onboarding->phone_seen ? QDD_UI_INSTALL : QDD_UI_DOWNLOAD;
+    } else if (!onboarding->phone_seen && !onboarding->skip_app) {
+        view.stage = onboarding->downloaded ? QDD_UI_INSTALL : QDD_UI_DOWNLOAD;
         view.onboarding_step = view.stage == QDD_UI_DOWNLOAD ? 2 : 3;
         view.show_qr = true;
         view.title = view.stage == QDD_UI_DOWNLOAD ? "手机扫码安装" : "打开手机投屏";
         view.detail = view.stage == QDD_UI_DOWNLOAD ? "下载并安装投屏App" : "安装后打开投屏App";
         view.next = "手机和控制板连同一Wi-Fi";
-    } else if (!view.phone_secure || !state->ready) {
+    } else if ((!view.phone_secure || !state->ready) && !onboarding->skip_bluetooth) {
         view.stage = view.phone_secure ? QDD_UI_HID : QDD_UI_PHONE;
         view.onboarding_step = 4;
         view.title = view.phone_secure ? "蓝牙连接中" : "连接手机蓝牙";
         view.detail = view.phone_secure ? "手机正在准备键盘鼠标" : "在手机蓝牙中选择";
         view.next = view.phone_secure ? "请稍候" : pairing_open ? "按手机提示完成配对" : "设置中选择手机蓝牙配对";
-    } else if (!onboarding->projecting) {
+    } else if ((!onboarding->phone_fresh || !onboarding->projecting) && !onboarding->skip_app) {
         view.stage = QDD_UI_COMPUTER;
         view.onboarding_step = 5;
         view.wait_projection = true;
-        view.title = "分享手机画面";
-        view.detail = "手机App点开始投屏";
-        view.next = "同意共享后启动电脑";
+        view.title = onboarding->phone_fresh ? "分享手机画面" : "打开手机投屏";
+        view.detail = onboarding->phone_fresh ? "手机App点开始投屏" : "返回App恢复连接";
+        view.next = onboarding->phone_fresh ? "同意共享后启动电脑" : "连接后点开始投屏";
     } else if (!view.computer_online) {
         view.stage = QDD_UI_COMPUTER;
         view.onboarding_step = 5;
@@ -124,11 +171,14 @@ qdd_ui_view_t qdd_ui_onboarding_model(const qdd_hid_state_t *state, bool compute
         view.next = "自动找到手机和控制板";
     } else {
         view.onboarding_step = 6;
+        // Skipping is a presentation choice, never proof of a usable link.
+        if (onboarding->skip_app || onboarding->skip_bluetooth) return view;
         view.stage = QDD_UI_ENABLED;
         view.accent = 0x93DDB8;
         view.title = "可以远程操作";
         view.detail = "电脑点击画面就能操作";
         view.next = "按Esc退出远程操作";
     }
+    view.can_skip = view.onboarding_step >= 2 && view.onboarding_step <= 4;
     return view;
 }

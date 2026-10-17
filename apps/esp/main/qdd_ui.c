@@ -4,6 +4,7 @@
 #include "bsp_pins.h"
 #include "lvgl.h"
 #include <stdio.h>
+#include <stdatomic.h>
 #include <string.h>
 LV_FONT_DECLARE(qdd_cjk_14);
 LV_FONT_DECLARE(qdd_cjk_20);
@@ -20,8 +21,12 @@ static cached_label_t s_header, s_battery, s_computer, s_phone, s_title, s_detai
 static cached_label_t s_pairing, s_value, s_hint, s_notice, s_rows[5];
 static cached_label_t s_home_rows[2];
 static unsigned s_home_selection, s_home_action_selection;
-static bool s_home_action_locked, s_require_onboarding;
-static lv_obj_t *s_keyboard, *s_qrcode, *s_card;
+static bool s_home_action_locked, s_home_action_guide, s_home_action_skip, s_require_onboarding;
+static bool s_skip_app, s_skip_bluetooth;
+static bool s_onboarding_complete;
+static char s_onboarding_ip[16];
+static atomic_uint s_visible_guide_step;
+static lv_obj_t *s_keyboard, *s_qrcode, *s_card, *s_scan_spinner;
 static qdd_setup_model_t s_keyboard_model, s_last_setup;
 static qdd_setup_page_t s_setup_page;
 static qdd_wifi_view_t s_wifi;
@@ -71,33 +76,66 @@ static void sidebar_draw(lv_event_t *event) {
         lv_area_t area = {right - width + 1, y, right, y}; lv_draw_rect(layer, &bar, &area);
     }
 }
+static void scan_activity(bool active) {
+    if (!active) {
+        if (s_scan_spinner) { lv_obj_delete(s_scan_spinner); s_scan_spinner = NULL; }
+        return;
+    }
+    if (s_scan_spinner) return;
+    s_scan_spinner = lv_spinner_create(lv_screen_active());
+    lv_obj_set_pos(s_scan_spinner, 92, 125); lv_obj_set_size(s_scan_spinner, 40, 40);
+    lv_obj_remove_flag(s_scan_spinner, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_arc_color(s_scan_spinner, lv_color_hex(0x433A35), LV_PART_MAIN);
+    lv_obj_set_style_arc_color(s_scan_spinner, lv_color_hex(ACCENT), LV_PART_INDICATOR);
+    lv_obj_set_style_arc_width(s_scan_spinner, 3, LV_PART_MAIN);
+    lv_obj_set_style_arc_width(s_scan_spinner, 3, LV_PART_INDICATOR);
+    // LVGL owns the two arc animations, independently of the cached UI view.
+    lv_spinner_set_anim_params(s_scan_spinner, 1000, 200);
+}
 static lv_obj_t *new_screen(void) {
+    scan_activity(false);
     lv_obj_t *screen = lv_obj_create(NULL); lv_obj_set_style_bg_color(screen, lv_color_hex(BG), 0);
     lv_obj_set_style_pad_all(screen, 0, 0); lv_obj_set_style_border_width(screen, 0, 0); lv_obj_remove_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_t *old = lv_screen_active(); lv_screen_load(screen); if (old && old != screen) lv_obj_delete(old);
     lv_obj_add_event_cb(screen, sidebar_draw, LV_EVENT_DRAW_POST, NULL);
     return screen;
 }
-static void home_actions(bool locked) {
-    if (s_home_action_selection == s_home_selection && s_home_action_locked == locked) return;
-    s_home_action_selection = s_home_selection; s_home_action_locked = locked;
-    text(&s_home_rows[0], locked ? "取消急停" : "紧急停止"); text(&s_home_rows[1], "设置");
-    for (unsigned i = 0; i < 2; i++) lv_obj_set_style_bg_color(s_home_rows[i].object,
-        lv_color_hex(i == s_home_selection ? ACCENT : PANEL), 0);
+static void home_actions(bool locked, bool guide, bool can_skip) {
+    const unsigned selected = guide && !can_skip ? 0 : s_home_selection;
+    if (s_home_action_selection == selected && s_home_action_locked == locked &&
+        s_home_action_guide == guide && s_home_action_skip == can_skip) return;
+    s_home_action_selection = selected; s_home_action_locked = locked;
+    s_home_action_guide = guide; s_home_action_skip = can_skip;
+    text(&s_home_rows[0], guide ? (can_skip ? "跳过此步" : "设置") : locked ? "取消急停" : "紧急停止");
+    text(&s_home_rows[1], "设置");
+    for (unsigned i = 0; i < 2; i++) {
+        if (guide && !can_skip && i == 1) lv_obj_add_flag(s_home_rows[i].object, LV_OBJ_FLAG_HIDDEN);
+        else lv_obj_remove_flag(s_home_rows[i].object, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_style_bg_color(s_home_rows[i].object, lv_color_hex(i == selected ? ACCENT : PANEL), 0);
+    }
 }
 static void home_actions_create(lv_obj_t *screen, bool guide) {
     for (unsigned i = 0; i < 2; i++) {
         label(&s_home_rows[i], screen, 12, (guide ? 272 : 189) + (int)i * (guide ? 23 : 36), 200,
-            i ? "设置" : "紧急停止", &qdd_cjk_14, INK, false);
+            guide || i ? "设置" : "紧急停止", &qdd_cjk_14, INK, false);
         lv_obj_set_height(s_home_rows[i].object, guide ? 21 : 31);
         lv_obj_set_style_pad_left(s_home_rows[i].object, 10, 0);
         lv_obj_set_style_pad_top(s_home_rows[i].object, guide ? 0 : 5, 0);
         lv_obj_set_style_radius(s_home_rows[i].object, 7, 0);
         lv_obj_set_style_bg_opa(s_home_rows[i].object, LV_OPA_COVER, 0);
     }
-    s_home_action_selection = 2; home_actions(false);
+    s_home_action_selection = 2; home_actions(false, guide, false);
 }
-void qdd_ui_require_onboarding(bool required) { s_require_onboarding = required; }
+void qdd_ui_require_onboarding(bool required) {
+    s_require_onboarding = required;
+    s_skip_app = s_skip_bluetooth = false;
+    if (required) {
+        s_onboarding_complete = false;
+        atomic_store(&s_visible_guide_step, 1);
+    }
+}
+void qdd_ui_onboarding_skips(bool app, bool bluetooth) { s_skip_app = app; s_skip_bluetooth = bluetooth; }
+unsigned qdd_ui_guide_step(void) { return atomic_load(&s_visible_guide_step); }
 void qdd_ui_home_selection(unsigned selection) { s_home_selection = selection == 1 ? 1 : 0; }
 static void battery(int value) {
     char display[12]; if (value < 0 || value > 100) strcpy(display, "--%"); else snprintf(display, sizeof(display), "%d%%", value);
@@ -171,21 +209,32 @@ static void guide_refresh(const qdd_ui_view_t *view, qdd_ble_status_t ble, int c
 void qdd_ui_refresh(const qdd_hid_state_t *state, qdd_ble_status_t ble, bool computer_live, int charge, uint64_t now, const char *feedback, uint64_t feedback_ms) {
     if (s_kind == SETUP) {
         if (s_setup_page == QDD_SETUP_PAIR) {
-            const bool passkey = ble.pairing_open && ble.passkey_visible && ble.passkey <= 999999;
-            char value[48]; if (passkey) snprintf(value, sizeof(value), "%06lu", (unsigned long)ble.passkey); else snprintf(value, sizeof(value), "%s", qdd_ble_name());
-            if (s_passkey != passkey) { s_passkey = passkey; lv_obj_set_style_text_font(s_value.object, passkey ? &qdd_cjk_20 : &qdd_cjk_14, 0); }
-            text(&s_value, value); text(&s_detail, passkey ? "在手机输入配对码" : "在手机蓝牙中选择");
+            const qdd_ui_pairing_view_t pair = qdd_ui_pairing_model(ble.connected,
+                ble.encrypted && ble.authenticated && ble.bonded, ble.ready,
+                ble.pairing_open, ble.passkey_visible, ble.passkey, now, feedback, feedback_ms);
+            char value[48]; if (pair.show_passkey) snprintf(value, sizeof(value), "%06lu", (unsigned long)ble.passkey); else snprintf(value, sizeof(value), "%s", qdd_ble_name());
+            if (s_passkey != pair.show_passkey) { s_passkey = pair.show_passkey; lv_obj_set_style_text_font(s_value.object, pair.show_passkey ? &qdd_cjk_20 : &qdd_cjk_14, 0); }
+            text(&s_value, value); text(&s_detail, pair.detail); text(&s_notice, pair.notice); text(&s_rows[0], pair.action);
+            lv_obj_set_y(s_notice.object, 108);
+            // Every explicit reopen briefly marks the selected action, including
+            // when the real window was already open and no BLE flags changed.
+            lv_obj_set_style_outline_color(s_rows[0].object, lv_color_hex(0xF58C6C), 0);
+            lv_obj_set_style_outline_width(s_rows[0].object, pair.flash_feedback ? 2 : 0, 0);
         }
         return;
     }
     const qdd_onboarding_view_t onboarding = qdd_onboarding_view();
     const qdd_ui_onboarding_t progress = {.require_full = s_require_onboarding, .wifi_connected = s_wifi.connected, .downloaded = onboarding.downloaded,
-        .phone_seen = onboarding.phone_seen, .phone_fresh = onboarding.phone_fresh, .projecting = onboarding.phone_projecting};
+        .phone_seen = onboarding.phone_seen, .phone_fresh = onboarding.phone_fresh, .projecting = onboarding.phone_projecting,
+        .skip_app = s_skip_app, .skip_bluetooth = s_skip_bluetooth, .completed = s_onboarding_complete};
     const qdd_ui_view_t view = qdd_ui_onboarding_model(state, computer_live, ble.pairing_open, ble.passkey_visible, ble.passkey, now, feedback, feedback_ms, &progress);
-    if (view.onboarding_step > 0 && view.onboarding_step < 6) { guide_refresh(&view, ble, charge); home_actions(false); return; }
+    if (view.onboarding_step == 6) s_onboarding_complete = true;
+    const bool guide = view.onboarding_step > 0 && view.onboarding_step < 6;
+    atomic_store(&s_visible_guide_step, guide ? view.onboarding_step : 0);
+    if (guide) { guide_refresh(&view, ble, charge); home_actions(false, true, view.can_skip); return; }
     if (s_kind != MAIN) qdd_ui_create();
     battery(charge); text(&s_computer, view.computer); text(&s_phone, view.phone); text(&s_title, view.title); text(&s_detail, *view.notice ? view.notice : view.detail);
-    home_actions(state->locked);
+    home_actions(state->locked, false, false);
     text(&s_pairing, view.pairing);
     char value[48]; if (view.show_passkey) snprintf(value, sizeof(value), "%06lu", (unsigned long)ble.passkey);
     else snprintf(value, sizeof(value), "%s", qdd_ble_name());
@@ -289,7 +338,7 @@ static void setup_create(qdd_setup_page_t page) {
     for (unsigned i = 0; i < 5; i++) {
         if ((page == QDD_SETUP_RESET && i > 1) || page == QDD_SETUP_PASSWORD || (i != 4 && (page == QDD_SETUP_HELP || page == QDD_SETUP_CONNECTING ||
             ((page == QDD_SETUP_PAIR || page == QDD_SETUP_ERROR) && i > 0) ||
-            (page == QDD_SETUP_ACTIONS && i > 2)))) continue;
+            (page == QDD_SETUP_ACTIONS && i > 3)))) continue;
         label(&s_rows[i], screen, 12, i == 4 ? 251 : 108 + (int)i * 35, 200, "", &qdd_cjk_14, INK, false);
         lv_obj_set_height(s_rows[i].object, 31); lv_obj_set_style_pad_left(s_rows[i].object, 8, 0); lv_obj_set_style_pad_top(s_rows[i].object, 5, 0);
         lv_obj_set_style_radius(s_rows[i].object, 6, 0); lv_obj_set_style_bg_opa(s_rows[i].object, LV_OPA_COVER, 0);
@@ -314,8 +363,13 @@ static void setup_create(qdd_setup_page_t page) {
     }
 }
 void qdd_ui_wifi(const qdd_setup_model_t *setup, qdd_wifi_view_t wifi) {
+    if (wifi.connected && wifi.ip[0]) {
+        if (s_onboarding_ip[0] && strcmp(s_onboarding_ip, wifi.ip) != 0) s_onboarding_complete = false;
+        memcpy(s_onboarding_ip, wifi.ip, sizeof(s_onboarding_ip));
+    }
     const bool wifi_unchanged = memcmp(&wifi, &s_wifi, sizeof(s_wifi)) == 0;
     s_wifi = wifi;
+    if (setup->page != QDD_SETUP_LIST || !wifi.scanning) scan_activity(false);
     if (setup->page == QDD_SETUP_HOME) {
         s_cached = false; memset(&s_last_setup, 0, sizeof(s_last_setup));
         if (s_kind == SETUP) qdd_ui_create();
@@ -334,12 +388,19 @@ void qdd_ui_wifi(const qdd_setup_model_t *setup, qdd_wifi_view_t wifi) {
     lv_obj_set_y(s_hint.object, keyboard ? 241 : 290); lv_obj_set_y(s_notice.object, keyboard ? 272 : 74);
     char value[96], title[64]; const uint8_t empty_bssid[6] = {0}; text(&s_notice, "");
     if (setup->page == QDD_SETUP_LIST) {
+        if (wifi.scanning) {
+            text(&s_header, "正在扫描 Wi-Fi"); text(&s_detail, "通常需要 3-5 秒"); text(&s_value, "请稍候");
+            text(&s_hint, "确认返回 · 扫描继续");
+            lv_obj_remove_flag(s_rows[4].object, LV_OBJ_FLAG_HIDDEN); text(&s_rows[4], "返回上一级");
+            lv_obj_set_style_bg_color(s_rows[4].object, lv_color_hex(ACCENT), 0);
+            scan_activity(true); return;
+        }
         // Back remains on the last page rather than jumping to page one.
         const unsigned visible = setup->selection < wifi.count + 1u ? setup->selection : wifi.count;
         snprintf(title, sizeof(title), "无线网络 %u/%u", visible / QDD_SETUP_VISIBLE_ROWS + 1,
             (wifi.count + QDD_SETUP_VISIBLE_ROWS) / QDD_SETUP_VISIBLE_ROWS);
         snprintf(value, sizeof(value), "共%u个网络 · 上下翻页", wifi.count);
-        text(&s_header, title); text(&s_detail, wifi.scanning ? "正在查找附近网络" : value); text(&s_value, "");
+        text(&s_header, title); text(&s_detail, value); text(&s_value, "");
     } else if (keyboard || setup->page == QDD_SETUP_ACTIONS) {
         if (keyboard) snprintf(title, sizeof(title), "输入密码 %u/4", qdd_setup_keyboard_page(setup) + 1); else strcpy(title, "完成输入");
         text(&s_header, title); ssid_display(value, sizeof(value), setup->credentials.ssid, 1, empty_bssid); text(&s_detail, value);
@@ -366,8 +427,10 @@ void qdd_ui_wifi(const qdd_setup_model_t *setup, qdd_wifi_view_t wifi) {
         }
         return;
     } else if (setup->page == QDD_SETUP_HELP) {
-        text(&s_header, "按键指南"); text(&s_detail, "实体按键位于机身右侧"); text(&s_value, ""); text(&s_hint, "确认返回");
-        lv_obj_remove_flag(s_rows[4].object, LV_OBJ_FLAG_HIDDEN); text(&s_rows[4], "返回上一级");
+        text(&s_header, "按键指南"); text(&s_detail, "实体按键位于机身右侧"); text(&s_value, "");
+        text(&s_hint, setup->intro_to_onboarding ? "确认开始连接" : "确认返回");
+        lv_obj_remove_flag(s_rows[4].object, LV_OBJ_FLAG_HIDDEN);
+        text(&s_rows[4], setup->intro_to_onboarding ? "开始连接" : "返回上一级");
         lv_obj_set_style_bg_color(s_rows[4].object, lv_color_hex(ACCENT), 0); return;
     } else if (setup->page == QDD_SETUP_PAIR) {
         text(&s_header, "手机蓝牙"); text(&s_detail, "在手机蓝牙中选择"); text(&s_value, qdd_ble_name());
@@ -379,7 +442,7 @@ void qdd_ui_wifi(const qdd_setup_model_t *setup, qdd_wifi_view_t wifi) {
     text(&s_hint, "上下选择 · 确认进入");
     unsigned regular = 0, selected = setup->selection;
     if (setup->page == QDD_SETUP_MENU) regular = QDD_SETUP_MENU_ITEMS - 1;
-    else if (setup->page == QDD_SETUP_ACTIONS) regular = 3;
+    else if (setup->page == QDD_SETUP_ACTIONS) regular = QDD_SETUP_ACTION_COUNT - 1;
     else if (setup->page == QDD_SETUP_LIST) regular = wifi.count + 1;
     else if (setup->page == QDD_SETUP_ERROR || setup->page == QDD_SETUP_PAIR) regular = 1;
     if (setup->page == QDD_SETUP_ACTIONS) selected = setup->action_index;
@@ -389,7 +452,7 @@ void qdd_ui_wifi(const qdd_setup_model_t *setup, qdd_wifi_view_t wifi) {
     for (unsigned i = 0; i < 4; i++) {
         const unsigned index = start + i; value[0] = '\0'; if (index >= regular) continue;
         if (setup->page == QDD_SETUP_MENU) { static const char *items[] = {"无线网络", "手机蓝牙配对", "按键指南", "重置设备"}; strcpy(value, items[index]); }
-        else if (setup->page == QDD_SETUP_ACTIONS) { static const char *items[] = {"连接网络", "继续输入", "删除一位"}; strcpy(value, items[index]); }
+        else if (setup->page == QDD_SETUP_ACTIONS) { static const char *items[] = {"连接网络", "继续输入", "删除一位", "清空密码"}; strcpy(value, items[index]); }
         else if (setup->page == QDD_SETUP_LIST) {
             if (index < wifi.count) {
                 qdd_wifi_ap_t ap;

@@ -28,7 +28,7 @@ const children = [], clients = [], ownedPorts = new Set(), streams = new Set(), 
 const records = new Map();
 const additionalServers = new Set();
 const deviceId = "11111111-1111-4111-8111-111111111111";
-let sourceSequence = 0, snapshotRequests = 0, previewProfile = "standard", armed = false;
+let sourceSequence = 0, snapshotRequests = 0, previewProfile = "standard", armed = false, bleReady = true;
 const reports = [];
 const profiles = ["turbo", "fast", "standard", "original"];
 const previewImages = Object.fromEntries(profiles.map((profile) => {
@@ -97,7 +97,7 @@ const esp = createTcpServer((socket) => {
       reports.push({ op, args: args.trim().split(" ").filter(Boolean).map(Number) });
       if (op === "ARM") armed = true; if (op === "PAUSE") armed = false;
       socket.write(`QDDHID/1 ${id} OK ${JSON.stringify({ v: 1, connected: true, encrypted: true, bonded: true,
-        ready: true, locked: false, armed, name: "EXE fixture BLE" })}\n`);
+        ready: bleReady, locked: false, armed, name: "EXE fixture BLE" })}\n`);
     }
   });
 });
@@ -261,19 +261,38 @@ try {
   assert.equal(settings.status, 200); assert.match(settingsHtml, /设备控制器怎样连接电脑/);
   assert.match(settingsHtml, /get\("local-port"\)\.value=data\.defaults\.ANDROID_MCP_PORT/);
   assert.match(settingsHtml, /ANDROID_MCP_PORT:get\("local-port"\)\.value/);
-  const changed = await fetch(`http://127.0.0.1:${port}/desktop/settings`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(config) });
+  // Pasting the address displayed on the controller must override the form's
+  // old default port, including the full-width colon commonly entered in Chinese.
+  const pastedLanConfig = { ...config, ESP_HOST: `127.0.0.1：${espPort}`, ESP_TCP_PORT: "3333" };
+  const pastedReportsStart = reports.length;
+  bleReady = false;
+  const changed = await fetch(`http://127.0.0.1:${port}/desktop/settings`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(pastedLanConfig) });
   assert.equal(changed.status, 200);
   const changedResult = await changed.json();
   assert.equal(changedResult.restart, true);
   await waitFor(async () => (await readHealth(port))?.desktopConfigHash === changedResult.configHash, "GUI settings did not apply via service reload.");
   assert.equal((await readHealth(port)).desktopPid, replacement.child.pid);
   assert.equal(replacement.exit, undefined);
-  assert.equal(JSON.parse(await readFile(configPath, "utf8")).ANDROID_DEVICE_ID, deviceId);
+  const pastedPersisted = JSON.parse(await readFile(configPath, "utf8"));
+  assert.equal(pastedPersisted.ANDROID_DEVICE_ID, deviceId);
+  assert.equal(pastedPersisted.ESP_HOST, "127.0.0.1");
+  assert.equal(pastedPersisted.ESP_TCP_PORT, String(espPort));
   let currentPort = port;
   for (let round = 0; round < 4; round++) {
     const probe = new Client({ name: "exe-reload-handle-probe", version: "1" }); clients.push(probe);
     await probe.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${currentPort}/mcp`)));
-    assert.equal(metadata(await probe.callTool({ name: "android_hid_status" })).value.connected, true);
+    const status = metadata(await probe.callTool({ name: "android_hid_status" })).value;
+    assert.equal(status.connected, true);
+    if (round === 0) {
+      assert.equal(status.ready, false, "LAN status must not require the phone's BLE HID subscription to be ready.");
+      assert.equal(status.armed, false);
+      assert.ok(reports.slice(pastedReportsStart).some(({ op }) => op === "STATUS"),
+        "Packaged MCP status must reach the fixture at the pasted LAN port.");
+      assert.equal(reports.slice(pastedReportsStart).some(({ op }) => ["ARM", "MOVE", "KEY", "CONSUMER"].includes(op)), false,
+        "Saving a LAN address and reading status must not arm or send phone input.");
+      results.push({ name: "GUI pasted full-width LAN host:port overrides default port, persists normalized values and official MCP status works before BLE ready without input", pass: true });
+      bleReady = true;
+    }
     await probe.close();
     assert.equal(sockets.size, 1, "The old service has a real fixture transport to release.");
     const nextPort = round === 2 ? await unusedPort() : currentPort;

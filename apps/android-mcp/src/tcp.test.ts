@@ -80,6 +80,27 @@ test("TCP heartbeats renew the same connection and stop after close", async (t) 
   assert.equal(device.commands.length, count);
 });
 
+test("TCP keeps the same armed session after one timer PING ACK is lost without replaying input", async (t) => {
+  let dropNextPing = false;
+  let dropped: Command | undefined;
+  const device = await board((command) => {
+    if (command.op !== "PING" || !dropNextPing) return false;
+    dropNextPing = false; dropped = command; return true;
+  });
+  const bridge = new TcpHidBridge({ host: "127.0.0.1", port: device.port, timeoutMs: 80, heartbeatMs: 15 });
+  t.after(async () => { await bridge.close(); await device.close(); });
+  await bridge.request("ARM");
+  const afterArm = device.commands.length; dropNextPing = true;
+  await delay(180);
+  assert.ok(dropped);
+  assert.equal(device.status.armed, true);
+  assert.equal(device.connections, 1);
+  assert.equal(device.commands.slice(afterArm).some(({ op }) => op !== "PING"), false);
+  dropped.socket.write(`QDDHID/1 ${dropped.id} OK ${JSON.stringify({ ...device.status, armed: false })}\n`);
+  await delay(0);
+  assert.equal(bridge.lastStatus?.armed, true);
+});
+
 test("lost TCP input ACK releases reports without retrying movement", async (t) => {
   const device = await board(({ op }) => op === "MOVE");
   const bridge = new TcpHidBridge({ host: "127.0.0.1", port: device.port, timeoutMs: 35 });

@@ -51,6 +51,7 @@ bool qdd_net_parse(const char *line, qdd_net_command_t *command) {
     command->id = id;
     static const struct { const char *name; qdd_net_operation_t operation; bool data; } operations[] = {
         {"WIFI_STATUS", QDD_NET_STATUS, false}, {"WIFI_SSID", QDD_NET_SSID, true},
+        {"WIFI_DIAG", QDD_NET_DIAGNOSTICS, false},
         {"WIFI_PASS", QDD_NET_PASSWORD, true}, {"WIFI_SAVE", QDD_NET_SAVE, false},
         {"WIFI_CLEAR", QDD_NET_CLEAR, false}, {"WIFI_RETRY", QDD_NET_RETRY, false},
     };

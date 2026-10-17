@@ -3,6 +3,7 @@
 #include "esp_err.h"
 
 #define QDD_WIFI_SCAN_LIMIT 64
+#define QDD_WIFI_DIAGNOSTICS_MAX 450u
 typedef struct { char ssid[33]; int8_t rssi; uint8_t bssid[6]; bool open; } qdd_wifi_ap_t;
 typedef struct {
     bool configured, connected, connecting, scanning, failed;
@@ -20,6 +21,12 @@ esp_err_t qdd_wifi_clear(void);
 esp_err_t qdd_wifi_retry(void);
 void qdd_wifi_poll(uint64_t now_ms);
 qdd_wifi_view_t qdd_wifi_view(void);
+// Control worker only; ASCII JSON without credentials, no newline. Returns 0
+// with an empty output on insufficient capacity/busy. Arrays: rssi/ch/ps=[err,value],
+// ev=[connected,disconnected,beaconTimeout,lastReason,disconnectAge,beaconAge],
+// heap=[free,minFree,largest], oom=[count,lastSize,lastCaps],
+// tx=[hookErr,ok,fail,lastAge]. Ages are milliseconds; -1 means unavailable.
+size_t qdd_wifi_diagnostics(char *out, size_t capacity);
 // Keep task/HTTP snapshots small; copy only a requested scan entry under lock.
 bool qdd_wifi_ap(uint8_t index, uint32_t scan_revision, qdd_wifi_ap_t *ap);
 bool qdd_wifi_tcp_live(void);

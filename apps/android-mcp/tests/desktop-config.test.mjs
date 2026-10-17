@@ -1,6 +1,16 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { normalizeDesktopConfig, safeDesktopDefaults } from "../tools/desktop-config.mjs";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { normalizeDesktopConfig, safeDesktopDefaults, writePortableConfigIfAbsent } from "../tools/desktop-config.mjs";
+
+async function configPath(context) {
+  const prefix = join(tmpdir(), "qdd-desktop-config-");
+  const directory = await mkdtemp(prefix);
+  context.after(async () => { assert.ok(directory.startsWith(prefix)); await rm(directory, { recursive: true, force: true }); });
+  return join(directory, "qdd-android.json");
+}
 
 test("desktop config accepts the phone's displayed address and keeps Wi-Fi and USB settings explicit", () => {
   const config = normalizeDesktopConfig({ ANDROID_SCREEN_URL: "10.65.201.94：8791", ESP_HOST: "10.65.201.147", ESP_PORT: "com5" });
@@ -31,4 +41,39 @@ test("portable defaults copy only explicit connection fields and never unrelated
     API_KEY: "must-not-copy", PASSWORD: "must-not-copy", WIFI_PASSWORD: "must-not-copy" }), {
     ANDROID_SCREEN_URL: "http://192.168.1.20:8791", ESP_PORT: "COM5",
   });
+});
+
+test("portable build seeds a real LAN host without forcing USB or copying unrelated secrets", async (context) => {
+  const path = await configPath(context);
+  assert.equal(await writePortableConfigIfAbsent(path, { ANDROID_SCREEN_URL: "192.168.1.20:8791",
+    ESP_HOST: "192.168.1.21", ESP_PORT: "COM6", API_KEY: "must-not-copy" }), true);
+  const saved = JSON.parse(await readFile(path, "utf8"));
+  assert.equal(saved.ESP_HOST, "192.168.1.21"); assert.equal(saved.ESP_PORT, "COM6");
+  assert.equal(saved.API_KEY, undefined);
+});
+
+test("portable build preserves existing LAN and explicit USB sidecar choices exactly", async (context) => {
+  for (const host of ["192.168.1.31", ""]) await context.test(host ? "LAN" : "USB", async (inner) => {
+    const path = await configPath(inner);
+    const original = `${JSON.stringify({ ANDROID_SCREEN_URL: "http://192.168.1.30:8791", ESP_HOST: host, ESP_PORT: "COM8" }, null, 2)}\n`;
+    await writeFile(path, original);
+    assert.equal(await writePortableConfigIfAbsent(path, { ANDROID_SCREEN_URL: "invalid", ESP_HOST: "192.168.1.99" }), false);
+    assert.equal(await readFile(path, "utf8"), original);
+  });
+});
+
+test("portable build without a LAN host leaves first setup unconfigured instead of silently choosing USB", async (context) => {
+  const path = await configPath(context);
+  for (const host of [undefined, ""]) {
+    assert.equal(await writePortableConfigIfAbsent(path, { ANDROID_SCREEN_URL: "192.168.1.20:8791", ESP_HOST: host, ESP_PORT: "COM5" }), false);
+    await assert.rejects(stat(path), { code: "ENOENT" });
+  }
+});
+
+test("concurrent portable initialization cannot overwrite the first saved sidecar", async (context) => {
+  const path = await configPath(context);
+  const results = await Promise.all(["192.168.1.21", "192.168.1.22"].map((ESP_HOST) => writePortableConfigIfAbsent(path,
+    { ANDROID_SCREEN_URL: "192.168.1.20:8791", ESP_HOST })));
+  assert.equal(results.filter(Boolean).length, 1);
+  assert.equal(JSON.parse(await readFile(path, "utf8")).ESP_HOST, results[0] ? "192.168.1.21" : "192.168.1.22");
 });

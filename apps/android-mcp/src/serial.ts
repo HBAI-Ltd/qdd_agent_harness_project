@@ -1,6 +1,8 @@
 import { decodeReply, encodeCommand, HidProtocolError, MAX_REQUEST_ID } from "./protocol.js";
 import type { HidOperation, HidStatus } from "./protocol.js";
 
+const MAX_PENDING_HEARTBEATS = 4;
+
 export interface SerialBridge {
   request(op: HidOperation, args?: readonly number[], signal?: AbortSignal): Promise<HidStatus>;
   requestRealtime?(op: "MOVE" | "KEY", args: readonly number[], signal?: AbortSignal): Promise<HidStatus>;
@@ -64,9 +66,9 @@ export class SerialHidBridge implements SerialBridge {
   private sequence = 0;
   private latestSequence = 0;
   private heartbeat: NodeJS.Timeout | undefined;
-  private heartbeatQueued = false;
   private heartbeatRevision = 0;
-  private heartbeatPendingId: number | undefined;
+  private readonly heartbeatPendingIds = new Set<number>();
+  private readonly retiredHeartbeats = new Set<number>();
   private ready = false;
   private disposed = false;
   private transportFailure: Error | undefined;
@@ -266,21 +268,27 @@ export class SerialHidBridge implements SerialBridge {
       this.assertConnectPort(port);
       this.ready = true;
       this.heartbeat = setInterval(() => {
-        if (!this.ready || this.disposed || this.heartbeatQueued) return;
-        this.heartbeatQueued = true;
+        if (!this.ready || this.disposed || this.heartbeatPendingIds.size >= MAX_PENDING_HEARTBEATS) return;
         const revision = this.heartbeatRevision;
         const heartbeatId = this.nextId;
-        this.heartbeatPendingId = heartbeatId;
+        this.heartbeatPendingIds.add(heartbeatId);
         // PING is neutral and has its own request ID. Waiting behind slow report
         // ACKs can starve the board's 1500 ms lease even while inputs are arriving.
         // Only the timer may bypass the exclusive action barrier; no input does.
-        void this.exchange("PING", []).catch((error: unknown) => {
+        // A single lost ACK must not suppress later neutral PINGs. Each has
+        // the original deadline; a newer successful PING supersedes only
+        // older timer requests, never an input or an explicit FIFO PING.
+        void this.exchange("PING", []).then(() => {
           if (revision !== this.heartbeatRevision || this.port !== port || this.disposed) return;
+          for (const earlierId of this.heartbeatPendingIds) {
+            if (earlierId === heartbeatId) break;
+            this.retireHeartbeatRequest(earlierId);
+          }
+        }).catch((error: unknown) => {
+          if (revision !== this.heartbeatRevision || this.port !== port || this.disposed || !this.heartbeatPendingIds.has(heartbeatId)) return;
           void this.releaseRealtime(error instanceof Error ? error : new Error(String(error)));
         }).finally(() => {
-          if (revision !== this.heartbeatRevision || this.heartbeatPendingId !== heartbeatId) return;
-          this.heartbeatPendingId = undefined;
-          this.heartbeatQueued = false;
+          if (revision === this.heartbeatRevision) this.heartbeatPendingIds.delete(heartbeatId);
         });
       }, this.heartbeatMs);
       this.heartbeat.unref();
@@ -333,7 +341,7 @@ export class SerialHidBridge implements SerialBridge {
         if (!reply) continue;
         const waiting = this.pending.get(reply.id);
         if (!waiting) {
-          if (this.realtime.size && this.pending.size && !this.retired.has(reply.id)) {
+          if (this.realtime.size && this.pending.size && !this.retired.has(reply.id) && !this.retiredHeartbeats.has(reply.id)) {
             this.failTransport(new HidProtocolError("ESP32 returned an unknown realtime acknowledgement id."));
           }
           continue;
@@ -380,12 +388,17 @@ export class SerialHidBridge implements SerialBridge {
   }
   private retireHeartbeat(): void {
     this.heartbeatRevision++;
-    const id = this.heartbeatPendingId;
-    this.heartbeatPendingId = undefined;
-    this.heartbeatQueued = false;
     // Only the timer's neutral PING is superseded. Explicit FIFO PING and every
     // input request retain their own acknowledgement and failure semantics.
-    if (id !== undefined) this.failPending(new Error("Neutral heartbeat was superseded by a new control round."), id);
+    for (const id of this.heartbeatPendingIds) this.retireHeartbeatRequest(id);
+  }
+  private retireHeartbeatRequest(id: number): void {
+    this.heartbeatPendingIds.delete(id);
+    // Keep neutral IDs separate: a high-rate report lane can consume the
+    // ordinary retired-ID window before a delayed neutral ACK arrives.
+    this.retiredHeartbeats.add(id);
+    if (this.retiredHeartbeats.size > 64) this.retiredHeartbeats.delete(this.retiredHeartbeats.values().next().value!);
+    this.failPending(new Error("Neutral heartbeat was superseded."), id);
   }
 }
 import { StringDecoder } from "node:string_decoder";

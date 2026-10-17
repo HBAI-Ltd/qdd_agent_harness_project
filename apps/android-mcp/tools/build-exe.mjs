@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import { copyFile, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
@@ -7,7 +8,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { parseEnv } from "node:util";
 import { build } from "esbuild";
-import { normalizeDesktopConfig, safeDesktopDefaults } from "./desktop-config.mjs";
+import { writePortableConfigIfAbsent } from "./desktop-config.mjs";
 
 const appRoot = fileURLToPath(new URL("../", import.meta.url));
 const repoRoot = resolve(appRoot, "../..");
@@ -91,15 +92,14 @@ async function main() {
   await require("postject").inject(executable, "NODE_SEA_BLOB", await readFile(blob), {
     sentinelFuse: "NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2",
   });
-  let localConfiguration = false;
+  const configurationPath = join(output, "qdd-android.json");
   try {
     const values = parseEnv(await readFile(join(appRoot, ".env"), "utf8"));
-    const config = normalizeDesktopConfig({ ...safeDesktopDefaults(values), ESP_HOST: "", ESP_PORT: values.ESP_PORT || "COM5" });
-    await writeFile(join(output, "qdd-android.json"), `${JSON.stringify(config, null, 2)}\n`);
-    localConfiguration = true;
+    await writePortableConfigIfAbsent(configurationPath, values);
   } catch (error) {
     if (error.code !== "ENOENT") throw error;
   }
+  const localConfiguration = existsSync(configurationPath);
   for (let index = 0; index < sources.length; index++) {
     if (sha(await readFile(sources[index])) !== sourceManifest[index].sha256) throw new Error("源码在打包期间发生变化，请待本轮修改完成后重新打包。");
   }

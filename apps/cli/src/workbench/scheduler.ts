@@ -64,7 +64,7 @@ export class Scheduler {
     return s;
   }
 
-  async create(raw: unknown): Promise<Schedule> {
+  async create(raw: unknown, createdBy?: Schedule["createdBy"]): Promise<Schedule> {
     const input = await this.parse(raw, true);
     const now = this.now().toISOString();
     const schedule: Schedule = {
@@ -75,6 +75,7 @@ export class Scheduler {
       ...(input.skillId ? { skillId: input.skillId } : {}),
       ...(input.slug ? { slug: input.slug } : {}),
       ...(input.notify ? { notify: input.notify } : {}),
+      ...(createdBy ? { createdBy } : {}),
       enabled: input.enabled ?? true,
       nextRunAt: null,
       lastRun: null,

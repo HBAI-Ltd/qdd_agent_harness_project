@@ -49,7 +49,8 @@ Aidol 创造营参赛项目——钱多多门店人工智能助手：店铺管�
 
 - **待办与总览**：`GET /api/overview` / `GET /api/pending` 汇总所有会话里待店长处理的授权和问题；授权等待时长由 `approvalTimeoutMin`（默认 60 分钟）控制。
 - **技能**（`workspace/skills/`）：可复用的做事方法；agent 可从对话中 `save_skill`（需店长确认）、`load_skill`。
-- **定时任务**（`workspace/schedules.json`）：5 段 cron，网关内调度；到点无人值守执行（可绑定技能），结论推送到连接器；停机错过的执行会补跑。
+- **定时任务**（`workspace/schedules.json`）：5 段 cron，网关内调度；到点无人值守执行（可绑定技能、在页面上刷新），结论推送到连接器；停机错过的执行会补跑。店长说「每天 9 点…」时 agent 可用 `create_schedule` 直接创建（需店长确认）；定时执行中的推送若需确认会进入工作台待办，可用于「店长确认后再发」。
+- **记录数据集**（`records/<name>`）：试吃报损、临期处置回填、巡检等逐条登记的数据。agent 用 `define_record` 提出结构（需店长确认），页面用 `qdd.records.add/update/remove/list` 读写，网关按结构校验并只允许页面访问代码中用到的记录；修改按 id 覆盖、作废写墓碑，`store__aggregate` 可直接汇总（计数指标 `records`）。
 - **连接器**（`workspace/connectors.json`）：目前开放飞书（群机器人 webhook / 企业自建应用），安装前先验证，凭据加密存储；agent 用 `send_notification` 推送（按连接器权限需店长确认）。
 
 ### 浏览器

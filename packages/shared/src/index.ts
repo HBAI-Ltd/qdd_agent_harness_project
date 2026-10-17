@@ -67,7 +67,8 @@ export interface HarnessConfig {
 
 // ---------------------------------------------------------------- 数据集
 
-export type DatasetKind = "fact" | "dimension" | "event_log";
+/** record：门店在页面上登记的记录（报损、处置回填等），由页面经网关写入。 */
+export type DatasetKind = "fact" | "dimension" | "event_log" | "record";
 
 export interface DatasetSource {
   /** 数据工具名（内置或 mcp__*） */
@@ -93,6 +94,8 @@ export interface DatasetManifest {
   /** event_log 的回放规则 */
   replay?: { key: string; delta: string; op?: string; value: string };
   source?: DatasetSource;
+  /** record 数据集的字段说明（店长确认过的登记表结构） */
+  record?: RecordSchema;
   /** 内容版本：每次写入变化 */
   version: string;
   /** 已包含数据的最新时间 */
@@ -100,6 +103,29 @@ export interface DatasetManifest {
   rowCount: number;
   updatedAt: string;
 }
+
+// ---------------------------------------------------------------- 记录数据集
+
+export interface RecordField {
+  name: string;
+  label: string;
+  type: "string" | "number" | "boolean";
+  required?: boolean;
+  /** 候选值（只允许这些值） */
+  options?: string[];
+}
+
+/**
+ * 记录数据集 records/<name>：每行自带 id（主键）、time（YYYY-MM-DD HH:mm，按天分区）、page（登记来源页面）。
+ * 更新按 id 覆盖，作废写入墓碑，聚合与读取都只看最新且未作废的行。
+ */
+export interface RecordSchema {
+  label: string;
+  fields: RecordField[];
+}
+
+/** POST /api/records/:name 的单行或多行；PUT /api/records/:name/:id 为部分字段。 */
+export type RecordInput = Record<string, string | number | boolean | null>;
 
 // ---------------------------------------------------------------- 能力缺口
 
@@ -156,6 +182,8 @@ export interface PageEntry {
   tools: string[];
   /** 页面运行时可调用 agent（qdd.ask）。 */
   useAgent: boolean;
+  /** 页面运行时可读写的记录数据集（qdd.records，名称不含 records/ 前缀） */
+  records?: string[];
   /** 页面使用的指标 */
   metrics: string[];
   /** 发布时依赖的数据集版本 */
@@ -341,6 +369,8 @@ export interface Schedule {
   slug?: string;
   /** 执行完成后推送到的连接器（如飞书） */
   notify?: { connectorId: string };
+  /** 由 agent 在会话中创建（经店长授权）时记录来源会话 */
+  createdBy?: { kind: "agent"; sessionId: string };
   enabled: boolean;
   nextRunAt: string | null;
   lastRun: ScheduleRun | null;

@@ -271,6 +271,19 @@ export const SDK_JS = `(() => {
     async set(value) { return (await call("/api/state/" + encodeURIComponent(page.slug), "PUT", value)).state; },
   };
 
+  /** 门店登记（记录数据集）：按 id 修改、作废；页面只能读写代码中出现的记录名。 */
+  const records = Object.freeze({
+    async add(name, row) { return (await call("/api/records/" + encodeURIComponent(name), "POST", row)).rows; },
+    async update(name, id, patch) { return (await call("/api/records/" + encodeURIComponent(name) + "/" + encodeURIComponent(id), "PUT", patch)).row; },
+    async remove(name, id) { await call("/api/records/" + encodeURIComponent(name) + "/" + encodeURIComponent(id), "DELETE"); },
+    async list(name, query) {
+      const q = new URLSearchParams();
+      for (const k of ["from", "to", "limit"]) if (query && query[k] !== undefined) q.set(k, String(query[k]));
+      const qs = q.toString();
+      return call("/api/records/" + encodeURIComponent(name) + (qs ? "?" + qs : ""), "GET");
+    },
+  });
+
   function format(value, metric) {
     return c.format(value, typeof metric === "string" ? metrics[metric] : metric);
   }
@@ -278,7 +291,7 @@ export const SDK_JS = `(() => {
   window.qdd = Object.freeze({
     page: page.slug,
     metrics,
-    tool, ask, snapshot, data, watch, state, format, host,
+    tool, ask, snapshot, data, watch, state, records, format, host,
     agg: (rows, spec) => c.aggregate(rows, spec, metrics),
     timeline: c.timeline,
     segments: c.segments,

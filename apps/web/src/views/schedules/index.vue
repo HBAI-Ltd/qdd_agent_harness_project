@@ -23,7 +23,7 @@ import { listSkills } from "@/api/skills";
 import { canNotify, createSchedule, deleteSchedule, listSchedules, runSchedule, scheduleCron, scheduleInput, updateSchedule, type ScheduleFrequency } from "@/api/schedules";
 
 const { workspace, navigation, notify } = useWorkspaceContext();
-const { connected, gatewayUrl, token, pages, sessions } = workspace;
+const { connected, gatewayUrl, token, pages } = workspace;
 const { data, loading, error, refresh } = useGatewayResource("schedules", listSchedules);
 const skillsResource = useGatewayResource("skills", listSkills);
 const connectorsResource = useGatewayResource("connectors", listConnectors);
@@ -72,8 +72,8 @@ function formatTime(value: string | null | undefined): string {
   return Number.isNaN(date.getTime()) ? "时间待同步" : date.toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 function currentRun(schedule: Schedule) {
-  return sessions.value.find((session) => session.origin?.scheduleId === schedule.id
-    && (session.status === "running" || session.status === "waiting"));
+  const run = schedule.currentRun;
+  return run && (run.status === "running" || run.status === "waiting") ? run : undefined;
 }
 function cronFields(cron: string): { frequency: ScheduleFrequency; time: string; weekday: string; rawCron: string } {
   const fields = cron.trim().split(/\s+/);
@@ -215,7 +215,7 @@ async function remove(schedule: Schedule) {
   });
 }
 function runSessionId(schedule: Schedule): string | undefined {
-  return currentRun(schedule)?.id ?? launchedSessions.value[schedule.id] ?? schedule.lastRun?.sessionId ?? undefined;
+  return currentRun(schedule)?.sessionId ?? launchedSessions.value[schedule.id] ?? schedule.lastRun?.sessionId ?? undefined;
 }
 </script>
 

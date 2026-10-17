@@ -3,6 +3,7 @@ import path from "node:path";
 import type { PageEntry } from "@qdd/shared";
 import type { HarnessPaths } from "../config.js";
 import { ensureStoreData } from "../datasource/store.js";
+import { migrateScheduleSessions } from "../session-storage.js";
 import { DEFAULT_STYLE_PROMPT, THEME_CSS } from "./assets.js";
 
 async function writeIfMissing(file: string, content: string): Promise<void> {
@@ -25,6 +26,8 @@ export async function ensureWorkspace(paths: HarnessPaths): Promise<void> {
   await mkdir(path.join(paths.site, "assets"), { recursive: true });
   await mkdir(paths.pages, { recursive: true });
   await mkdir(paths.sessions, { recursive: true });
+  await mkdir(paths.scheduleSessions, { recursive: true });
+  await migrateScheduleSessions(paths);
   await writeIfMissing(paths.style, DEFAULT_STYLE_PROMPT);
   await writeIfMissing(path.join(paths.site, "assets", "theme.css"), THEME_CSS);
   await ensureStoreData(paths.store);

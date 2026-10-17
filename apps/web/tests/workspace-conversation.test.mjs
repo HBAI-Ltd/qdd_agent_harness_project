@@ -38,7 +38,7 @@ function session(id, updatedAt = "2026-10-17T01:00:00Z", slug = null) {
   return { id, title: id, summary: "", slug, status: "idle", createdAt: updatedAt, updatedAt, events: [] };
 }
 
-function backend(initial = [], pages = []) {
+function backend(initial = [], pages = [], chatOptions) {
   const sessions = new Map(initial.map((value) => [value.id, value]));
   const calls = [];
   const globalStreams = new Set();
@@ -76,6 +76,7 @@ function backend(initial = [], pages = []) {
       }), { headers: { "Content-Type": "text/event-stream" } });
     }
     if (url.pathname === "/api/sessions") return json([...sessions.values()].map(metadata));
+    if (url.pathname === "/api/chat/options" && chatOptions) return json(chatOptions);
     if (url.pathname === "/api/pages") return json(pages);
     const pin = /^\/api\/pages\/([^/]+)\/pin$/.exec(url.pathname);
     if (pin) {
@@ -87,6 +88,9 @@ function backend(initial = [], pages = []) {
     }
     if (url.pathname === "/api/wishes") {
       const value = session(`created-${++nextId}`);
+      const body = JSON.parse(init.body);
+      if (body.model) value.model = body.model;
+      if (body.reasoningEffort) value.reasoningEffort = body.reasoningEffort;
       sessions.set(value.id, value);
       return json(metadata(value), 201);
     }
@@ -94,6 +98,11 @@ function backend(initial = [], pages = []) {
     if (match) {
       const value = sessions.get(decodeURIComponent(match[1]));
       assert.ok(value, "Requests must keep using an existing conversation");
+      if (match[2] === "/messages") {
+        const body = JSON.parse(init.body);
+        if (body.model) value.model = body.model;
+        if (body.reasoningEffort) value.reasoningEffort = body.reasoningEffort;
+      }
       if (match[2]) return json(match[2] === "/messages" || match[2] === "/cancel" ? metadata(value) : { ok: true }, 202);
       if (detailFailures.delete(value.id)) return json({ error: "Temporary detail failure" }, 500);
       return json(value);
@@ -187,6 +196,61 @@ async function until(predicate, message) {
   }
   assert.fail(message);
 }
+
+const configuredChatOptions = {
+  models: [
+    { id: "plain", label: "普通模型", reasoningEfforts: ["default", "none"], defaultReasoningEffort: "default" },
+    { id: "reasoning", label: "思考模型", reasoningEfforts: ["default", "low", "high"], defaultReasoningEffort: "low" },
+  ], defaults: { model: "plain", reasoningEffort: "default" },
+};
+
+test("model and effort selections are sent on creation and continuation and retained in session metadata", async () => {
+  const service = backend([], [], configuredChatOptions);
+  const { workspace } = mountWorkspace();
+  await ready(workspace);
+  await until(() => workspace.chatSelection.value, "Chat options must be loaded");
+  workspace.selectChatModel("reasoning");
+  assert.equal(workspace.chatSelection.value.reasoningEffort, "low");
+  workspace.selectReasoningEffort("high");
+  assert.equal(await workspace.sendMessage("分析附件", { skillId: "inventory" }), true);
+  assert.deepEqual(JSON.parse(service.calls.find((call) => call.path === "/api/wishes").body), {
+    wish: "分析附件", skillId: "inventory", model: "reasoning", reasoningEffort: "high",
+  });
+  assert.equal(workspace.activeSession.value.model, "reasoning");
+  assert.equal(workspace.activeSession.value.reasoningEffort, "high");
+  workspace.selectChatModel("plain");
+  workspace.selectReasoningEffort("high");
+  assert.equal(workspace.chatSelection.value.reasoningEffort, "default", "Unsupported effort cannot be selected");
+  workspace.selectReasoningEffort("none");
+  assert.equal(await workspace.sendMessage("继续"), true);
+  const followup = service.calls.find((call) => call.path.endsWith("/messages"));
+  assert.deepEqual(JSON.parse(followup.body), { text: "继续", model: "plain", reasoningEffort: "none" });
+});
+
+test("existing conversations restore their model choices while stale option loads cannot cross credentials", async () => {
+  const service = backend([
+    { ...session("one"), model: "reasoning", reasoningEffort: "high" },
+    { ...session("two"), model: "plain", reasoningEffort: "none" },
+  ], [], configuredChatOptions);
+  const { workspace } = mountWorkspace();
+  await ready(workspace);
+  await until(() => workspace.chatSelection.value, "Chat options must be loaded");
+  await workspace.selectSession("one");
+  await setImmediate();
+  assert.deepEqual(workspace.chatSelection.value, { model: "reasoning", reasoningEffort: "high" });
+  await workspace.selectSession("two");
+  await setImmediate();
+  assert.deepEqual(workspace.chatSelection.value, { model: "plain", reasoningEffort: "none" });
+  const pending = service.hold("/api/chat/options");
+  const loading = workspace.loadChatOptions();
+  workspace.token.value = "replacement-token";
+  assert.equal(workspace.chatOptions.value, undefined);
+  assert.equal(workspace.chatSelection.value, undefined);
+  pending.release();
+  await loading;
+  assert.equal(workspace.chatOptions.value, undefined);
+  assert.equal(workspace.chatSelection.value, undefined);
+});
 
 afterEach(() => {
   for (const app of mounted.splice(0)) app.unmount();
@@ -686,17 +750,48 @@ test("new global resource events refresh their own resource and overview without
   assert.equal(workspace.error.value, "");
 });
 
-test("schedule origin survives detail loading and live metadata updates", async () => {
+test("scheduled executions stay outside history while detail, live events and approvals remain available", async () => {
+  const original = { ...session("scheduled", "2026-10-17T03:00:00Z"), origin: { kind: "schedule", scheduleId: "daily", scheduleName: "经营日报" } };
+  const service = backend([original, session("ordinary")]);
+  const { workspace } = mountWorkspace();
+  await ready(workspace);
+  assert.deepEqual(workspace.sessions.value.map((entry) => entry.id), ["ordinary"]);
+  assert.equal(workspace.activeSessionId.value, "ordinary");
+
+  await workspace.selectSession(original.id);
+  assert.deepEqual(workspace.activeSession.value.origin, original.origin);
+  assert.deepEqual(workspace.sessions.value.map((entry) => entry.id), ["ordinary"]);
+  service.publish({ ...original, status: "waiting", updatedAt: "2026-10-17T04:00:00Z" });
+  await setImmediate();
+  assert.deepEqual(workspace.sessions.value.map((entry) => entry.id), ["ordinary"]);
+  assert.deepEqual(workspace.activeSession.value.origin, original.origin);
+  assert.equal(workspace.activeSession.value.status, "waiting");
+  assert.equal(workspace.gatewayChanges.value.overview, 1);
+
+  service.emitSession(original.id, { type: "approval_required", requestId: "schedule-approval", tool: "send_notification", source: "feishu", args: { text: "经营日报" }, at: "2026-10-17T04:01:00Z" });
+  await until(() => workspace.activeSession.value.events.some((event) => event.requestId === "schedule-approval"), "Scheduled execution must keep receiving its events");
+  assert.equal(await workspace.resolveApproval("schedule-approval", true), true);
+  assert.ok(service.calls.some((call) => call.path === "/api/sessions/scheduled/approvals/schedule-approval"));
+  assert.deepEqual(workspace.sessions.value.map((entry) => entry.id), ["ordinary"]);
+
+  await workspace.loadWorkspace();
+  assert.equal(workspace.activeSessionId.value, original.id);
+  assert.deepEqual(workspace.sessions.value.map((entry) => entry.id), ["ordinary"]);
+});
+
+test("scheduled metadata from an older gateway never becomes a default conversation", async () => {
   const original = { ...session("scheduled"), origin: { kind: "schedule", scheduleId: "daily", scheduleName: "经营日报" } };
   const service = backend([original]);
   const { workspace } = mountWorkspace();
   await ready(workspace);
-  assert.deepEqual(workspace.sessions.value[0].origin, original.origin);
-  service.publish({ ...original, status: "waiting", updatedAt: "2026-10-17T04:00:00Z" });
+  assert.deepEqual(workspace.sessions.value, []);
+  assert.equal(workspace.activeSessionId.value, null);
+
+  service.publish({ ...original, status: "running", updatedAt: "2026-10-17T04:00:00Z" });
   await setImmediate();
-  assert.deepEqual(workspace.sessions.value[0].origin, original.origin);
-  assert.deepEqual(workspace.activeSession.value.origin, original.origin);
-  assert.equal(workspace.gatewayChanges.value.overview, 1);
+  assert.deepEqual(workspace.sessions.value, []);
+  assert.equal(workspace.activeSessionId.value, null);
+  assert.equal(service.streamCount(original.id), 0);
 });
 
 test("refreshing while the first wish is pending preserves its draft, request, and submission lock", async () => {

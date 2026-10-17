@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -215,7 +215,9 @@ describe("飞书连接器压力负载", () => {
     };
     while ((await done()) < N && performance.now() - t < 15_000) await new Promise((r) => setTimeout(r, 50));
     const ms = performance.now() - t;
-    const runs = (await (await api("/api/sessions")).json()) as { origin?: { scheduleId: string } }[];
+    assert.deepEqual(await (await api("/api/sessions")).json(), [], "定时任务执行不进入普通对话列表");
+    const names = (await readdir(loaded.paths.scheduleSessions)).filter((name) => name.endsWith(".meta.json"));
+    const runs = await Promise.all(names.map((name) => gateway.hub.meta(name.slice(0, -".meta.json".length))));
     const perSchedule = ids.map((id) => runs.filter((r) => r.origin?.scheduleId === id).length);
     const sent = ids.map((_, i) => (feishu.delivered.get(`/open-apis/bot/v2/hook/sched-${i}`) ?? []).filter((x) => x.startsWith("【巡检")).length);
     console.log(`  [5] ${N} 个到期任务：全部完成并推送 ${await done()} 个，耗时 ${ms.toFixed(0)}ms；每任务会话数 ${[...new Set(perSchedule)].join("/")}，推送数 ${[...new Set(sent)].join("/")}`);

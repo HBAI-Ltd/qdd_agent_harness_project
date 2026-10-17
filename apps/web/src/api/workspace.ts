@@ -2,6 +2,8 @@ import type {
   AnswerBody,
   ApprovalBody,
   ClarifyAnswers,
+  ChatOptions,
+  ChatSelection,
   CreateWishBody,
   GatewayEvent,
   PageView,
@@ -83,8 +85,12 @@ export function createWish(base: string, token: string, body: CreateWishBody, si
   return json(base, token, "/api/wishes", { method: "POST", body: JSON.stringify(body), signal: signal ?? null });
 }
 
-export function sendMessage(base: string, token: string, id: string, text: string, signal?: AbortSignal): Promise<SessionMeta> {
-  const body: SendMessageBody = { text };
+export function getChatOptions(base: string, token: string, signal?: AbortSignal): Promise<ChatOptions> {
+  return json(base, token, "/api/chat/options", { signal: signal ?? null });
+}
+
+export function sendMessage(base: string, token: string, id: string, text: string, signal?: AbortSignal, options: Partial<ChatSelection> = {}): Promise<SessionMeta> {
+  const body: SendMessageBody = { text, ...options };
   return json(base, token, `/api/sessions/${encodeURIComponent(id)}/messages`, { method: "POST", body: JSON.stringify(body), signal: signal ?? null });
 }
 

@@ -1,5 +1,5 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import type { ClarifyAnswers, CreateWishBody, PageView, SessionDetail, SessionEvent, SessionMeta } from "@qdd/shared";
+import type { ChatOptions, ChatSelection, ClarifyAnswers, CreateWishBody, PageView, ReasoningEffort, SessionDetail, SessionEvent, SessionMeta } from "@qdd/shared";
 import * as api from "@/api/workspace";
 import { createConversationSelection } from "./conversationSelection";
 import type { LiveBlocks } from "@/utils/chatTimeline";
@@ -51,6 +51,10 @@ export function useWorkspace() {
   const loadingSession = ref(false);
   const error = ref("");
   const connected = ref(false);
+  const chatOptions = ref<ChatOptions>();
+  const chatOptionsLoading = ref(false);
+  const chatOptionsError = ref("");
+  const chatSelection = ref<ChatSelection>();
   const gatewayChanges = ref({ overview: 0, pending: 0, skills: 0, schedules: 0, connectors: 0 });
   const selectionVersion = ref(0);
   const pendingSends = ref(new Set<string>());
@@ -85,6 +89,7 @@ export function useWorkspace() {
   let detailController: AbortController | undefined;
   let globalController: AbortController | undefined;
   let sessionController: AbortController | undefined;
+  let chatOptionsController: AbortController | undefined;
   const sendControllers = new Set<AbortController>();
   const sendRequests = new Map<string, { stopRequested: boolean; sessionId: string | undefined; signal: AbortSignal }>();
   const actionControllers = new Set<AbortController>();
@@ -92,6 +97,55 @@ export function useWorkspace() {
   let conversationStorage: Storage | undefined;
   try { conversationStorage = localStorage; } catch { /* Retain the choice in memory if storage is unavailable. */ }
   const conversationSelection = createConversationSelection(conversationStorage);
+
+  function restoreChatSelection() {
+    const options = chatOptions.value;
+    if (!options) return;
+    const modelId = activeSession.value?.model ?? options.defaults.model;
+    const model = options.models.find((entry) => entry.id === modelId)
+      ?? options.models.find((entry) => entry.id === options.defaults.model);
+    if (!model) return;
+    const effort = activeSession.value?.reasoningEffort
+      ?? (model.id === options.defaults.model ? options.defaults.reasoningEffort : model.defaultReasoningEffort);
+    chatSelection.value = {
+      model: model.id,
+      reasoningEffort: model.reasoningEfforts.includes(effort) ? effort : model.defaultReasoningEffort,
+    };
+  }
+
+  watch([activeSessionId, () => activeSession.value?.model, () => activeSession.value?.reasoningEffort], restoreChatSelection);
+
+  function selectChatModel(id: string) {
+    const model = chatOptions.value?.models.find((entry) => entry.id === id);
+    if (model) chatSelection.value = { model: model.id, reasoningEffort: model.defaultReasoningEffort };
+  }
+
+  function selectReasoningEffort(effort: ReasoningEffort) {
+    const selection = chatSelection.value;
+    const model = chatOptions.value?.models.find((entry) => entry.id === selection?.model);
+    if (selection && model?.reasoningEfforts.includes(effort)) chatSelection.value = { ...selection, reasoningEffort: effort };
+  }
+
+  async function loadChatOptions() {
+    chatOptionsController?.abort();
+    if (!connected.value || disposed) return;
+    const controller = new AbortController();
+    chatOptionsController = controller;
+    chatOptionsLoading.value = true;
+    chatOptionsError.value = "";
+    try {
+      const options = await api.getChatOptions(gatewayUrl.value, token.value, controller.signal);
+      if (controller.signal.aborted || disposed || chatOptionsController !== controller) return;
+      chatOptions.value = options;
+      const selected = chatSelection.value;
+      const model = options.models.find((entry) => entry.id === selected?.model);
+      if (!selected || !model?.reasoningEfforts.includes(selected.reasoningEffort)) restoreChatSelection();
+    } catch (cause) {
+      if (!controller.signal.aborted && !disposed && chatOptionsController === controller) chatOptionsError.value = errorMessage(cause);
+    } finally {
+      if (chatOptionsController === controller) chatOptionsLoading.value = false;
+    }
+  }
 
   function normalizedGateway(base = gatewayUrl.value): string | null {
     try { return api.normalizeGatewayUrl(base); } catch { return null; }
@@ -132,6 +186,7 @@ export function useWorkspace() {
     detailController?.abort();
     globalController?.abort();
     sessionController?.abort();
+    chatOptionsController?.abort();
     for (const controller of sendControllers) controller.abort();
     sendControllers.clear();
     for (const controller of actionControllers) controller.abort();
@@ -139,6 +194,7 @@ export function useWorkspace() {
     reconnectingStreams.clear();
     resetLiveBlocks();
     connected.value = false;
+    chatOptionsLoading.value = false;
     loadingSessions.value = false;
     loadingPages.value = false;
     loadingSession.value = false;
@@ -159,6 +215,9 @@ export function useWorkspace() {
     pages.value = [];
     activeSessionId.value = null;
     activeSession.value = undefined;
+    chatOptions.value = undefined;
+    chatSelection.value = undefined;
+    chatOptionsError.value = "";
     activePageSlug.value = null;
     if (!sameGateway) revisionPageSlug.value = null;
     error.value = "";
@@ -167,23 +226,31 @@ export function useWorkspace() {
   }, { flush: "sync" });
 
   function applyMeta(meta: SessionMeta) {
-    const current = sessions.value.find((session) => session.id === meta.id);
+    const current = sessions.value.find((session) => session.id === meta.id)
+      ?? (activeSession.value?.id === meta.id ? activeSession.value : undefined);
     if (current && current.updatedAt > meta.updatedAt) return;
     if (meta.status === "idle" || meta.status === "error") pendingStops.value.delete(meta.id);
     const entry: SessionMeta = {
       id: meta.id, title: meta.title, summary: meta.summary, slug: meta.slug,
       status: meta.status, createdAt: meta.createdAt, updatedAt: meta.updatedAt,
       ...(meta.origin ? { origin: meta.origin } : {}),
+      ...(meta.model ? { model: meta.model } : {}),
+      ...(meta.reasoningEffort ? { reasoningEffort: meta.reasoningEffort } : {}),
     };
     const index = sessions.value.findIndex((session) => session.id === meta.id);
-    if (index === -1) sessions.value.push(entry);
-    else sessions.value[index] = entry;
-    sessions.value.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    if (meta.origin?.kind === "schedule") {
+      if (index !== -1) sessions.value.splice(index, 1);
+    } else {
+      if (index === -1) sessions.value.push(entry);
+      else sessions.value[index] = entry;
+      sessions.value.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    }
     if (activeSession.value?.id === meta.id) activeSession.value = { ...activeSession.value, ...entry };
   }
 
   function applyResponseMeta(meta: SessionMeta) {
-    const current = sessions.value.find((session) => session.id === meta.id);
+    const current = sessions.value.find((session) => session.id === meta.id)
+      ?? (activeSession.value?.id === meta.id ? activeSession.value : undefined);
     // Live events may advance the session before a mutation response arrives.
     if (!current || meta.updatedAt >= current.updatedAt) applyMeta(meta);
   }
@@ -283,8 +350,8 @@ export function useWorkspace() {
     try {
       const result = await api.listSessions(gatewayUrl.value, token.value, signal);
       if (signal.aborted || disposed || version !== connectionVersion) return;
-      sessions.value = result;
-      const selected = result.find((session) => session.id === activeSessionId.value);
+      sessions.value = result.filter((session) => session.origin?.kind !== "schedule");
+      const selected = sessions.value.find((session) => session.id === activeSessionId.value);
       if (selected) applyMeta(selected);
     } catch (cause) {
       if (!signal.aborted && !disposed && version === connectionVersion) error.value = errorMessage(cause);
@@ -467,7 +534,7 @@ export function useWorkspace() {
       ]);
       if (controller.signal.aborted || disposed) return;
       const previous = sessions.value;
-      sessions.value = sessionList.map((entry) => {
+      sessions.value = sessionList.filter((entry) => entry.origin?.kind !== "schedule").map((entry) => {
         const current = previous.find((session) => session.id === entry.id);
         return current && current.updatedAt > entry.updatedAt ? current : entry;
       });
@@ -481,11 +548,16 @@ export function useWorkspace() {
         if (activePageSlug.value && !pageList.some((page) => page.slug === activePageSlug.value)) activePageSlug.value = null;
       }
       connected.value = true;
+      void loadChatOptions();
       if (!refreshing) {
         globalController = new AbortController();
         void followGateway(globalController);
       }
       if (pendingSend.value) return;
+      if (activeSession.value?.origin?.kind === "schedule") {
+        await selectSession(activeSession.value.id);
+        return;
+      }
       const selected = sessions.value.find((session) => session.id === activeSessionId.value);
       if (selected) applyResponseMeta(selected);
       const id = conversationSelection.choose(gatewayUrl.value, sessions.value, activeSessionId.value);
@@ -508,7 +580,7 @@ export function useWorkspace() {
     }
   }
 
-  async function sendMessage(content: string, options: Pick<CreateWishBody, "skillId"> = {}): Promise<boolean> {
+  async function sendMessage(content: string, options: Pick<CreateWishBody, "skillId" | "model" | "reasoningEffort"> = {}): Promise<boolean> {
     const text = content.trim();
     if (!text || sending.value || loadingSession.value || disposed) return false;
     if (!connected.value) {
@@ -542,12 +614,16 @@ export function useWorkspace() {
       cursor: activeSession.value?.events.length ?? 0,
     });
     error.value = "";
+    const selectionOptions = { ...chatSelection.value, ...options };
     try {
       const meta = id
-        ? await api.sendMessage(gatewayUrl.value, token.value, id, text, controller.signal)
+        ? await api.sendMessage(gatewayUrl.value, token.value, id, text, controller.signal, {
+          ...(selectionOptions.model ? { model: selectionOptions.model } : {}),
+          ...(selectionOptions.reasoningEffort ? { reasoningEffort: selectionOptions.reasoningEffort } : {}),
+        })
         : await api.createWish(gatewayUrl.value, token.value, {
           wish: text, ...(revisionPageSlug.value ? { slug: revisionPageSlug.value } : {}),
-          ...(options.skillId ? { skillId: options.skillId } : {}),
+          ...selectionOptions,
         }, controller.signal);
       if (controller.signal.aborted || disposed) return false;
       // Keep the identity even if the following detail/SSE request fails.
@@ -697,6 +773,7 @@ export function useWorkspace() {
     sessions, activeSessionId, activeSession, liveBlocks, pages, activePageSlug, activePage, revisionPageSlug,
     preferences, token, gatewayUrl, loadingSessions, loadingPages, loadingSession,
     error, connected, gatewayChanges, sending, responding, pendingMessage, canCancel, cancelling, eventActionBusy, pendingPagePins,
+    chatOptions, chatOptionsLoading, chatOptionsError, chatSelection, selectChatModel, selectReasoningEffort, loadChatOptions,
     loadWorkspace, openConversation, selectSession, startNewConversation,
     sendMessage, answerQuestions, resolveApproval, cancel, revisePage, setPagePinned,
   };

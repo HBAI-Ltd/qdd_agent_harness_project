@@ -2,6 +2,7 @@ import { inject, type InjectionKey, type Ref } from "vue";
 import type { useWorkspace } from "./useWorkspace";
 import type { Overview, PendingItem, Skill } from "@qdd/shared";
 import type { GatewayResource } from "./useGatewayResource";
+import type { useConversationDrafts } from "./useConversationDrafts";
 
 export type WorkspaceView = "overview" | "chat" | "tasks" | "settings" | "schedules" | "skills" | "connectors";
 
@@ -10,6 +11,9 @@ export interface WorkspaceContext {
   overview: GatewayResource<Overview>;
   pending: GatewayResource<PendingItem[]>;
   draft: Ref<string>;
+  attachments: ReturnType<typeof useConversationDrafts>["attachments"];
+  convertingAttachments: Ref<boolean>;
+  addAttachments: ReturnType<typeof useConversationDrafts>["addAttachments"];
   submitMessage: () => Promise<boolean>;
   notify: (message: string) => void;
   navigation: {

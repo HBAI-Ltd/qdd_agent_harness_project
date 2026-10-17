@@ -30,7 +30,12 @@ const controlsUrl = "data:text/javascript," + encodeURIComponent(`
       return () => h("textarea", { ...attrs, value: props.modelValue, onInput: (event) => emit("update:modelValue", event.target.value) });
     },
   };
+  export const ElSelect = {
+    props: ["modelValue", "disabled"], emits: ["update:modelValue"],
+    setup: (props, { attrs, slots, emit }) => () => h("select", { ...attrs, value: props.modelValue, disabled: props.disabled, onChange: (event) => emit("update:modelValue", event.target.value) }, slots.default?.()),
+  };
 `);
+const optionUrl = "data:text/javascript," + encodeURIComponent('import { h } from "vue"; export default { props: ["value", "label"], setup: (props) => () => h("option", { value: props.value }, props.label) };');
 const childUrl = "data:text/javascript," + encodeURIComponent('import { h } from "vue"; export default { setup: () => () => h("span") };');
 const markdownUrl = new URL("../src/utils/markdown.ts", import.meta.url).href;
 const timelineUrl = new URL("../src/utils/chatTimeline.ts", import.meta.url).href;
@@ -55,6 +60,8 @@ registerHooks({
       if (specifier === "@/composables/workspaceContext") return { url: contextUrl, shortCircuit: true };
       if (specifier === "@/utils/markdown") return { url: markdownUrl, shortCircuit: true };
       if (specifier === "@/utils/chatTimeline") return { url: timelineUrl, shortCircuit: true };
+      if (specifier === "@/utils/attachmentMarkdown") return { url: new URL("../src/utils/attachmentMarkdown.ts", import.meta.url).href, shortCircuit: true };
+      if (specifier === "@/components/StringSelectOption") return { url: optionUrl, shortCircuit: true };
       if (specifier === "@/components/SessionBrowser.vue") return { url: browserUrl, shortCircuit: true };
       if (specifier === "@/components/MarkdownContent.vue") return { url: markdownComponentUrl, shortCircuit: true };
       if (specifier.startsWith("@/components/")) return { url: childUrl, shortCircuit: true };
@@ -93,7 +100,7 @@ function remove(node) {
 
 async function mount(initialSession, sendResult = async () => true) {
   const root = { children: [] };
-  const calls = { submit: [], cancel: 0 };
+  const calls = { submit: [], selections: [], notifications: [], cancel: 0 };
   const workspace = {
     activeSession: ref(initialSession),
     activeSessionId: ref(initialSession?.id ?? null),
@@ -108,15 +115,28 @@ async function mount(initialSession, sendResult = async () => true) {
     canCancel: ref(false),
     cancelling: ref(false),
     eventActionBusy: ref(false),
+    chatOptions: ref({ models: [
+      { id: "model-a", label: "模型 A", reasoningEfforts: ["default", "none", "low", "high"], defaultReasoningEffort: "default" },
+      { id: "model-b", label: "模型 B", reasoningEfforts: ["default", "medium", "high"], defaultReasoningEffort: "medium" },
+    ], defaults: { model: "model-a", reasoningEffort: "default" } }),
+    chatOptionsLoading: ref(false), chatOptionsError: ref(""),
+    chatSelection: ref({ model: "model-a", reasoningEffort: "default" }),
+    selectChatModel(id) {
+      const model = workspace.chatOptions.value.models.find((entry) => entry.id === id);
+      workspace.chatSelection.value = { model: id, reasoningEffort: model.defaultReasoningEffort };
+    },
+    selectReasoningEffort(reasoningEffort) { workspace.chatSelection.value = { ...workspace.chatSelection.value, reasoningEffort }; },
+    loadChatOptions() {},
     answerQuestions() {},
     resolveApproval() {},
     async cancel() { calls.cancel++; workspace.cancelling.value = true; },
   };
   const scope = effectScope();
-  const { draft, submitMessage } = scope.run(() => useConversationDrafts(
+  const { draft, attachments, convertingAttachments, addAttachments, submitMessage } = scope.run(() => useConversationDrafts(
     ref("http://127.0.0.1:3000"), workspace.activeSessionId,
     async (text) => {
       calls.submit.push(text);
+      calls.selections.push({ ...workspace.chatSelection.value });
       workspace.pendingMessage.value = user(text);
       workspace.responding.value = true;
       workspace.canCancel.value = true;
@@ -134,8 +154,9 @@ async function mount(initialSession, sendResult = async () => true) {
   setContext({
     workspace,
     draft,
+    attachments, convertingAttachments, addAttachments,
     submitMessage,
-    notify() {},
+    notify(message) { calls.notifications.push(message); },
     navigation: { openPage() {}, openView() {} },
   });
   const renderer = createRenderer({
@@ -147,7 +168,9 @@ async function mount(initialSession, sendResult = async () => true) {
       parent.children.splice(index === -1 ? parent.children.length : index, 0, node);
     },
     remove,
-    createElement: (tag) => ({ tag, props: {}, children: [], parent: null, scrollTop: 0, scrollHeight: 300, clientHeight: 300 }),
+    createElement: (tag) => ({ tag, props: {}, children: [], parent: null, scrollTop: 0, scrollHeight: 300, clientHeight: 300,
+      getBoundingClientRect() { return { top: this.props.class === "chat-browser-preview" ? 40 : 0 }; },
+    }),
     createText: (text) => ({ text, children: [], parent: null }),
     createComment: (text) => ({ comment: text, children: [], parent: null }),
     setText: (node, text) => { node.text = text; },
@@ -159,7 +182,7 @@ async function mount(initialSession, sendResult = async () => true) {
   app.mount(root);
   mounted.push({ app, scope });
   await nextTick();
-  return { root, workspace, draft, calls };
+  return { root, workspace, draft, attachments, convertingAttachments, addAttachments, calls };
 }
 
 function findAll(root, predicate) {
@@ -173,6 +196,80 @@ const messages = (root) => findAll(root, hasClass("chat-message-text")).map(text
 const input = (root) => findAll(root, (node) => node.tag === "textarea")[0];
 const form = (root) => findAll(root, (node) => node.tag === "form")[0];
 const submit = (root) => form(root).props.onSubmit({ preventDefault() {} });
+
+test("attachment picker converts multiple files, allows attachment-only sends, and clears on submit", async () => {
+  const { root, attachments, calls } = await mount(undefined);
+  const picker = findAll(root, (node) => node.tag === "input" && node.props.type === "file")[0];
+  assert.equal(picker.props.multiple, "");
+  const target = { files: [new File(["# 库存\n\n120 件"], "库存.md"), new File(["sku,qty\nA,120"], "库存.csv")], value: "selection" };
+  picker.props.onChange({ target });
+  assert.equal(target.value, "");
+  await setImmediate();
+  await nextTick();
+  assert.equal(attachments.value.length, 2);
+  assert.equal(findAll(root, hasClass("chat-attachment")).length, 2);
+  assert.equal(button(root, "发送消息").props.disabled, false);
+  await submit(root);
+  assert.equal(calls.submit.length, 1);
+  assert.ok(calls.submit[0].includes("库存\\.md"));
+  assert.match(calls.submit[0], /120 件/);
+  assert.match(calls.submit[0], /\| sku \| qty \|/);
+  assert.equal(attachments.value.length, 0);
+});
+
+test("removing an attachment prevents it from entering the message and failed sends restore remaining files", async () => {
+  const { root, draft, attachments, calls } = await mount(undefined, async () => false);
+  attachments.value = [
+    { id: "a", name: "a.md", size: 8, markdown: "Keep this" },
+    { id: "b", name: "b.md", size: 8, markdown: "Remove this" },
+  ];
+  draft.value = "总结附件";
+  await nextTick();
+  button(root, "移除附件 b.md").props.onClick();
+  await nextTick();
+  await submit(root);
+  await nextTick();
+  assert.match(calls.submit[0], /Keep this/);
+  assert.doesNotMatch(calls.submit[0], /Remove this/);
+  assert.equal(draft.value, "总结附件");
+  assert.deepEqual(attachments.value.map((entry) => entry.name), ["a.md"]);
+});
+
+test("conversion blocks Enter and submit, invalid files report errors, and dropped files use the same path", async () => {
+  const { root, draft, convertingAttachments, addAttachments, attachments, calls } = await mount(undefined);
+  let finish;
+  const conversion = addAttachments(() => new Promise((resolve) => { finish = resolve; }));
+  draft.value = "等待附件";
+  await nextTick();
+  assert.equal(convertingAttachments.value, true);
+  assert.equal(button(root, "发送消息").props.disabled, true);
+  await submit(root);
+  assert.equal(calls.submit.length, 0);
+  finish([]);
+  await conversion;
+  await nextTick();
+  form(root).props.onDrop({ preventDefault() {}, dataTransfer: { files: [new File(["binary"], "photo.png"), new File(["ok"], "ok.txt")] } });
+  await setImmediate();
+  await nextTick();
+  assert.deepEqual(attachments.value.map((entry) => entry.name), ["ok.txt"]);
+  assert.equal(calls.notifications.length, 1);
+});
+
+test("model selection resets effort, only supported levels render, and the submission snapshots the choice", async () => {
+  const { root, workspace, draft, calls } = await mount(undefined);
+  const select = findAll(root, (node) => node.tag === "select" && node.props["aria-label"] === "模型")[0];
+  select.props.onChange({ target: { value: "model-b" } });
+  await nextTick();
+  const levels = findAll(root, (node) => node.tag === "button" && node.props["aria-pressed"] !== undefined);
+  assert.deepEqual(levels.map(textContent), ["默认", "中", "高"]);
+  assert.equal(levels[1].props["aria-pressed"], true);
+  levels[2].props.onClick();
+  draft.value = "分析";
+  await nextTick();
+  await submit(root);
+  assert.deepEqual(calls.selections, [{ model: "model-b", reasoningEffort: "high" }]);
+  assert.equal(workspace.chatSelection.value.reasoningEffort, "high");
+});
 const processes = (root) => findAll(root, (node) => node.tag === "details" && hasClass("chat-process")(node));
 const summary = (node) => node.children.find((child) => child.tag === "summary");
 const assistantMain = (assistant) => findAll(assistant, hasClass("chat-message-main"))[0];
@@ -240,6 +337,58 @@ test("conversation switching hides the old viewer and automatically restores the
   workspace.activeSession.value = undefined;
   workspace.activeSessionId.value = null;
   assert.equal(await browserPanel(root), undefined);
+});
+
+test("the browser preview is embedded in its assistant reply and state updates keep the same viewer", async () => {
+  const { root, workspace } = await mount(session("running", [user("打开网页"), say("正在打开。"), browserEvent(), say("网页已打开。界面会实时更新。") ]));
+  const panel = await browserPanel(root);
+  const assistant = findAll(root, hasClass("chat-message-assistant"))[0];
+  assert.ok(panel);
+  assert.ok(findAll(assistant, hasClass("session-browser")).includes(panel));
+  assert.ok(findAll(findAll(root, hasClass("chat-messages-scroll"))[0], hasClass("session-browser")).includes(panel));
+  const firstRow = processes(root)[0];
+  const update = browserEvent();
+  update.browser.url = "https://example.com/details";
+  workspace.activeSession.value.events.push(update, browserEvent());
+  await nextTick();
+  assert.equal(await browserPanel(root), panel);
+  assert.equal(processes(root)[0], firstRow);
+  assert.equal(processes(root).filter((node) => node.props["data-kind"] === "browser").length, 1);
+  assert.equal(findAll(root, hasClass("session-browser")).length, 1);
+  assert.equal(firstRow.parent.children.indexOf(firstRow) + 1, firstRow.parent.children.indexOf(panel.parent));
+});
+
+test("only the most recent browser turn owns a preview and closed snapshots cannot reopen it", async () => {
+  const { root, workspace } = await mount(session("idle", [user("打开网页"), browserEvent(), say("已打开。"), user("继续浏览"), browserEvent(), say("完成。") ]));
+  const panel = await browserPanel(root);
+  const replies = findAll(root, hasClass("chat-message-assistant"));
+  assert.equal(findAll(replies[0], hasClass("session-browser")).length, 0);
+  assert.equal(findAll(replies[1], hasClass("session-browser"))[0], panel);
+  assert.equal(findAll(root, hasClass("session-browser")).length, 1);
+  workspace.activeSession.value.events.push(browserEvent("browser-1", "closed"), browserEvent("browser-1"));
+  assert.equal(await browserPanel(root), undefined);
+  assert.equal(findAll(root, (node) => node.tag === "button" && /查看(实时画面|浏览器)/.test(textContent(node))).length, 0);
+});
+
+test("an automatically mounted browser keeps the latest reply visible and does not move a history reader", async () => {
+  const history = await mount(session("idle", [user("打开网页"), browserEvent(), say("已打开。"), user("总结一下"), say("这是最新回复。") ]));
+  await browserPanel(history.root);
+  const historyList = findAll(history.root, hasClass("chat-messages-scroll"))[0];
+  assert.equal(historyList.scrollTop, historyList.scrollHeight);
+
+  const live = await mount(session("running", [user("打开网页"), say("正在准备。") ]));
+  const list = findAll(live.root, hasClass("chat-messages-scroll"))[0];
+  list.scrollHeight = 1200;
+  list.clientHeight = 300;
+  list.scrollTop = 120;
+  live.workspace.activeSession.value.events.push(browserEvent());
+  await browserPanel(live.root);
+  assert.equal(list.scrollTop, 120);
+  button(live.root, "关闭实时浏览器画面").props.onClick();
+  await nextTick();
+  findAll(live.root, (node) => node.tag === "button" && textContent(node) === "查看浏览器")[0].props.onClick();
+  await browserPanel(live.root);
+  assert.ok(list.scrollTop > 120, "An explicit reopen should reveal the browser card");
 });
 
 test("closed browser events hide the live viewer and do not offer an obsolete connection", async () => {

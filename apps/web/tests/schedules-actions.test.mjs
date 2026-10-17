@@ -200,7 +200,7 @@ test("agent-created schedules link to their creation conversation separately fro
   assert.doesNotMatch(textContent(root), /助手经确认创建/);
 });
 
-test("immediate run uses its returned session before the global session list catches up", async () => {
+test("execution links and waiting state use schedule runtime data independently of conversation history", async () => {
   const { root, workspace, resources, calls } = await mount({ schedules: [schedule({ slug: "daily-page" })] });
   await click(root, "立即运行");
   assert.equal(calls.run[0].id, "daily");
@@ -209,13 +209,17 @@ test("immediate run uses its returned session before the global session list cat
   assert.deepEqual(calls.sessions, ["launched-session"]);
   await click(root, "打开关联页面");
   assert.deepEqual(calls.pages, ["daily-page"]);
-  workspace.sessions.value = [{ id: "active-session", status: "waiting", origin: { scheduleId: "daily" } }];
+  resources.schedules.data.value = [schedule({ currentRun: { sessionId: "active-session", status: "running" } })];
+  await nextTick();
+  assert.match(textContent(root), /正在执行/);
+  assert.equal(button(root, "立即运行").props.disabled, true);
+  resources.schedules.data.value = [schedule({ currentRun: { sessionId: "active-session", status: "waiting" } })];
   await nextTick();
   assert.match(textContent(root), /等待确认/);
   assert.equal(button(root, "立即运行").props.disabled, true);
   await click(root, "查看执行对话");
   assert.equal(calls.sessions.at(-1), "active-session");
-  workspace.sessions.value = [];
+  assert.deepEqual(workspace.sessions.value, []);
   resources.schedules.data.value = [schedule({ lastRun: { sessionId: "launched-session", at, status: "ok", message: "完成" } })];
   await nextTick();
   await click(root, "查看执行对话");

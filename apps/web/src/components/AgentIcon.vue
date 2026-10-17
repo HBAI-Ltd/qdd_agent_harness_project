@@ -3,6 +3,8 @@ withDefaults(defineProps<{ name: string; size?: number }>(), { size: 20 });
 
 const paths: Record<string, string> = {
   plus: "M12 5v14M5 12h14",
+  attachment: "m8 12 7-7a3 3 0 0 1 4 4L9 19a5 5 0 0 1-7-7L13 1M6 14l9-9",
+  file: "M14 2H4v20h16V8ZM14 2v6h6M8 13h8M8 17h5",
   refresh: "M20 7v5h-5M4 17v-5h5M6 6a8 8 0 0 1 13 2l1 4M18 18a8 8 0 0 1-13-2l-1-4",
   chat: "M21 11.5a8.5 8.5 0 0 1-8.5 8.5H4l-2 2V11.5A8.5 8.5 0 0 1 10.5 3h2a8.5 8.5 0 0 1 8.5 8.5Z M7 9h10M7 13h7",
   settings: "M9 3h6l.7 3 2.6 1.5 2.9-.9 3 5.2-2.2 2.1v3l2.2 2.1-3 5.2-2.9-.9-2.6 1.5-.7 3H9l-.7-3-2.6-1.5-2.9.9-3-5.2L2 13.9v-3L-.2 8.8l3-5.2 2.9.9L8.3 3Z",
@@ -14,6 +16,8 @@ const paths: Record<string, string> = {
   panel: "M3 4h18v16H3ZM9 4v16",
   spark: "m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5ZM20 2v4m-2-2h4",
   code: "m8 6-6 6 6 6m8-12 6 6-6 6m-3-14-2 16",
+  browser: "M3 4h18v16H3ZM3 9h18M6 6.5h.01M9 6.5h.01M12 6.5h.01",
+  expand: "M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5",
   tool: "m14 6 4 4 3-3a6 6 0 0 1-8 8l-6 6a2.1 2.1 0 0 1-3-3l6-6a6 6 0 0 1 8-8Z",
   thinking: "M9 18h6m-5 3h4M8 14a6 6 0 1 1 8 0c-1 1-1 2-1 4H9c0-2 0-3-1-4Z",
   pen: "m15 4 5 5M4 20l5-1L21 7l-5-5L4 14Z",

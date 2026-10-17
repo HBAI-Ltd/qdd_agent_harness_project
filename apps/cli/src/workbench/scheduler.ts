@@ -19,7 +19,7 @@ const RUN_TIMEOUT_MS = 6 * 3600_000;
  */
 export class Scheduler {
   private timer: NodeJS.Timeout | undefined;
-  private readonly active = new Set<string>();
+  private readonly active = new Map<string, string | undefined>();
   private queue: Promise<unknown> = Promise.resolve();
   private readonly listeners = new Set<() => void>();
 
@@ -47,12 +47,22 @@ export class Scheduler {
 
   /** 正在执行的任务 id */
   running(): string[] {
-    return [...this.active];
+    return [...this.active.keys()];
   }
 
   async list(): Promise<Schedule[]> {
+    return Promise.all((await this.readStored()).map(async (schedule) => {
+      const sessionId = this.active.get(schedule.id);
+      if (!sessionId) return schedule;
+      const meta = await this.hub.meta(sessionId).catch(() => undefined);
+      return meta ? { ...schedule, currentRun: { sessionId, status: meta.status } } : schedule;
+    }));
+  }
+
+  private async readStored(): Promise<Schedule[]> {
     try {
-      return (JSON.parse(await readFile(this.loaded.paths.schedules, "utf8")) as { schedules: Schedule[] }).schedules;
+      const { schedules } = JSON.parse(await readFile(this.loaded.paths.schedules, "utf8")) as { schedules: Schedule[] };
+      return schedules.map(({ currentRun: _currentRun, ...schedule }) => schedule);
     } catch {
       return [];
     }
@@ -146,7 +156,7 @@ export class Scheduler {
   }
 
   private async launch(s: Schedule): Promise<string> {
-    this.active.add(s.id);
+    this.active.set(s.id, undefined);
     let sessionId: string;
     try {
       const meta = await this.hub.create(s.prompt, {
@@ -156,6 +166,7 @@ export class Scheduler {
         origin: { kind: "schedule", scheduleId: s.id, scheduleName: s.name },
       });
       sessionId = meta.id;
+      this.active.set(s.id, sessionId);
     } catch (error) {
       this.active.delete(s.id);
       await this.record(s.id, { at: this.now().toISOString(), sessionId: null, status: "error", message: (error as Error).message });
@@ -212,7 +223,7 @@ export class Scheduler {
 
   private mutate<T>(fn: (all: Schedule[]) => T): Promise<T> {
     const run = this.queue.then(async () => {
-      const all = await this.list();
+      const all = await this.readStored();
       const out = fn(all);
       await writeAtomic(this.loaded.paths.schedules, JSON.stringify({ schedules: all }, null, 2));
       return out;

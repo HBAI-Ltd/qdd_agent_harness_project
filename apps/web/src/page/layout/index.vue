@@ -40,7 +40,7 @@ const sidebarCollapsed = ref(false);
 const mediaQuery = window.matchMedia("(max-width: 760px)");
 const isMobile = ref(mediaQuery.matches);
 const pendingSkillId = ref<string | null>(null);
-const { draft, submitMessage, beginSelection, startNewDraft, clear: clearDrafts } = useConversationDrafts(
+const { draft, attachments, convertingAttachments, addAttachments, submitMessage, beginSelection, startNewDraft, clear: clearDrafts } = useConversationDrafts(
   gatewayUrl, activeSessionId, (text) => workspace.sendMessage(text, pendingSkillId.value ? { skillId: pendingSkillId.value } : {}),
 );
 const overview = useGatewayResource("overview", getOverview, workspace);
@@ -145,7 +145,7 @@ function shortcut(event: KeyboardEvent) {
 }
 
 provide(WORKSPACE_CONTEXT, {
-  workspace, overview, pending, draft, submitMessage, notify,
+  workspace, overview, pending, draft, attachments, convertingAttachments, addAttachments, submitMessage, notify,
   navigation: { openConversation, openSession: selectConversation, newConversation, runSkill, openPage, openRecords, openView, editPage },
 });
 onMounted(() => {

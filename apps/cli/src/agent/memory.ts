@@ -25,7 +25,7 @@ export async function listSessionMetas(paths: HarnessPaths): Promise<SessionMeta
       }
     }),
   );
-  return metas.filter((m): m is SessionMeta => !!m).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  return metas.filter((m): m is SessionMeta => !!m && m.origin?.kind !== "schedule").sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 }
 
 function grams(text: string): Set<string> {

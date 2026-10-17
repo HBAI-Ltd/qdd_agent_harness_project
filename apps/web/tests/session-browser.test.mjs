@@ -7,7 +7,7 @@ import { compileScript, parse } from "@vue/compiler-sfc";
 import { createRenderer, h, nextTick, reactive } from "vue";
 
 const vueUrl = import.meta.resolve("vue");
-const controls = "data:text/javascript,export const ElAlert={},ElButton={},ElInput={},ElSwitch={},ElTag={}";
+const controls = "data:text/javascript,export const ElAlert={},ElButton={},ElDialog={},ElInput={},ElSwitch={},ElTag={}";
 const context = "data:text/javascript," + encodeURIComponent('import { ref } from "vue"; export function useWorkspaceContext() { return { workspace: { gatewayUrl: ref("https://gateway.example"), token: ref("test-token") } }; }');
 registerHooks({
   resolve(specifier, contextInfo, nextResolve) {
@@ -186,6 +186,23 @@ test("window blur releases manual input while the live browser keeps receiving f
   await fixture.settle();
   assert.ok(setup.state.frame.sequence > sequence);
   assert.equal(streams.length, 1);
+});
+
+test("enlarging and returning to the inline preview reuse the stream and release manual input", async (t) => {
+  const fixture = await mountBrowser(t);
+  const { setup, streams, inputs } = fixture;
+  const frame = setup.state.frame;
+  setup.expanded = true;
+  await nextTick();
+  setup.viewer.setManual(true);
+  assert.equal(setup.state.manual, true);
+  setup.expanded = false;
+  await nextTick();
+  assert.equal(setup.state.manual, false);
+  assert.equal(inputs.at(-1).type, "release");
+  assert.equal(streams.length, 1);
+  assert.equal(streams[0].signal.aborted, false);
+  assert.equal(setup.state.frame, frame);
 });
 
 test("a hidden browser pauses and resumes a fresh stream in read-only mode when visible", async (t) => {

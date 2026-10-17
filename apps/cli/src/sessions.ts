@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { appendFile, readdir, readFile } from "node:fs/promises";
 import path from "node:path";
-import type { ClarifyAnswers, ClarifyQuestion, JsonObject, PendingItem, SessionDetail, SessionEvent, SessionMeta } from "@qdd/shared";
+import type { ChatSelection, ClarifyAnswers, ClarifyQuestion, HarnessConfig, JsonObject, PendingItem, SessionDetail, SessionEvent, SessionMeta } from "@qdd/shared";
 import { runWish, WishError, type AgentEvent } from "./agent/agent.js";
+import { resolveChatSelection } from "./agent/chat-options.js";
 import type { ChatFn, ChatMessage } from "./agent/llm.js";
 import type { LoadedConfig } from "./config.js";
 import type { DataSources } from "./datasource/registry.js";
@@ -14,6 +15,7 @@ import { writeAtomic } from "./web/site.js";
  *   sessions/<id>.meta.json      会话元信息
  *   sessions/<id>.events.jsonl   事件流（给前端回放）
  *   sessions/<id>.messages.json  完整 LLM 对话（续聊用）
+ * 定时任务使用相同文件格式，独立保存到 schedule-sessions/。
  */
 const ID_RE = /^[0-9a-f-]{36}$/;
 const QUESTION_TIMEOUT_MS = 30 * 60_000;
@@ -23,7 +25,7 @@ export type NewEvent = Distribute<SessionEvent>;
 
 type PendingDetail = PendingItem extends infer T ? (T extends unknown ? Omit<T, "sessionTitle" | "origin"> : never) : never;
 
-export interface CreateOptions {
+export interface CreateOptions extends Partial<ChatSelection> {
   /** 在已有页面上修改 */
   slug?: string | undefined;
   origin?: SessionMeta["origin"];
@@ -34,6 +36,7 @@ export interface CreateOptions {
 }
 
 export class SessionHub {
+  private readonly directories = new Map<string, string>();
   private readonly running = new Map<string, AbortController>();
   /** 页面 → 正在修改它的会话，同一页面同时只允许一个会话修改 */
   private readonly editing = new Map<string, string>();
@@ -51,27 +54,41 @@ export class SessionHub {
   constructor(
     private readonly loaded: LoadedConfig,
     private readonly sources: DataSources,
-    private readonly chat: () => ChatFn,
+    private readonly chat: (llm: HarnessConfig["llm"]) => ChatFn,
     private readonly workbench?: Workbench,
   ) {}
 
   private file(id: string, kind: "meta.json" | "events.jsonl" | "messages.json") {
     if (!ID_RE.test(id)) throw new NotFound("会话不存在");
-    return path.join(this.loaded.paths.sessions, `${id}.${kind}`);
+    return path.join(this.directories.get(id) ?? this.loaded.paths.sessions, `${id}.${kind}`);
   }
 
   async list(): Promise<SessionMeta[]> {
     const names = (await readdir(this.loaded.paths.sessions)).filter((n) => n.endsWith(".meta.json"));
     const metas = await Promise.all(names.map((n) => this.meta(n.slice(0, -".meta.json".length)).catch(() => undefined)));
-    return metas.filter((m): m is SessionMeta => !!m).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    return metas.filter((m): m is SessionMeta => !!m && m.origin?.kind !== "schedule").sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   }
 
   async meta(id: string): Promise<SessionMeta> {
     try {
-      const meta = { summary: "", ...(JSON.parse(await readFile(this.file(id, "meta.json"), "utf8")) as Partial<SessionMeta>) } as SessionMeta;
-      // 进程重启后遗留的 running 状态视为中断
-      if (meta.status === "running" && !this.running.has(id)) meta.status = "error";
-      return meta;
+      if (!ID_RE.test(id)) throw new NotFound("会话不存在");
+      const known = this.directories.get(id);
+      const directories = known ? [known] : [this.loaded.paths.sessions, this.loaded.paths.scheduleSessions];
+      for (const directory of directories) {
+        let raw: string;
+        try {
+          raw = await readFile(path.join(directory, `${id}.meta.json`), "utf8");
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+          throw error;
+        }
+        const meta = { summary: "", ...(JSON.parse(raw) as Partial<SessionMeta>) } as SessionMeta;
+        this.directories.set(id, directory);
+        // 进程重启后遗留的 running 状态视为中断
+        if (meta.status === "running" && !this.running.has(id)) meta.status = "error";
+        return meta;
+      }
+      throw new NotFound("会话不存在");
     } catch (error) {
       if (error instanceof NotFound) throw error;
       throw new NotFound("会话不存在");
@@ -131,6 +148,7 @@ export class SessionHub {
   /** 发起许愿，返回会话 id；agent 在后台运行，进度通过事件推送。 */
   async create(wish: string, options: CreateOptions | string = {}): Promise<SessionMeta> {
     const opts: CreateOptions = typeof options === "string" ? { slug: options } : options;
+    const selection = resolveChatSelection(this.loaded.config.llm, opts);
     let skill: { id: string; name: string } | undefined;
     if (opts.skillId) {
       if (!this.workbench) throw new BadRequest("技能不可用");
@@ -145,6 +163,7 @@ export class SessionHub {
       summary: "",
       slug: opts.slug ?? null,
       status: "idle",
+      ...selection,
       ...(opts.origin ? { origin: opts.origin } : {}),
       createdAt: now,
       updatedAt: now,
@@ -161,10 +180,10 @@ export class SessionHub {
   }
 
   /** 许愿之后在同一会话里继续对话。 */
-  async send(id: string, text: string): Promise<SessionMeta> {
+  async send(id: string, text: string, selection: Partial<ChatSelection> = {}): Promise<SessionMeta> {
     const meta = await this.meta(id);
     if (this.running.has(id)) throw new Conflict("会话正在运行，请等待完成");
-    await this.start(meta, text);
+    await this.start(meta, text, undefined, selection);
     return this.meta(id);
   }
 
@@ -207,8 +226,9 @@ export class SessionHub {
     return this.meta(id);
   }
 
-  private async start(meta: SessionMeta, text: string, skillId?: string): Promise<void> {
-    const chat = this.chat(); // 缺少 API key 时在这里同步报错
+  private async start(meta: SessionMeta, text: string, skillId?: string, input: Partial<ChatSelection> = {}): Promise<void> {
+    const selection = resolveChatSelection(this.loaded.config.llm, input, meta);
+    const chat = this.chat({ ...this.loaded.config.llm, ...selection }); // 缺少 API key 时在这里同步报错
     if (meta.slug) {
       const holder = this.editing.get(meta.slug);
       if (holder && holder !== meta.id) throw new Conflict(`页面 ${meta.slug} 正在被会话 ${holder} 修改`);
@@ -216,6 +236,7 @@ export class SessionHub {
     }
     const controller = new AbortController();
     this.running.set(meta.id, controller);
+    Object.assign(meta, selection);
     await this.emit(meta.id, { type: "user", text });
     await this.setStatus(meta, "running");
     void this.run(meta, text, chat, controller, skillId);
@@ -343,6 +364,9 @@ export class SessionHub {
   }
 
   private saveMeta(meta: SessionMeta): Promise<void> {
+    if (!this.directories.has(meta.id)) {
+      this.directories.set(meta.id, meta.origin?.kind === "schedule" ? this.loaded.paths.scheduleSessions : this.loaded.paths.sessions);
+    }
     return writeAtomic(this.file(meta.id, "meta.json"), JSON.stringify(meta, null, 2));
   }
 

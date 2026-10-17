@@ -40,6 +40,7 @@ export function buildChatTimeline(events: readonly ChatEvent[], pending?: Extrac
   let assistant: AssistantEntry | undefined;
   let userIndex = -1;
   let tools = new Map<string, ChatActivity>();
+  let browsers = new Map<string, ChatActivity>();
   let blocks = new Map<string, { event: ChatThinkingEvent | Extract<MessageEvent, { type: "say" }>; done: boolean }>();
   let ranks = new Map<DisplayItem, [number, number]>();
   let replies = new Map<string, number>();
@@ -112,7 +113,7 @@ export function buildChatTimeline(events: readonly ChatEvent[], pending?: Extrac
       entries.push({ kind: "user", key: index, event });
       userIndex = index;
       assistant = undefined;
-      tools = new Map(); blocks = new Map(); ranks = new Map(); replies = new Map(); sequence = 0; terminal = undefined;
+      tools = new Map(); browsers = new Map(); blocks = new Map(); ranks = new Map(); replies = new Map(); sequence = 0; terminal = undefined;
       continue;
     }
     if (event.type === "status") {
@@ -145,7 +146,18 @@ export function buildChatTimeline(events: readonly ChatEvent[], pending?: Extrac
         rank(item, "blockId" in event ? event.blockId : undefined);
         if (tool.callId) tools.set(tool.callId, item);
       }
-    } else if (event.type === "skill" || event.type === "browser") {
+    } else if (event.type === "browser") {
+      const id = event.browser.browserSessionId;
+      const previous = browsers.get(id);
+      if (previous) {
+        if (previous.event.type === "browser" && previous.event.browser.status === "closed" && event.browser.status === "running") continue;
+        previous.event = event;
+      } else {
+        const item: ChatActivity = { kind: "activity", key: `browser:${id}`, event, progress: [] };
+        entry.parts.push(item);
+        browsers.set(id, item);
+      }
+    } else if (event.type === "skill") {
       const item: ChatActivity = { kind: "activity", key: index, event, progress: [] };
       entry.parts.push(item); rank(item);
     } else if (event.type === "say" || event.type === "warn" || event.type === "error" || event.type === "published" || event.type === "gaps") {

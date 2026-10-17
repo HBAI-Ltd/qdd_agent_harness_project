@@ -16,7 +16,7 @@ Aidol 创造营参赛项目——钱多多门店人工智能助手：店铺管�
 | 工作台前端 | `apps/web/` | 对话与提问授权、任务页面、技能、定时任务、连接器和工作台总览 |
 | 数据集 | `apps/cli/src/datasets/` | `DatasetStore` 接口 + JSONL 实现：按天分区的只追加日志、检查点、主键去重、跨进程锁、增量刷新 |
 | 计算引擎 | `packages/shared/src/compute.ts` | 零 SQL 声明式聚合 / 时间线回放 / 状态区间 / 关联；数据源侧与浏览器共用同一份代码 |
-| 会话 | `apps/cli/src/sessions.ts` | 文件存储（`workspace/sessions/`），终端与前端共享 |
+| 会话 | `apps/cli/src/sessions.ts` | 普通对话存于 `workspace/sessions/`，定时执行对话存于 `workspace/schedule-sessions/`；终端与前端共享 |
 | 手机投屏 App | `apps/android-screen/` | 安卓 MediaProjection 内网连续投屏，带系统授权与停止通知 |
 | 安卓设备 MCP | `apps/android-mcp/` | 连续接收手机画面，提供电脑鼠标键盘遥控和视觉 MCP；通过 Wi-Fi 或 USB 连接 ESP32，再由 BLE HID 控制安卓 |
 | 硬件桥接 | `apps/esp/` | AI Passport ESP32-C3 的蓝牙键鼠、实体停止、中文界面和板上 Wi-Fi 密码键盘 |
@@ -114,7 +114,7 @@ npm run qdd -- reply <会话id> "按周汇总"
 | `npm run build:android:screen` | 构建手机局域网投屏 APK（Android SDK + JDK 17） |
 | `start-android.cmd` | 启动连续投屏操作台与 MCP；ESP32 可通过 Wi-Fi 或 USB 连接电脑 |
 
-浏览器集成回归位于 `apps/cli/src/browser.test.ts`，使用本机 Chrome/Edge 与本地网页验证操作、授权和实时画面；没有本机浏览器时跳过。会话终态回归位于 `apps/cli/src/session-completion.test.ts`，验证状态持久化完成前保持运行锁。两者均通过 `npm test` 执行，使用 Node.js 内置测试器，测试文件命名为 `*.test.ts`。
+浏览器集成回归位于 `apps/cli/src/browser.test.ts`，使用本机 Chrome/Edge 与本地网页验证操作、授权和实时画面；没有本机浏览器时跳过。会话终态回归位于 `apps/cli/src/session-completion.test.ts`，验证状态持久化完成前保持运行锁。定时执行记录隔离回归位于 `apps/cli/src/schedule-sessions.test.ts`，验证独立存储、旧记录迁移与对话列表隔离。均通过 `npm test` 执行，使用 Node.js 内置测试器，测试文件命名为 `*.test.ts`。
 
 ## 目录结构
 
@@ -126,7 +126,7 @@ apps/android-screen/ 安卓内网投屏 App（MediaProjection）
 apps/android-mcp/    手机内网画面与 ESP32 BLE 键鼠 MCP（电脑运行）
 packages/shared/     共享类型（含前端 API 契约）
 docs/api.md          前端对接文档
-workspace/           运行时生成（已 gitignore）：style.md、metrics.json、datasets/、store.json 示例数据、site/、sessions/、state/、.gateway-token
+workspace/           运行时生成（已 gitignore）：style.md、metrics.json、datasets/、store.json 示例数据、site/、sessions/、schedule-sessions/、state/、.gateway-token
 ```
 
 AI Passport 环境配置与命令见 [apps/esp/README.zh_CN.md](apps/esp/README.zh_CN.md)。

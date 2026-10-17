@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import type { HarnessConfig } from "@qdd/shared";
+import { chatOptions } from "./agent/chat-options.js";
 
 export const CONFIG_FILE = "harness.config.json";
 
@@ -35,6 +36,7 @@ export interface HarnessPaths {
   site: string;
   pages: string;
   sessions: string;
+  scheduleSessions: string;
   datasets: string;
   metrics: string;
   state: string;
@@ -82,6 +84,7 @@ export async function loadConfig(root = process.cwd()): Promise<LoadedConfig> {
   if (env.DEEPSEEK_MODEL) config.llm.model = env.DEEPSEEK_MODEL;
   if (env.HOST) config.gateway.host = env.HOST;
   if (env.PORT) config.gateway.port = Number(env.PORT);
+  chatOptions(config.llm);
   if (!["confirm", "auto"].includes(config.browser.permission)) throw new Error("browser.permission 只能是 confirm 或 auto。");
   if (!(config.approvalTimeoutMin > 0)) throw new Error("approvalTimeoutMin 必须大于 0。");
   if (!Number.isInteger(config.gateway.port) || config.gateway.port < 0 || config.gateway.port > 65535) {
@@ -98,6 +101,7 @@ export async function loadConfig(root = process.cwd()): Promise<LoadedConfig> {
       site,
       pages: path.join(site, "pages"),
       sessions: path.join(workspace, "sessions"),
+      scheduleSessions: path.join(workspace, "schedule-sessions"),
       datasets: path.join(workspace, "datasets"),
       metrics: path.join(workspace, "metrics.json"),
       state: path.join(workspace, "state"),

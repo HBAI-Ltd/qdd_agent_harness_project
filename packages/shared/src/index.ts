@@ -39,6 +39,10 @@ export interface HarnessConfig {
     clarify: "required" | "auto" | "off";
     /** 思考模式：enabled 时请求 thinking 并以 reasoning_content 流式返回思考过程 */
     thinking: "enabled" | "disabled";
+    /** 可选的思考强度默认值；default 沿用 thinking 与服务商默认强度。 */
+    reasoningEffort?: ReasoningEffort;
+    /** 同一服务商提供给对话框的模型及各自支持的思考强度；默认模型始终可选。 */
+    models?: ChatModelConfig[];
   };
   /** 授权请求等待店长处理的时长（分钟），超时视为拒绝；工作台可集中处理。 */
   approvalTimeoutMin: number;
@@ -225,6 +229,9 @@ export interface SessionMeta {
   /** 会话产出的页面；首次发布前为 null。 */
   slug: string | null;
   status: SessionStatus;
+  /** 最近一轮使用的模型与思考强度；旧会话缺省时沿用网关配置。 */
+  model?: string;
+  reasoningEffort?: ReasoningEffort;
   /** 会话来源：缺省为店长发起；定时任务触发时记录任务 id。 */
   origin?: { kind: "schedule"; scheduleId: string; scheduleName: string };
   createdAt: string;
@@ -281,7 +288,35 @@ export interface SessionDetail extends SessionMeta {
 
 // ---------------------------------------------------------------- API
 
-export interface CreateWishBody {
+/** default 不传 reasoning_effort；none 关闭思考，其余值透传服务商。 */
+export type ReasoningEffort = "default" | "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
+
+export interface ChatSelection {
+  model: string;
+  reasoningEffort: ReasoningEffort;
+}
+
+export interface ChatModelConfig {
+  id: string;
+  label?: string;
+  reasoningEfforts?: ReasoningEffort[];
+  defaultReasoningEffort?: ReasoningEffort;
+}
+
+export interface ChatModelOption {
+  id: string;
+  label: string;
+  reasoningEfforts: ReasoningEffort[];
+  defaultReasoningEffort: ReasoningEffort;
+}
+
+/** GET /api/chat/options：仅返回安全的可选项，不包含服务商地址或密钥。 */
+export interface ChatOptions {
+  models: ChatModelOption[];
+  defaults: ChatSelection;
+}
+
+export interface CreateWishBody extends Partial<ChatSelection> {
   wish: string;
   /** 在已有页面上修改（新开会话）。 */
   slug?: string;
@@ -289,7 +324,7 @@ export interface CreateWishBody {
   skillId?: string;
 }
 
-export interface SendMessageBody {
+export interface SendMessageBody extends Partial<ChatSelection> {
   text: string;
 }
 
@@ -400,6 +435,8 @@ export interface Schedule {
   enabled: boolean;
   nextRunAt: string | null;
   lastRun: ScheduleRun | null;
+  /** 网关进程内的执行状态，仅接口返回，不写入 schedules.json。 */
+  currentRun?: { sessionId: string; status: SessionStatus };
   createdAt: string;
   updatedAt: string;
 }

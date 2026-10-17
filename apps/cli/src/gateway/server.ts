@@ -2,8 +2,9 @@ import { watch } from "node:fs";
 import { mkdir, readFile, stat } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import path from "node:path";
-import type { AnswerBody, AskBody, BrowserStreamEvent, CreateWishBody, GatewayEvent, JsonObject, Overview, PageView, RecordInput, SendMessageBody, ToolInfo } from "@qdd/shared";
+import type { AnswerBody, AskBody, BrowserStreamEvent, CreateWishBody, GatewayEvent, HarnessConfig, JsonObject, Overview, PageView, RecordInput, SendMessageBody, ToolInfo } from "@qdd/shared";
 import { runAsk } from "../agent/ask.js";
+import { chatOptions } from "../agent/chat-options.js";
 import type { ChatFn } from "../agent/llm.js";
 import type { LoadedConfig } from "../config.js";
 import type { DataSources } from "../datasource/registry.js";
@@ -51,7 +52,7 @@ export interface Gateway {
 export interface GatewayOptions {
   token: string;
   /** 延迟创建，缺少 API key 时只影响需要 agent 的接口。 */
-  chat: () => ChatFn;
+  chat: (llm: HarnessConfig["llm"]) => ChatFn;
   /** 缺省时按工作区创建（测试可注入假的飞书客户端） */
   workbench?: Workbench;
   /** 为 false 时不自动运行定时任务（测试用） */
@@ -77,7 +78,9 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
   const broadcast = (event: GatewayEvent) => {
     for (const c of globalClients) c.write(`data: ${JSON.stringify(event)}\n\n`);
   };
-  hub.onMeta((session) => broadcast({ type: "session_updated", session }));
+  hub.onMeta((session) => broadcast(session.origin?.kind === "schedule"
+    ? { type: "schedules_changed" }
+    : { type: "session_updated", session }));
   hub.onPending(() => broadcast({ type: "pending_changed" }));
   // 页面的 kind 由定时任务推导，任务变化时页面列表也需刷新
   scheduler.onChange(() => {
@@ -202,7 +205,7 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
       }
       const body = (await readJson(req)) as AskBody;
       if (typeof body?.question !== "string" || !body.question.trim()) throw new HttpError(400, "question 不能为空");
-      const chat = options.chat();
+      const chat = options.chat(config.llm);
       const stream = openSse(req, res);
       const controller = new AbortController();
       req.on("close", () => controller.abort());
@@ -333,6 +336,7 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
         return send(res, 200, "text/plain; charset=utf-8", await readStyle(paths));
       }
     }
+    if (p === "/api/chat/options" && m === "GET") return json(res, 200, chatOptions(config.llm));
     if (p === "/api/wishes" && m === "POST") {
       const body = (await readJson(req)) as CreateWishBody;
       if (typeof body?.wish !== "string" || !body.wish.trim()) throw new HttpError(400, "wish 不能为空");
@@ -340,7 +344,12 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
         throw new HttpError(404, `页面 ${body.slug} 不存在`);
       }
       if (body.skillId !== undefined && typeof body.skillId !== "string") throw new HttpError(400, "skillId 必须是字符串");
-      return json(res, 201, await hub.create(body.wish.trim(), { slug: body.slug, skillId: body.skillId }));
+      return json(res, 201, await hub.create(body.wish.trim(), {
+        slug: body.slug,
+        skillId: body.skillId,
+        ...(body.model !== undefined ? { model: body.model } : {}),
+        ...(body.reasoningEffort !== undefined ? { reasoningEffort: body.reasoningEffort } : {}),
+      }));
     }
 
     // ---------------------------------------------------------------- 工作台
@@ -504,7 +513,10 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
       if (sub === "/messages" && m === "POST") {
         const body = (await readJson(req)) as SendMessageBody;
         if (typeof body?.text !== "string" || !body.text.trim()) throw new HttpError(400, "text 不能为空");
-        return json(res, 202, await hub.send(id, body.text.trim()));
+        return json(res, 202, await hub.send(id, body.text.trim(), {
+          ...(body.model !== undefined ? { model: body.model } : {}),
+          ...(body.reasoningEffort !== undefined ? { reasoningEffort: body.reasoningEffort } : {}),
+        }));
       }
       if (sub === "/cancel" && m === "POST") {
         hub.cancel(id);

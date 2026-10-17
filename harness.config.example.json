@@ -1,6 +1,17 @@
 {
   "workspace": "workspace",
-  "llm": { "model": "deepseek-chat", "maxSteps": 40 },
+  "llm": {
+    "model": "deepseek-chat",
+    "maxSteps": 40,
+    "reasoningEffort": "default",
+    "models": [
+      {
+        "id": "deepseek-chat",
+        "label": "DeepSeek Chat",
+        "reasoningEfforts": ["default", "none", "low", "high", "max"]
+      }
+    ]
+  },
   "gateway": {
     "host": "127.0.0.1",
     "port": 3000,

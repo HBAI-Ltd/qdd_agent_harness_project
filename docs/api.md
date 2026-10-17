@@ -19,19 +19,68 @@ harness 不提供界面，前端通过本网关完成：许愿与会话、展示
 ## 许愿与会话
 
 ```http
-POST /api/wishes                     { "wish": "最近 30 天各品类毛利", "slug"?: "在已有页面上修改", "skillId"?: "技能名称或 id" }
+GET /api/chat/options                → ChatOptions（需网关 token）
+```
+
+对话框从该接口加载模型与思考强度，响应只包含展示与选择信息，不返回服务商地址、密钥或环境变量名：
+
+```json
+{
+  "models": [
+    {
+      "id": "deepseek-chat",
+      "label": "DeepSeek Chat",
+      "reasoningEfforts": ["default", "none", "low", "high", "max"],
+      "defaultReasoningEffort": "default"
+    }
+  ],
+  "defaults": { "model": "deepseek-chat", "reasoningEffort": "default" }
+}
+```
+
+```http
+POST /api/wishes                     { "wish": "最近 30 天各品类毛利", "slug"?: "在已有页面上修改", "skillId"?: "技能名称或 id", "model"?: "deepseek-chat", "reasoningEffort"?: "high" }
 → 201 SessionMeta                    agent 在后台运行
 ```
 
 ```http
-GET  /api/sessions                   → SessionMeta[]（按更新时间倒序）
+GET  /api/sessions                   → SessionMeta[]（仅普通对话，按更新时间倒序）
 GET  /api/sessions/:id               → SessionDetail（元信息 + 全部事件）
 GET  /api/sessions/:id/events        → SSE，先回放历史事件再推送实时事件；?since=N 跳过前 N 条
-POST /api/sessions/:id/messages      { "text": "把图表改成按周" } → 202 SessionMeta（运行中时 409）
+POST /api/sessions/:id/messages      { "text": "把图表改成按周", "model"?: "deepseek-chat", "reasoningEffort"?: "low" } → 202 SessionMeta（运行中时 409）
 POST /api/sessions/:id/approvals/:requestId   { "approved": true }
 POST /api/sessions/:id/questions/:requestId   { "answers": { "<问题id>": ["<候选项 label 或自填内容>"] } }
 POST /api/sessions/:id/cancel        → 202
 ```
+
+普通对话保存在 `workspace/sessions/`，定时任务执行对话（含立即运行）保存在 `workspace/schedule-sessions/`，均使用 `<id>.meta.json`、`<id>.events.jsonl`、`<id>.messages.json`。工作区初始化时会自动将旧目录中带 `origin.kind: "schedule"` 的记录迁入新目录。定时执行记录不进入 `/api/sessions` 列表、普通会话统计或全局 `session_updated` 推送；仍可通过执行结果中的 `sessionId` 查看详情、订阅事件并处理授权。
+
+每轮选择都会实际用于模型请求，并保存到 `SessionMeta.model` / `reasoningEffort`。续聊省略选择时沿用该会话上轮设置；仅切换模型时保留兼容的强度，不兼容则使用目标模型的默认强度。旧会话没有这些字段时沿用网关默认设置。未知模型或该模型不支持的强度返回 400，且不启动执行。
+
+模型来自 `harness.config.json` 的 `llm.models`，同一服务商与 API Key 共用；`llm.model` 指定的默认模型始终包含在列表中。可以按服务商实际支持的模型追加条目：
+
+```json
+{
+  "llm": {
+    "model": "deepseek-chat",
+    "reasoningEffort": "default",
+    "models": [
+      {
+        "id": "deepseek-chat",
+        "label": "DeepSeek Chat",
+        "reasoningEfforts": ["default", "none", "low", "high", "max"],
+        "defaultReasoningEffort": "default"
+      }
+    ]
+  }
+}
+```
+
+`default` 省略服务商 `reasoning_effort`，DeepSeek 仍沿用原有 `llm.thinking` 开关；`none` 关闭思考，其余强度透传 `reasoning_effort`。DeepSeek 官方接口未声明能力时提供 `default / none / low / high / max`，对应 [DeepSeek 思考模式文档](https://api-docs.deepseek.com/zh-cn/guides/thinking_mode/)；其他兼容服务默认仅提供 `default`，请在每个模型的 `reasoningEfforts` 中显式声明其支持的强度（包括关闭思考的 `none`）。可声明的值为 `default / none / minimal / low / medium / high / xhigh / max / ultra`；不能仅凭名称推断服务商支持某个档位。`defaultReasoningEffort` 必须包含在该模型的候选强度中。
+
+附件无需二进制上传接口：前端将附件正文转换为 Markdown，再和用户文字一起放入 `wish` 或 `text`；沿用现有请求体上限 1 MiB。
+
+模型选择的回归测试位于 `apps/cli/src/chat-options.test.ts`（与其他后端测试使用 `*.test.ts` 命名），执行 `npm test` 可同时验证网关校验、续聊继承、会话重载与实际服务商请求字段。
 
 `SessionEvent`（每条 SSE `data:` 一个 JSON）：
 
@@ -115,7 +164,7 @@ POST   /api/schedules/:id/run    立即执行一次 → 202 { "sessionId" }
 - `cron` 为 5 段（分 时 日 月 周），按网关时区；例：`0 8 * * *` 每天 8 点、`0 9 * * 1` 每周一 9 点、`0 */2 * * *` 每 2 小时。
 - 到点以**无人值守**方式发起会话（`SessionMeta.origin = { kind: "schedule", … }`）：不提问；写入类操作进入工作台待办等待授权。
 - 完成后把结论推送到 `notify` 连接器；配置推送目标即视为店长授权该任务的推送。执行结果记录在 `lastRun`（含推送结果）。
-- 网关停机期间错过的执行，启动后补跑一次。变化时推送 `schedules_changed`。
+- 网关停机期间错过的执行，启动后补跑一次。变化时推送 `schedules_changed`。任务列表与详情通过 `currentRun: { sessionId, status }` 返回当前执行状态（仅执行期间存在），前端无需从普通对话列表查找执行记录。
 - agent 也能在会话中用 `create_schedule` 创建任务：先以 `approval_required`（`tool: "create_schedule"`，参数含名称、cron、下次执行时间、任务描述、绑定页面、推送目标）请店长确认，确认后才写入。这类任务带 `createdBy: { kind: "agent", sessionId }`；定时执行的会话本身不能再创建任务。
 
 ## 连接器

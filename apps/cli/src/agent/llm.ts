@@ -1,4 +1,5 @@
 import type { HarnessConfig, JsonObject } from "@qdd/shared";
+import { isDeepSeek } from "./chat-options.js";
 
 export interface ToolCall {
   id: string;
@@ -51,9 +52,15 @@ export function replyParts(message: ChatMessage): ("thinking" | "text" | ToolCal
 export function createChat(llm: HarnessConfig["llm"]): ChatFn {
   const apiKey = process.env[llm.apiKeyEnv];
   if (!apiKey) {
-    throw new Error(`缺少环境变量 ${llm.apiKeyEnv}：请在 .env 中填写 DeepSeek API Key。`);
+    throw new Error(`缺少环境变量 ${llm.apiKeyEnv}：请在 .env 中填写模型服务的 API Key。`);
   }
   const endpoint = `${llm.baseUrl.replace(/\/+$/, "")}/chat/completions`;
+  const effort = llm.reasoningEffort ?? "default";
+  const thinking = effort === "none" ? "disabled" : effort === "default" ? llm.thinking : "enabled";
+  const reasoning = {
+    ...(isDeepSeek(llm) ? { thinking: { type: thinking } } : {}),
+    ...(effort !== "default" ? { reasoning_effort: effort } : {}),
+  };
 
   return async (messages, tools, signal, onDelta) => {
     for (let attempt = 0; ; attempt++) {
@@ -68,7 +75,7 @@ export function createChat(llm: HarnessConfig["llm"]): ChatFn {
           temperature: 0.2,
           max_tokens: llm.maxTokens,
           stream: true,
-          ...(llm.thinking === "enabled" ? { thinking: { type: "enabled" } } : {}),
+          ...reasoning,
         }),
         signal: signal ?? null,
       });

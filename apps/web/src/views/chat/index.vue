@@ -3,27 +3,39 @@ import { computed, defineAsyncComponent, nextTick, onMounted, ref, watch } from 
 import { ElButton } from "element-plus/es/components/button/index";
 import { ElCard } from "element-plus/es/components/card/index";
 import { ElInput } from "element-plus/es/components/input/index";
+import { ElSelect } from "element-plus/es/components/select/index";
 import type { InputInstance } from "element-plus";
-import type { SessionEvent } from "@qdd/shared";
+import type { ReasoningEffort, SessionEvent } from "@qdd/shared";
 import AgentIcon from "@/components/AgentIcon.vue";
 import MarkdownContent from "@/components/MarkdownContent.vue";
 import SessionActions from "@/components/SessionActions.vue";
+import StringSelectOption from "@/components/StringSelectOption";
 import { useWorkspaceContext } from "@/composables/workspaceContext";
 import { buildChatTimeline, toolStatus, toolTitle } from "@/utils/chatTimeline";
+import { ATTACHMENT_ACCEPT, MAX_ATTACHMENTS, composeMessage, fileToMarkdown } from "@/utils/attachmentMarkdown";
 
 const SessionBrowser = defineAsyncComponent(() => import("@/components/SessionBrowser.vue"));
 
-const { workspace, draft, submitMessage, notify, navigation } = useWorkspaceContext();
+const { workspace, draft, attachments, convertingAttachments, addAttachments, submitMessage, notify, navigation } = useWorkspaceContext();
 const {
   activeSession, activeSessionId, liveBlocks, revisionPageSlug, preferences, connected,
   loadingSession, sending, pendingMessage, responding, canCancel, cancelling,
   eventActionBusy, answerQuestions, resolveApproval, cancel,
+  chatOptions, chatOptionsLoading, chatOptionsError, chatSelection, selectChatModel, selectReasoningEffort, loadChatOptions,
 } = workspace;
 const { openPage, openView } = navigation;
 const composer = ref<InputInstance>();
+const fileInput = ref<HTMLInputElement>();
 const messageList = ref<HTMLElement>();
+const browserPreview = ref<HTMLElement>();
 const browserOpen = ref(false);
-const latestBrowser = computed(() => activeSession.value?.events.findLast((event) => event.type === "browser")?.browser);
+let revealBrowserRequested = false;
+let followBrowserOnMount = false;
+const reasoningLabels: Record<ReasoningEffort, string> = {
+  default: "默认", none: "关闭", minimal: "极低", low: "低", medium: "中", high: "高", xhigh: "很高", max: "最高", ultra: "超高",
+};
+const selectedModel = computed(() => chatOptions.value?.models.find((model) => model.id === chatSelection.value?.model));
+const hasMessage = computed(() => Boolean(draft.value.trim() || attachments.value.length));
 const gapLabels = { missing_data: "缺少数据", estimate: "估测说明", unsupported: "暂不支持", permission: "需要授权" };
 const showConversation = computed(() => Boolean(activeSession.value || pendingMessage.value || responding.value || cancelling.value));
 const waitingForConfirmation = computed(() => activeSession.value?.status === "waiting" && !responding.value && !cancelling.value);
@@ -54,6 +66,17 @@ const timeline = computed(() => {
   }
   return entries;
 });
+// Only the most recent browser card owns a live stream; earlier turns keep their record.
+const browserActivity = computed(() => {
+  for (const entry of timeline.value.toReversed()) {
+    if (entry.kind !== "assistant") continue;
+    const part = entry.parts.findLast((part) => part.event.type === "browser");
+    if (part?.event.type === "browser") return { entryKey: entry.key, browser: part.event.browser };
+  }
+  return undefined;
+});
+const latestBrowser = computed(() => browserActivity.value?.browser);
+const browserEntryKey = computed(() => browserActivity.value?.entryKey);
 const suggestions = [
   { title: "经营看板", description: "查看销售与毛利，发现经营机会", prompt: "展示最近 30 天各品类销售额和毛利" },
   { title: "库存分析", description: "梳理库存变化，掌握门店状态", prompt: "帮我查看当前库存，并分析最近一周的变化" },
@@ -68,6 +91,22 @@ async function scrollToLatest() {
   await nextTick();
   if (messageList.value) messageList.value.scrollTop = messageList.value.scrollHeight;
 }
+function focusBrowserPreview(element: Element | null) {
+  if (!element?.getBoundingClientRect || !messageList.value?.getBoundingClientRect) return;
+  const list = messageList.value;
+  list.scrollTop += element.getBoundingClientRect().top - list.getBoundingClientRect().top - 16;
+}
+function toggleBrowser() {
+  browserOpen.value = !browserOpen.value;
+  revealBrowserRequested = browserOpen.value;
+  if (browserOpen.value) void nextTick(() => focusBrowserPreview(browserPreview.value ?? null));
+}
+function browserMounted() {
+  if (revealBrowserRequested) focusBrowserPreview(browserPreview.value ?? null);
+  else if (followBrowserOnMount) void scrollToLatest();
+  revealBrowserRequested = false;
+  followBrowserOnMount = false;
+}
 function handleEnter(event: Event | KeyboardEvent) {
   if (!("key" in event)) return;
   if (event.key === "Enter" && !event.shiftKey && !event.isComposing && preferences.value.enterToSend) {
@@ -76,8 +115,54 @@ function handleEnter(event: Event | KeyboardEvent) {
   }
 }
 async function sendMessage() {
-  if (sending.value || loadingSession.value || !connected.value || !draft.value.trim()) return;
-  await submitMessage();
+  if (sending.value || loadingSession.value || convertingAttachments.value || !connected.value || !hasMessage.value) return;
+  try { await submitMessage(); }
+  catch (cause) { notify(cause instanceof Error ? cause.message : "发送失败，请重试。"); }
+}
+async function attachFiles(files: File[]) {
+  if (!files.length || convertingAttachments.value) return;
+  const previous = [...attachments.value];
+  if (previous.length + files.length > MAX_ATTACHMENTS) {
+    notify(`每条消息最多添加 ${MAX_ATTACHMENTS} 个附件。`);
+    return;
+  }
+  await addAttachments(async () => {
+    const results = await Promise.allSettled(files.map(fileToMarkdown));
+    const converted = [];
+    for (const [index, result] of results.entries()) {
+      if (result.status === "fulfilled") converted.push(result.value);
+      else notify(`${files[index]?.name ?? "附件"}：${result.reason instanceof Error ? result.reason.message : "附件转换失败，请重试。"}`);
+    }
+    try {
+      composeMessage("", [...previous, ...converted]);
+      return converted;
+    } catch (cause) {
+      notify(cause instanceof Error ? cause.message : "附件内容过大，请减少附件。");
+      return [];
+    }
+  });
+}
+function handleFileChange(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const files = Array.from(input.files ?? []);
+  input.value = "";
+  void attachFiles(files);
+}
+function handleDrop(event: DragEvent) {
+  void attachFiles(Array.from(event.dataTransfer?.files ?? []));
+}
+function handlePaste(event: ClipboardEvent) {
+  const files = Array.from(event.clipboardData?.files ?? []);
+  if (files.length) {
+    event.preventDefault();
+    void attachFiles(files);
+  }
+}
+function removeAttachment(id: string) {
+  attachments.value = attachments.value.filter((attachment) => attachment.id !== id);
+}
+function attachmentSize(size: number): string {
+  return size >= 1024 * 1024 ? `${(size / (1024 * 1024)).toFixed(1)} MB` : `${Math.max(1, Math.ceil(size / 1024))} KB`;
 }
 function useSuggestion(prompt: string) {
   draft.value = prompt;
@@ -110,6 +195,9 @@ watch([
   () => latestBrowser.value?.browserSessionId,
   () => latestBrowser.value?.status,
 ], () => {
+  revealBrowserRequested = false;
+  const element = messageList.value;
+  followBrowserOnMount = !element || element.scrollHeight - element.scrollTop - element.clientHeight < 100;
   browserOpen.value = activeSession.value?.id === activeSessionId.value && latestBrowser.value?.status === "running";
 }, { immediate: true });
 watch([() => activeSession.value?.events.length, pendingMessage, activityLabel, () => Object.values(liveBlocks.value.blocks).reduce((length, block) => length + block.content.length, 0)], async () => {
@@ -214,7 +302,7 @@ onMounted(() => {
                     <template v-else-if="part.event.type === 'browser'">
                       <p class="chat-process-text">{{ part.event.browser.title || part.event.browser.url }}</p>
                       <p v-if="part.event.browser.title" class="chat-process-text">{{ part.event.browser.url }}</p>
-                      <ElButton v-if="part.event.browser.status === 'running' && latestBrowser?.status === 'running' && part.event.browser.browserSessionId === latestBrowser.browserSessionId" link type="primary" @click="browserOpen = !browserOpen">{{ browserOpen ? '收起画面' : '查看实时画面' }}</ElButton>
+                      <ElButton v-if="entry.key === browserEntryKey && part.event.browser.status === 'running' && latestBrowser?.status === 'running' && part.event.browser.browserSessionId === latestBrowser.browserSessionId" link type="primary" @click="toggleBrowser">{{ browserOpen ? '收起画面' : '查看实时画面' }}</ElButton>
                     </template>
                   </div>
                 </details>
@@ -232,7 +320,19 @@ onMounted(() => {
                     <ElButton v-if="part.event.type === 'published'" link type="primary" @click="openPage(part.event.page.slug)">查看页面<AgentIcon name="chevron" :size="13" /></ElButton>
                   </div>
                 </div>
-                </template>
+                <div
+                  v-if="part.event.type === 'browser' && entry.key === browserEntryKey && latestBrowser && activeSession && activeSession.id === activeSessionId && part.event.browser.browserSessionId === latestBrowser.browserSessionId"
+                  :ref="(element) => { browserPreview = element as HTMLElement; }"
+                  class="chat-browser-preview">
+                  <SessionBrowser
+                    v-if="browserOpen"
+                    :key="`${activeSession.id}:${latestBrowser.browserSessionId}`"
+                    :browser="latestBrowser"
+                    :session-id="activeSession.id"
+                    @vue:mounted="browserMounted"
+                    @close="browserOpen = false" />
+                </div>
+              </template>
               <div v-if="activityLabel && entry.key === timeline.at(-1)?.key" class="chat-activity" role="status" aria-live="polite" aria-atomic="true">
                 <div class="chat-activity-content">
                   <span v-if="responding || cancelling" class="chat-loading-dots" aria-hidden="true"><i></i><i></i><i></i></span>
@@ -254,12 +354,18 @@ onMounted(() => {
       </div>
     </div>
 
-    <SessionBrowser v-if="browserOpen && latestBrowser && activeSession" :key="`${activeSession.id}:${latestBrowser.browserSessionId}`" :browser="latestBrowser" :session-id="activeSession.id" @close="browserOpen = false" />
-
     <div class="chat-composer-area">
       <p v-if="!connected" class="chat-composer-note">先在 <ElButton link type="primary" @click="openView('settings')">设置</ElButton> 中填写网关地址和 token。</p>
       <p v-else-if="revisionPageSlug" class="chat-composer-note">正在修改页面：<ElButton link type="primary" @click="openPage(revisionPageSlug)">{{ revisionPageSlug }}</ElButton></p>
-      <form class="chat-composer" @submit.prevent="sendMessage">
+      <form class="chat-composer" @submit.prevent="sendMessage" @dragover.prevent @drop.prevent="handleDrop">
+        <div v-if="attachments.length || convertingAttachments" class="chat-attachments" aria-label="待发送附件">
+          <div v-for="attachment in attachments" :key="attachment.id" class="chat-attachment">
+            <AgentIcon name="file" :size="18" />
+            <div class="chat-attachment-info"><strong :title="attachment.name">{{ attachment.name }}</strong><span>{{ attachmentSize(attachment.size) }} · Markdown</span></div>
+            <button type="button" class="chat-attachment-remove" :aria-label="`移除附件 ${attachment.name}`" @click="removeAttachment(attachment.id)"><AgentIcon name="close" :size="14" /></button>
+          </div>
+          <span v-if="convertingAttachments" class="chat-attachment-progress" role="status">正在转为 Markdown…</span>
+        </div>
         <ElInput
           id="message-input"
           ref="composer"
@@ -270,8 +376,28 @@ onMounted(() => {
           resize="none"
           aria-label="向门店助手发送消息"
           :placeholder="waitingForConfirmation ? '请先完成问题或授权确认，也可以停止后继续发送' : responding ? '助手正在处理，你可以先编写下一条消息…' : '描述你的经营需求，或继续聊聊…'"
-          @keydown="handleEnter" />
-        <button
+          @keydown="handleEnter"
+          @paste="handlePaste" />
+        <div class="chat-composer-toolbar">
+          <details v-if="chatOptions && chatSelection && selectedModel" class="chat-model-picker">
+            <summary aria-label="选择模型和思考强度"><AgentIcon name="spark" :size="15" /><span class="chat-model-name">{{ selectedModel.label }}</span><span class="chat-model-effort">· {{ reasoningLabels[chatSelection.reasoningEffort] }}</span><AgentIcon name="down" :size="13" /></summary>
+            <div class="chat-model-panel">
+              <label for="chat-model-select">模型</label>
+              <ElSelect id="chat-model-select" :model-value="chatSelection.model" aria-label="模型" filterable :disabled="!connected || chatOptionsLoading" @update:model-value="selectChatModel">
+                <StringSelectOption v-for="model in chatOptions.models" :key="model.id" :value="model.id" :label="model.label" />
+              </ElSelect>
+              <fieldset class="chat-reasoning-options">
+                <legend>思考强度</legend>
+                <button v-for="effort in selectedModel.reasoningEfforts" :key="effort" type="button" :aria-pressed="chatSelection.reasoningEffort === effort" :disabled="!connected" @click="selectReasoningEffort(effort)">{{ reasoningLabels[effort] }}</button>
+              </fieldset>
+            </div>
+          </details>
+          <button v-else-if="chatOptionsError && connected" type="button" class="chat-model-retry" :title="chatOptionsError" @click="loadChatOptions">重新加载模型</button>
+          <span v-else class="chat-model-placeholder">{{ chatOptionsLoading ? "正在加载模型…" : "默认模型" }}</span>
+          <div class="chat-composer-tools">
+            <input ref="fileInput" class="chat-file-input" type="file" multiple :accept="ATTACHMENT_ACCEPT" aria-label="选择附件" @change="handleFileChange" />
+            <button type="button" class="chat-attach-button" aria-label="添加附件" title="添加附件，自动转为 Markdown（PDF、DOCX、文本、代码、CSV）" :disabled="convertingAttachments || attachments.length >= MAX_ATTACHMENTS" @click="fileInput?.click()"><AgentIcon name="attachment" :size="20" /></button>
+            <button
           v-if="canCancel || cancelling"
           class="chat-send chat-stop"
           type="button"
@@ -288,14 +414,16 @@ onMounted(() => {
           native-type="submit"
           aria-label="发送消息"
           title="发送消息"
-          :disabled="!connected || !draft.trim() || sending || loadingSession">
+          :disabled="!connected || !hasMessage || sending || loadingSession || convertingAttachments">
           <AgentIcon name="arrow" :size="20" />
         </ElButton>
+          </div>
+        </div>
       </form>
       <div class="chat-composer-footer">
         <div class="chat-conversation-actions">
           <ElButton v-if="activeSession?.slug" link type="primary" @click="openPage(activeSession.slug)">查看生成页面</ElButton>
-          <ElButton v-if="latestBrowser?.status === 'running'" link @click="browserOpen = !browserOpen">{{ browserOpen ? "收起浏览器" : "查看浏览器" }}</ElButton>
+          <ElButton v-if="latestBrowser?.status === 'running' && activeSession?.id === activeSessionId" link @click="toggleBrowser">{{ browserOpen ? "收起浏览器" : "查看浏览器" }}</ElButton>
         </div>
         <p class="chat-keyboard-hint">{{ composerHint }}</p>
       </div>
@@ -337,6 +465,7 @@ onMounted(() => {
 .chat-answer + .chat-answer { margin-top: 16px; }
 .chat-answer + .chat-process, .chat-process + .chat-answer { margin-top: 12px; }
 .chat-process + .chat-process { margin-top: 2px; }
+.chat-browser-preview:has(.session-browser) { margin: 8px 0 16px; }
 .chat-message-actions { display: flex; margin-top: 10px; }
 .chat-message-actions :deep(.el-button) { color: var(--qdd-muted); font-size: 12px; }
 .chat-message-actions :deep(.el-button--primary) { color: var(--qdd-primary); }
@@ -371,11 +500,36 @@ onMounted(() => {
 .chat-gaps strong { color: var(--qdd-warn); font-weight: 500; }
 .chat-gaps p { margin: 3px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .chat-composer-area { flex: 0 0 auto; width: min(100%, 960px); margin: 0 auto; padding: 16px 34px 20px; }
-.chat-composer { display: flex; align-items: flex-end; gap: 16px; min-height: 82px; padding: 17px 18px 17px 22px; border: 1px solid var(--qdd-border); border-radius: 14px; background: var(--qdd-surface); }
+.chat-composer { position: relative; display: flex; flex-direction: column; gap: 14px; min-height: 110px; padding: 17px 18px 12px 22px; border: 1px solid var(--qdd-border); border-radius: 14px; background: var(--qdd-surface); }
 .chat-composer:focus-within { border-color: var(--qdd-primary); }
-.chat-composer :deep(.el-textarea) { flex: 1; align-self: center; min-width: 0; }
+.chat-composer :deep(.el-textarea) { width: 100%; min-width: 0; }
 .chat-composer :deep(.el-textarea__inner) { padding: 0; box-shadow: none; border: 0; border-radius: 0; background: transparent; color: var(--qdd-text); font: 14px/1.8 var(--qdd-font); outline: none; }
 .chat-composer :deep(.el-textarea__inner:focus-visible) { outline: none; }
+.chat-composer-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; min-width: 0; }
+.chat-composer-tools { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+.chat-file-input { display: none; }
+.chat-attach-button, .chat-attachment-remove { display: grid; place-items: center; flex-shrink: 0; padding: 7px; border: 0; border-radius: 7px; background: transparent; color: var(--qdd-muted); cursor: pointer; }
+.chat-attach-button:hover, .chat-attachment-remove:hover { background: var(--qdd-hover); color: var(--qdd-text); }
+.chat-attach-button:disabled { opacity: .45; cursor: default; }
+.chat-attachments { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; width: 100%; max-height: 150px; overflow-y: auto; }
+.chat-attachment { display: flex; align-items: center; gap: 8px; max-width: min(100%, 270px); padding: 8px 7px 8px 10px; border: 1px solid var(--qdd-border); border-radius: 9px; color: var(--qdd-muted); background: var(--qdd-bg); }
+.chat-attachment > svg { flex-shrink: 0; }
+.chat-attachment-info { display: grid; gap: 3px; min-width: 0; }
+.chat-attachment-info strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--qdd-text); font-size: 12px; font-weight: 500; }
+.chat-attachment-info span, .chat-attachment-progress { color: var(--qdd-muted); font-size: 11px; }
+.chat-model-picker { min-width: 0; max-width: calc(100% - 100px); }
+.chat-model-picker > summary { display: flex; align-items: center; gap: 6px; padding: 7px 6px; border-radius: 6px; color: var(--qdd-muted); font-size: 12px; list-style: none; cursor: pointer; }
+.chat-model-picker > summary::-webkit-details-marker { display: none; }
+.chat-model-picker > summary:hover { background: var(--qdd-hover); color: var(--qdd-text); }
+.chat-model-picker > summary > svg, .chat-model-effort { flex-shrink: 0; }
+.chat-model-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-model-panel { position: absolute; z-index: 5; bottom: 62px; left: 16px; display: grid; gap: 10px; width: min(340px, calc(100% - 32px)); padding: 16px; border: 1px solid var(--qdd-border); border-radius: 12px; background: var(--qdd-surface); box-shadow: 0 8px 30px #0002; }
+.chat-model-panel > label, .chat-reasoning-options > legend { padding: 0; color: var(--qdd-text); font-size: 12px; }
+.chat-reasoning-options { display: flex; flex-wrap: wrap; gap: 4px; margin: 2px 0 0; padding: 10px 0 0; border: 0; }
+.chat-reasoning-options > button { flex: 1; min-width: 40px; padding: 7px 5px; border: 1px solid var(--qdd-border); border-radius: 6px; background: transparent; color: var(--qdd-muted); font: inherit; font-size: 12px; cursor: pointer; }
+.chat-reasoning-options > button[aria-pressed="true"] { border-color: var(--qdd-primary); color: var(--qdd-primary); background: var(--qdd-primary-soft); }
+.chat-model-placeholder, .chat-model-retry { padding: 0 6px; color: var(--qdd-muted); font: inherit; font-size: 12px; }
+.chat-model-retry { border: 0; background: transparent; cursor: pointer; }
 .chat-send { flex: 0 0 44px; width: 44px; height: 44px; padding: 0; border-radius: 10px; }
 .chat-stop { display: grid; place-items: center; border: 1px solid var(--qdd-primary); background: var(--qdd-primary); color: var(--qdd-surface); cursor: pointer; }
 .chat-stop:hover { opacity: .88; }

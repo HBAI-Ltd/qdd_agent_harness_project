@@ -180,6 +180,40 @@ test("skill and browser activity remain between the text blocks that surround th
   assert.deepEqual(assistant.parts.map(({ event }) => event.type), ["say", "skill", "say", "browser", "say", "tool", "say"]);
 });
 
+test("browser state updates share one stable card per turn without changing persisted events", () => {
+  const browser = (id: string, url: string, status: "running" | "closed" = "running"): SessionEvent => ({
+    type: "browser", at,
+    browser: { browserSessionId: id, tabId: "tab-1", url, title: url, canGoBack: false, canGoForward: false, status },
+  });
+  const events = deepFreeze<SessionEvent[]>([
+    user("打开网页"), browser("browser-1", "about:blank"), say("正在读取网页。"),
+    browser("browser-1", "https://example.com/"), browser("browser-1", "https://example.com/next"),
+    browser("browser-1", "https://example.com/next", "closed"), browser("browser-1", "about:blank"),
+    browser("browser-2", "https://example.org/"),
+    user("继续浏览"), browser("browser-2", "https://example.org/details"),
+  ]);
+  const snapshot = JSON.stringify(events);
+  const timeline = buildChatTimeline(events);
+  const first = timeline[1];
+  const second = timeline[3];
+  assert.equal(first?.kind, "assistant");
+  assert.equal(second?.kind, "assistant");
+  if (first?.kind !== "assistant" || second?.kind !== "assistant") return;
+  assert.deepEqual(first.parts.map(({ key, event }) => [key, event.type]), [["browser:browser-1", "browser"], [2, "say"], ["browser:browser-2", "browser"]]);
+  const closed = first.parts[0]!.event;
+  assert.equal(closed.type, "browser");
+  if (closed.type !== "browser") return;
+  assert.equal(closed.browser.status, "closed");
+  assert.equal(closed.browser.url, "https://example.com/next");
+  const next = second.parts[0]!.event;
+  assert.equal(next.type, "browser");
+  if (next.type !== "browser") return;
+  assert.equal(second.parts[0]!.key, "browser:browser-2");
+  assert.equal(next.browser.url, "https://example.org/details");
+  assert.equal(first.parts[2]!.event.type === "browser" && first.parts[2]!.event.browser.url, "https://example.org/");
+  assert.equal(JSON.stringify(events), snapshot);
+});
+
 test("warnings and errors remain after the answer that preceded them", () => {
   const assistant = buildChatTimeline([
     user("查询"),

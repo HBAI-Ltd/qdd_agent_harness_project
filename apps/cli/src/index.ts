@@ -151,7 +151,7 @@ async function main() {
   const { config, paths } = loaded;
   await ensureWorkspace(paths);
   await ensureMetrics(paths);
-  const chat = () => createChat(config.llm);
+  const chat = (llm = config.llm) => createChat(llm);
 
   switch (command) {
     case "init":

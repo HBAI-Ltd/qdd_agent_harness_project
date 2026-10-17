@@ -2,6 +2,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type { ClarifyAnswers, CreateWishBody, PageView, SessionDetail, SessionEvent, SessionMeta } from "@qdd/shared";
 import * as api from "@/api/workspace";
 import { createConversationSelection } from "./conversationSelection";
+import type { LiveBlocks } from "@/utils/chatTimeline";
 
 export type { PageView, SessionDetail, SessionEvent, SessionMeta } from "@qdd/shared";
 
@@ -36,6 +37,8 @@ export function useWorkspace() {
   const sessions = ref<SessionMeta[]>([]);
   const activeSessionId = ref<string | null>(null);
   const activeSession = ref<SessionDetail>();
+  /** 当前会话尚未完成的流式块 */
+  const liveBlocks = ref<{ sessionId: string | null; blocks: LiveBlocks }>({ sessionId: null, blocks: {} });
   const pages = ref<PageView[]>([]);
   const activePageSlug = ref<string | null>(null);
   const activePage = computed(() => pages.value.find((page) => page.slug === activePageSlug.value));
@@ -286,6 +289,14 @@ export function useWorkspace() {
   function receiveEvent(id: string, event: SessionEvent) {
     const session = activeSession.value;
     if (!session || session.id !== id) return;
+    if (liveBlocks.value.sessionId !== id) liveBlocks.value = { sessionId: id, blocks: {} };
+    if ((event.type === "text" || event.type === "thinking") && event.delta !== undefined) {
+      // 流式增量不落盘，不能进入 events，否则会打乱 since 续传偏移
+      const block = liveBlocks.value.blocks[event.blockId] ??= { type: event.type, content: "" };
+      block.content += event.delta;
+      return;
+    }
+    if ((event.type === "text" || event.type === "thinking") && event.done) delete liveBlocks.value.blocks[event.blockId];
     session.events.push(event);
     if (event.type === "status" && event.at >= session.updatedAt) session.status = event.status;
     if (event.type === "published") {
@@ -655,7 +666,7 @@ export function useWorkspace() {
   });
 
   return {
-    sessions, activeSessionId, activeSession, pages, activePageSlug, activePage, revisionPageSlug,
+    sessions, activeSessionId, activeSession, liveBlocks, pages, activePageSlug, activePage, revisionPageSlug,
     preferences, token, gatewayUrl, loadingSessions, loadingPages, loadingSession,
     error, connected, gatewayChanges, sending, responding, pendingMessage, canCancel, cancelling, eventActionBusy, pendingPagePins,
     loadWorkspace, openConversation, selectSession, startNewConversation,

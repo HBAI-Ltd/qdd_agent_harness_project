@@ -111,7 +111,9 @@ async function follow(hub: SessionHub, id: string, autoYes: boolean): Promise<vo
 function printEvent(e: SessionEvent): void {
   switch (e.type) {
     case "say": return console.log(e.text);
-    case "tool": return console.log(`\x1b[36m· ${e.text}\x1b[0m`);
+    case "text": return e.done && e.content?.trim() ? console.log(e.content.trim()) : undefined;
+    case "thinking": return e.done && e.content?.trim() ? console.log(`\x1b[2m${e.content.trim()}\x1b[0m`) : undefined;
+    case "tool": return e.tool.progress || e.tool.status === "running" ? console.log(`\x1b[36m· ${e.tool.progress ?? e.tool.name}\x1b[0m`) : undefined;
     case "warn": return console.log(`\x1b[33m· ${e.text}\x1b[0m`);
     case "approval_required": return console.log(`\x1b[33m⚠ 写入操作 ${e.tool}（${e.source}）待授权\x1b[0m`);
     case "approval_resolved": return console.log(`\x1b[33m  ${e.approved ? "已授权" : "已拒绝"}\x1b[0m`);

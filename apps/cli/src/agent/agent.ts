@@ -1,7 +1,7 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { cp, mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
-import type { BrowserSessionState, CapabilityGap, ClarifyAnswers, ClarifyQuestion, GapKind, JsonObject, MetricCatalog, PageEntry } from "@qdd/shared";
+import type { AgentToolCall, BrowserSessionState, CapabilityGap, ClarifyAnswers, ClarifyQuestion, GapKind, JsonObject, MetricCatalog, PageEntry } from "@qdd/shared";
 import type { LoadedConfig } from "../config.js";
 import type { Authorizer, DataSources, DataTool } from "../datasource/registry.js";
 import { RECORDS_METRIC, updateMetrics } from "../datasets/metrics.js";
@@ -12,7 +12,7 @@ import { readPages, readStyle, readTheme, toScriptJson, upsertPage } from "../we
 import { BROWSER_TOOL_PARAMETERS } from "../browser/index.js";
 import type { Workbench } from "../workbench/index.js";
 import { parseSkillInput, skillInstructions } from "../workbench/skills.js";
-import type { ChatFn, ChatMessage, LlmTool } from "./llm.js";
+import { replyParts, type ChatFn, type ChatMessage, type LlmTool } from "./llm.js";
 import { listSessionMetas, readArtifact, readSessionDigest, recall } from "./memory.js";
 import { findUnverified, NumberLedger, scopeOfArgs, summarizeResult, type Scope } from "./verify.js";
 
@@ -37,6 +37,8 @@ import { systemPrompt } from "./prompt.js";
 
 export type AgentEvent =
   | { kind: "say" | "tool" | "ok" | "warn"; text: string }
+  | { kind: "text" | "thinking"; blockId: string; delta?: string; content?: string; done?: boolean }
+  | { kind: "tool_call"; blockId: string; tool: AgentToolCall }
   | { kind: "skill"; skill: { id: string; name: string }; action: "loaded" | "saved" }
   | { kind: "browser"; state: BrowserSessionState };
 
@@ -423,6 +425,18 @@ export async function runWish(
   request: WishRequest,
   hooks: WishHooks,
 ): Promise<WishResult> {
+  /** 正在执行的工具块：执行中的进度说明并入该块，而不是单独成条。 */
+  let activeTool: { blockId: string; tool: AgentToolCall } | undefined;
+  const emit = hooks.onEvent;
+  hooks = {
+    ...hooks,
+    onEvent: (event) => {
+      if (event.kind !== "tool") return emit(event);
+      const block = activeTool ?? { blockId: randomUUID().slice(0, 8), tool: { id: randomUUID(), name: "progress", status: "success" } };
+      block.tool = { ...block.tool, progress: event.text };
+      emit({ kind: "tool_call", blockId: block.blockId, tool: block.tool });
+    },
+  };
   const pages = await readPages(paths);
   const updating = request.slug ? pages.find((p) => p.slug === request.slug) : undefined;
   const history = request.history ?? [];
@@ -987,10 +1001,31 @@ export async function runWish(
     hooks.signal?.throwIfAborted();
     // 熔断后不再向模型提供探索类数据工具（snapshot_data 仍可取数）
     const activeTools = explorationPaused ? tools.filter((t) => !sources.get(t.function.name)) : tools;
-    const reply = await chat(messages, activeTools, hooks.signal);
+    // 每条回复一个 id，思考、正文、工具调用按块序号共享同一 parts 数组。
+    const replyId = randomUUID().slice(0, 8);
+    const reply = await chat(messages, activeTools, hooks.signal, (delta) => {
+      const blockId = `${replyId}:${delta.index}`;
+      if (delta.type === "tool") hooks.onEvent({ kind: "tool_call", blockId, tool: { id: delta.id, name: delta.name, status: "running" } });
+      else hooks.onEvent({ kind: delta.type, blockId, delta: delta.delta });
+    });
     hooks.signal?.throwIfAborted();
     messages.push(reply);
-    if (reply.content?.trim()) hooks.onEvent({ kind: "say", text: reply.content.trim() });
+    const toolBlocks = new Map<string, { blockId: string; tool: AgentToolCall }>();
+    replyParts(reply).forEach((part, index) => {
+      const blockId = `${replyId}:${index}`;
+      if (part === "thinking") hooks.onEvent({ kind: "thinking", blockId, content: reply.reasoning_content ?? "", done: true });
+      else if (part === "text") hooks.onEvent({ kind: "text", blockId, content: reply.content ?? "", done: true });
+      else {
+        const tool: AgentToolCall = { id: part.id, name: part.function.name, status: "running" };
+        try {
+          if (part.function.arguments) tool.args = JSON.parse(part.function.arguments) as JsonObject;
+        } catch {
+          // 参数不是合法 JSON，执行时会报错
+        }
+        toolBlocks.set(part.id, { blockId, tool });
+        hooks.onEvent({ kind: "tool_call", blockId, tool });
+      }
+    });
 
     if (!reply.tool_calls?.length) {
       if (++idle > 2) throw new WishError("agent 未调用 finish 就停止了", conversation());
@@ -1004,6 +1039,9 @@ export async function runWish(
     for (const call of reply.tool_calls) {
       hooks.signal?.throwIfAborted();
       let output: string;
+      const block = toolBlocks.get(call.id)!;
+      activeTool = block;
+      let failed = false;
       try {
         const args = call.function.arguments ? (JSON.parse(call.function.arguments) as JsonObject) : {};
         const result = await dispatch(call.function.name, args);
@@ -1015,9 +1053,14 @@ export async function runWish(
         }
       } catch (error) {
         hooks.signal?.throwIfAborted();
+        failed = true;
         output = `错误：${(error as Error).message}`;
         hooks.onEvent({ kind: "warn", text: `${call.function.name} 失败：${(error as Error).message}` });
+      } finally {
+        activeTool = undefined;
       }
+      block.tool = { ...block.tool, status: failed || REJECTED.test(output) ? "error" : "success", result: truncate(output, 2000) };
+      hooks.onEvent({ kind: "tool_call", blockId: block.blockId, tool: block.tool });
       if (REJECTED.test(output)) rejectedCalls++;
       messages.push({ role: "tool", tool_call_id: call.id, content: output });
     }

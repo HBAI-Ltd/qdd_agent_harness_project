@@ -94,6 +94,7 @@ export async function readSessionDigest(paths: HarnessPaths, id: string): Promis
     .flatMap((e) => {
       if (e.type === "user") return [`店长：${e.text}`];
       if (e.type === "say") return [`agent：${e.text}`];
+      if (e.type === "text" && e.done && e.content?.trim()) return [`agent：${e.content.trim()}`];
       if (e.type === "published") return [`发布页面 ${e.page.slug}「${e.page.title}」：${e.page.summary}`];
       return [];
     });

@@ -72,6 +72,41 @@ export async function upsertPage(paths: HarnessPaths, entry: PageEntry): Promise
   await writeManifest(paths, pages);
 }
 
+export interface PagePin {
+  slug: string;
+  pinnedAt: string;
+}
+
+const pinsFile = (paths: HarnessPaths) => path.join(paths.site, "pins.json");
+
+/** 置顶记录单独存放，重新发布页面（upsertPage 整条替换）不会丢失；按置顶先后排列。 */
+export async function readPins(paths: HarnessPaths): Promise<PagePin[]> {
+  try {
+    return JSON.parse(await readFile(pinsFile(paths), "utf8")) as PagePin[];
+  } catch {
+    return [];
+  }
+}
+
+let pinQueue: Promise<unknown> = Promise.resolve();
+
+/** 串行读改写，避免并发置顶互相覆盖。 */
+function updatePins(paths: HarnessPaths, change: (pins: PagePin[]) => PagePin[]): Promise<PagePin[]> {
+  const next = pinQueue.then(async () => {
+    const pins = change(await readPins(paths));
+    await writeAtomic(pinsFile(paths), `${JSON.stringify(pins, null, 2)}\n`);
+    return pins;
+  });
+  pinQueue = next.catch(() => undefined);
+  return next;
+}
+
+/** 已置顶时保持原有位置（幂等）。 */
+export const pinPage = (paths: HarnessPaths, slug: string) =>
+  updatePins(paths, (pins) => (pins.some((x) => x.slug === slug) ? pins : [...pins, { slug, pinnedAt: new Date().toISOString() }]));
+
+export const unpinPage = (paths: HarnessPaths, slug: string) => updatePins(paths, (pins) => pins.filter((x) => x.slug !== slug));
+
 /** 可安全内联到 <script> 的 JSON。 */
 export function toScriptJson(value: unknown): string {
   return JSON.stringify(value)

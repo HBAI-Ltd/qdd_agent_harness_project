@@ -751,7 +751,7 @@ export async function runWish(
           return `重复调用：参数与之前完全相同，结果不会变化，未再执行。请基于已返回的结果继续；如果之前的结果是摘要，说明数据过大——给页面用请 snapshot_data，理解数据请粗化分组或缩小范围。${times >= 3 ? "已多次重复，请立即进入下一步（提问对齐或写页面）。" : ""}`;
         }
         collectRefs(args, usedDatasets, usedMetrics);
-        hooks.onEvent({ kind: "tool", text: `查询 ${name} ${truncate(JSON.stringify(args), 120)}` });
+        hooks.onEvent({ kind: "tool", text: `查询 ${name} ${truncate(JSON.stringify(args), 2000)}` });
         const result = await sources.call(name, args, hooks.authorize);
         ledger.add(result, await scopeOf(args));
         // 换着参数反复查询却得到完全相同的结果：说明调参方向不对，拦截并提示（计入熔断）

@@ -10,7 +10,7 @@ import type { DataSources } from "../datasource/registry.js";
 import { refreshDatasets } from "../datasets/refresh.js";
 import { pageCsp } from "../guard.js";
 import { BadRequest, Conflict, NotFound, SessionHub } from "../sessions.js";
-import { readPages, readStyle, resetStyle, toScriptJson, writeAtomic, writeStyle } from "../web/site.js";
+import { pinPage, readPages, readPins, readStyle, unpinPage, resetStyle, toScriptJson, writeAtomic, writeStyle } from "../web/site.js";
 import { Auth } from "./auth.js";
 import { handleMcp } from "./mcp-endpoint.js";
 import { buildComputeScript, SDK_JS } from "./sdk.js";
@@ -77,7 +77,11 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
   };
   hub.onMeta((session) => broadcast({ type: "session_updated", session }));
   hub.onPending(() => broadcast({ type: "pending_changed" }));
-  scheduler.onChange(() => broadcast({ type: "schedules_changed" }));
+  // 页面的 kind 由定时任务推导，任务变化时页面列表也需刷新
+  scheduler.onChange(() => {
+    broadcast({ type: "schedules_changed" });
+    broadcast({ type: "pages_changed" });
+  });
   if (options.scheduler !== false) scheduler.start();
 
   const mcpInfo = (): McpConnectorInfo[] =>
@@ -250,11 +254,28 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
       return json(res, 200, list);
     }
     if (p === "/api/pages" && m === "GET") {
-      const pages: PageView[] = (await readPages(paths)).map((x) => ({
-        ...x,
-        url: `/pages/${x.slug}/?page_token=${auth.pageToken(x.slug)}`,
-      }));
-      return json(res, 200, pages.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)));
+      const [entries, pins, schedules] = await Promise.all([readPages(paths), readPins(paths), scheduler.list()]);
+      const pinOrder = new Map(pins.map((x, i) => [x.slug, { index: i, at: x.pinnedAt }]));
+      const pages: PageView[] = entries.map((x) => {
+        const using = schedules.filter((s) => s.slug === x.slug).map(({ id, name, enabled }) => ({ id, name, enabled }));
+        return {
+          ...x,
+          url: `/pages/${x.slug}/?page_token=${auth.pageToken(x.slug)}`,
+          kind: using.length ? "scheduled" : "once",
+          schedules: using,
+          pinnedAt: pinOrder.get(x.slug)?.at ?? null,
+        };
+      });
+      const rank = (x: PageView) => pinOrder.get(x.slug)?.index ?? Infinity;
+      return json(res, 200, pages.sort((a, b) => rank(a) - rank(b) || b.updatedAt.localeCompare(a.updatedAt)));
+    }
+    const pin = /^\/api\/pages\/([^/]+)\/pin$/.exec(p);
+    if (pin && (m === "PUT" || m === "DELETE")) {
+      const slug = decodeURIComponent(pin[1]!);
+      if (m === "PUT" && !(await readPages(paths)).some((x) => x.slug === slug)) throw new HttpError(404, "页面不存在");
+      const pins = await (m === "PUT" ? pinPage(paths, slug) : unpinPage(paths, slug));
+      broadcast({ type: "pages_changed" });
+      return json(res, 200, { slug, pinnedAt: pins.find((x) => x.slug === slug)?.pinnedAt ?? null });
     }
     if (p === "/api/style") {
       if (m === "GET") return send(res, 200, "text/plain; charset=utf-8", await readStyle(paths));

@@ -174,6 +174,12 @@ export interface PageEntry {
 /** GET /api/pages 的条目：附带页面访问地址（含页面级 token）。 */
 export interface PageView extends PageEntry {
   url: string;
+  /** scheduled：有定时任务在该页面上刷新；once：一次性产出。 */
+  kind: "scheduled" | "once";
+  /** 刷新该页面的定时任务 */
+  schedules: { id: string; name: string; enabled: boolean }[];
+  /** 置顶时间；未置顶为 null。列表中置顶页面按置顶先后排在最前。 */
+  pinnedAt: string | null;
 }
 
 // ---------------------------------------------------------------- 会话

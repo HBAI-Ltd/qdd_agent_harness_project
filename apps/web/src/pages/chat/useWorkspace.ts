@@ -175,7 +175,7 @@ export function useWorkspace() {
         await api.gatewayEvents(gatewayUrl.value, token.value, (event) => {
           if (controller.signal.aborted || disposed || version !== connectionVersion) return;
           if (event.type === "pages_changed") void refreshPages();
-          else applyMeta(event.session);
+          else if (event.type === "session_updated") applyMeta(event.session);
         }, controller.signal, () => {
           streamOpened(controller);
           if (reconnecting) {

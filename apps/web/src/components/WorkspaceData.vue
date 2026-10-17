@@ -1,6 +1,11 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue";
-import { ElAlert, ElButton, ElCard, ElEmpty, ElSkeleton, ElTag } from "element-plus";
+import { ElAlert } from "element-plus/es/components/alert/index";
+import { ElButton } from "element-plus/es/components/button/index";
+import { ElCard } from "element-plus/es/components/card/index";
+import { ElEmpty } from "element-plus/es/components/empty/index";
+import { ElSkeleton } from "element-plus/es/components/skeleton/index";
+import { ElTag } from "element-plus/es/components/tag/index";
 import type { DatasetManifest, MetricCatalog, MetricDef } from "@qdd/shared";
 import { getMetrics, listDatasets, refreshDatasets, type DatasetRefreshResult } from "@/api/datasets";
 
@@ -21,7 +26,7 @@ const resultNotice = computed(() => {
   if (failures.value) return `${results.value.length - failures.value} 个数据集刷新完成，${failures.value} 个失败，请查看各项结果。`;
   return `${results.value.length} 个数据集刷新完成。`;
 });
-const datasetKinds = { fact: "业务记录", dimension: "基础资料", event_log: "变更记录" };
+const datasetKinds = { fact: "业务记录", dimension: "基础资料", event_log: "变更记录", record: "登记记录" };
 const metricTypes = { flow: "可加总指标", stock: "期末存量", ratio: "比率", state: "状态" };
 const aggregateLabels = { sum: "求和", count: "计数", count_distinct: "去重计数", avg: "平均值", min: "最小值", max: "最大值", last: "期末值", first: "期初值" };
 let loadController: AbortController | undefined;
@@ -110,6 +115,7 @@ watch(() => [props.connected, props.gatewayUrl, props.token], () => {
   if (props.connected) void load();
 }, { immediate: true, flush: "sync" });
 onBeforeUnmount(() => { disposed = true; stopRequests(); });
+defineExpose({ refresh: load });
 </script>
 
 <template>

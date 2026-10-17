@@ -1,5 +1,5 @@
 import axios from "axios";
-import { ElMessage } from "element-plus";
+import { ElMessage } from "element-plus/es/components/message/index";
 
 const instance = axios.create({
   // TODO: 联调时确认 API 前缀；业务任务接口统一在 api/workspace.ts 中配置。

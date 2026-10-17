@@ -34,6 +34,7 @@
 
 <script setup lang="ts">
 import { useRouter } from "vue-router";
+import { ElButton } from "element-plus/es/components/button/index";
 
 const router = useRouter();
 

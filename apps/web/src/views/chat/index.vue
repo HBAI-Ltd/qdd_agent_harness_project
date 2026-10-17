@@ -1,6 +1,10 @@
 <script setup lang="ts">
 import { computed, defineAsyncComponent, nextTick, onMounted, ref, watch } from "vue";
-import { ElButton, ElCard, ElInput, ElSelect, type InputInstance } from "element-plus";
+import { ElButton } from "element-plus/es/components/button/index";
+import { ElCard } from "element-plus/es/components/card/index";
+import { ElInput } from "element-plus/es/components/input/index";
+import { ElSelect } from "element-plus/es/components/select/index";
+import type { InputInstance } from "element-plus";
 import type { SessionEvent } from "@qdd/shared";
 import AgentIcon from "@/components/AgentIcon.vue";
 import AttachmentList, { type AttachmentItem } from "@/components/AttachmentList.vue";
@@ -100,7 +104,16 @@ const composerHint = computed(() => {
 const timeline = computed(() => {
   const session = activeSession.value;
   const live = session && liveBlocks.value.sessionId === session.id ? liveBlocks.value.blocks : {};
-  return buildChatTimeline(session?.events ?? [], pendingMessage.value, live);
+  const entries = buildChatTimeline(session?.events ?? [], pendingMessage.value, live, session?.status);
+  if (activityLabel.value && entries.at(-1)?.kind !== "assistant") {
+    const lastUser = entries.findLast((entry) => entry.kind === "user");
+    entries.push({
+      kind: "assistant", key: `assistant:${lastUser?.key ?? -1}`,
+      at: lastUser?.kind === "user" ? lastUser.event.at : session?.updatedAt ?? "",
+      parts: [],
+    });
+  }
+  return entries;
 });
 const suggestions = [
   { title: "经营看板", description: "查看销售与毛利，发现经营机会", prompt: "展示最近 30 天各品类销售额和毛利" },
@@ -161,7 +174,7 @@ watch([
 ], () => {
   browserOpen.value = activeSession.value?.id === activeSessionId.value && latestBrowser.value?.status === "running";
 }, { immediate: true });
-watch([() => activeSession.value?.events.length, pendingMessage, activityLabel, liveBlocks], async () => {
+watch([() => activeSession.value?.events.length, pendingMessage, activityLabel, () => Object.values(liveBlocks.value.blocks).reduce((length, block) => length + block.content.length, 0)], async () => {
   const element = messageList.value;
   const nearBottom = !element || element.scrollHeight - element.scrollTop - element.clientHeight < 100;
   if (nearBottom) await scrollToLatest();
@@ -221,80 +234,80 @@ onMounted(() => {
             <template v-else>
               <div class="chat-message-meta">
                 <strong>门店助手</strong>
-                <time :datetime="entry.at">{{ new Date(entry.at).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }) }}</time>
+                <time v-if="entry.at" :datetime="entry.at">{{ new Date(entry.at).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }) }}</time>
               </div>
-              <div v-if="entry.activities.length" class="chat-activities" aria-label="思考与执行过程">
-                <details v-for="activity in entry.activities" :key="activity.key" class="chat-process" :data-kind="activity.event.type" :data-status="activity.event.type === 'tool' ? activity.event.status : undefined">
+              <template v-for="part in entry.parts" :key="part.key">
+                <details v-if="part.kind === 'activity'" class="chat-process" :data-kind="part.event.type" :data-status="part.event.type === 'tool' ? part.event.status : undefined">
                   <summary class="chat-process-summary">
                     <AgentIcon class="chat-process-chevron" name="chevron" :size="13" />
-                    <AgentIcon :name="activity.event.type === 'thinking' ? 'thinking' : activity.event.type === 'browser' ? 'code' : activity.event.type === 'skill' ? 'plan' : 'tool'" :size="15" />
-                    <template v-if="activity.event.type === 'tool'">
-                      <span class="chat-process-name" :title="toolTitle(activity.event)">{{ toolTitle(activity.event) }}</span>
-                      <span class="chat-process-status">{{ toolStatus(activity.event) }}</span>
+                    <AgentIcon :name="part.event.type === 'thinking' ? 'thinking' : part.event.type === 'browser' ? 'code' : part.event.type === 'skill' ? 'plan' : 'tool'" :size="15" />
+                    <template v-if="part.event.type === 'tool'">
+                      <span class="chat-process-name" :title="toolTitle(part.event)">{{ toolTitle(part.event) }}</span>
+                      <span class="chat-process-status">{{ toolStatus(part.event) }}</span>
                     </template>
-                    <template v-else-if="activity.event.type === 'thinking'">
+                    <template v-else-if="part.event.type === 'thinking'">
                       <span class="chat-process-name">思考</span>
+                      <span class="chat-process-status">{{ part.event.done ? '已完成' : '生成中…' }}</span>
                     </template>
-                    <template v-else-if="activity.event.type === 'skill'">
-                      <span class="chat-process-name">{{ activity.event.skill.name }}</span>
-                      <span class="chat-process-status">{{ activity.event.action === 'loaded' ? '已加载' : '已保存' }}</span>
+                    <template v-else-if="part.event.type === 'skill'">
+                      <span class="chat-process-name">{{ part.event.skill.name }}</span>
+                      <span class="chat-process-status">{{ part.event.action === 'loaded' ? '已加载' : '已保存' }}</span>
                     </template>
-                    <template v-else-if="activity.event.type === 'browser'">
+                    <template v-else-if="part.event.type === 'browser'">
                       <span class="chat-process-name">浏览器</span>
-                      <span class="chat-process-status">{{ activity.event.browser.status === 'closed' ? '已关闭' : '已打开' }}</span>
+                      <span class="chat-process-status">{{ part.event.browser.status === 'closed' ? '已关闭' : '已打开' }}</span>
                     </template>
                   </summary>
                   <div class="chat-process-details">
-                    <MarkdownContent v-if="activity.event.type === 'thinking'" :content="activity.event.text" />
-                    <template v-else-if="activity.event.type === 'tool'">
-                      <template v-if="activity.event.input">
+                    <MarkdownContent v-if="part.event.type === 'thinking'" :content="part.event.text" />
+                    <template v-else-if="part.event.type === 'tool'">
+                      <template v-if="part.event.input">
                         <p class="chat-process-label">参数</p>
-                        <pre class="chat-process-data" tabindex="0" aria-label="工具参数">{{ formatToolInput(activity.event.input) }}</pre>
+                        <pre class="chat-process-data" tabindex="0" aria-label="工具参数">{{ formatToolInput(part.event.input) }}</pre>
                       </template>
-                      <template v-if="activity.progress.length">
+                      <template v-if="part.progress.length">
                         <p class="chat-process-label">执行详情</p>
-                        <p v-for="(text, index) in activity.progress" :key="index" class="chat-process-text">{{ text }}</p>
+                        <p v-for="(text, index) in part.progress" :key="index" class="chat-process-text">{{ text }}</p>
                       </template>
-                      <template v-if="activity.event.output !== undefined">
-                        <p class="chat-process-label">{{ activity.event.status === 'failed' ? '错误详情' : '结果' }}</p>
-                        <pre class="chat-process-data" tabindex="0" aria-label="工具结果">{{ activity.event.output }}</pre>
+                      <template v-if="part.event.output !== undefined">
+                        <p class="chat-process-label">{{ part.event.status === 'failed' ? '错误详情' : '结果' }}</p>
+                        <pre class="chat-process-data" tabindex="0" aria-label="工具结果">{{ part.event.output }}</pre>
                       </template>
-                      <p v-if="!activity.event.input && !activity.progress.length && activity.event.output === undefined" class="chat-process-text">{{ activity.event.text }}</p>
+                      <p v-if="!part.event.input && !part.progress.length && part.event.output === undefined" class="chat-process-text">{{ part.event.text }}</p>
                     </template>
-                    <template v-else-if="activity.event.type === 'skill'">
-                      <p class="chat-process-text">{{ activity.event.action === 'loaded' ? '已加载，按技能步骤继续执行。' : '已保存，可在技能页面复用。' }}</p>
+                    <template v-else-if="part.event.type === 'skill'">
+                      <p class="chat-process-text">{{ part.event.action === 'loaded' ? '已加载，按技能步骤继续执行。' : '已保存，可在技能页面复用。' }}</p>
                       <ElButton link type="primary" @click="openView('skills')">查看技能<AgentIcon name="chevron" :size="13" /></ElButton>
                     </template>
-                    <template v-else-if="activity.event.type === 'browser'">
-                      <p class="chat-process-text">{{ activity.event.browser.title || activity.event.browser.url }}</p>
-                      <p v-if="activity.event.browser.title" class="chat-process-text">{{ activity.event.browser.url }}</p>
-                      <ElButton v-if="activity.event.browser.status === 'running' && latestBrowser?.status === 'running' && activity.event.browser.browserSessionId === latestBrowser.browserSessionId" link type="primary" @click="browserOpen = !browserOpen">{{ browserOpen ? '收起画面' : '查看实时画面' }}</ElButton>
+                    <template v-else-if="part.event.type === 'browser'">
+                      <p class="chat-process-text">{{ part.event.browser.title || part.event.browser.url }}</p>
+                      <p v-if="part.event.browser.title" class="chat-process-text">{{ part.event.browser.url }}</p>
+                      <ElButton v-if="part.event.browser.status === 'running' && latestBrowser?.status === 'running' && part.event.browser.browserSessionId === latestBrowser.browserSessionId" link type="primary" @click="browserOpen = !browserOpen">{{ browserOpen ? '收起画面' : '查看实时画面' }}</ElButton>
                     </template>
                   </div>
                 </details>
-              </div>
-              <div v-for="message in entry.messages" :key="message.key" class="chat-answer" :class="{ 'chat-bubble-warning': message.event.type === 'warn' || message.event.type === 'gaps', 'chat-bubble-error': message.event.type === 'error' }">
-                <div v-if="message.event.type === 'gaps'" class="chat-gaps">
-                  <div v-for="(gap, index) in message.event.gaps" :key="index">
-                    <strong>{{ gapLabels[gap.kind] }} · {{ gap.item }}</strong>
-                    <p>{{ gap.reason }}</p>
-                    <p v-if="gap.suggestion">{{ gap.suggestion }}</p>
+                <div v-else class="chat-answer" :class="{ 'chat-bubble-warning': part.event.type === 'warn' || part.event.type === 'gaps', 'chat-bubble-error': part.event.type === 'error' }">
+                  <div v-if="part.event.type === 'gaps'" class="chat-gaps">
+                    <div v-for="(gap, index) in part.event.gaps" :key="index">
+                      <strong>{{ gapLabels[gap.kind] }} · {{ gap.item }}</strong>
+                      <p>{{ gap.reason }}</p>
+                      <p v-if="gap.suggestion">{{ gap.suggestion }}</p>
+                    </div>
+                  </div>
+                  <MarkdownContent v-else class="chat-message-text chat-message-markdown" :content="eventText(part.event)" />
+                  <div v-if="part.event.type === 'say' || part.event.type === 'published'" class="chat-message-actions">
+                    <ElButton v-if="part.event.type === 'say'" link @click="copyMessage(part.event.text)"><AgentIcon name="copy" :size="14" />复制</ElButton>
+                    <ElButton v-if="part.event.type === 'published'" link type="primary" @click="openPage(part.event.page.slug)">查看页面<AgentIcon name="chevron" :size="13" /></ElButton>
                   </div>
                 </div>
-                <MarkdownContent v-else class="chat-message-text chat-message-markdown" :content="eventText(message.event)" />
-                <div v-if="message.event.type === 'say' || message.event.type === 'published'" class="chat-message-actions">
-                  <ElButton v-if="message.event.type === 'say'" link @click="copyMessage(message.event.text)"><AgentIcon name="copy" :size="14" />复制</ElButton>
-                  <ElButton v-if="message.event.type === 'published'" link type="primary" @click="openPage(message.event.page.slug)">查看页面<AgentIcon name="chevron" :size="13" /></ElButton>
+                </template>
+              <div v-if="activityLabel && entry.key === timeline.at(-1)?.key" class="chat-activity" role="status" aria-live="polite" aria-atomic="true">
+                <div class="chat-activity-content">
+                  <span v-if="responding || cancelling" class="chat-loading-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+                  <span>{{ activityLabel }}</span>
                 </div>
               </div>
             </template>
-          </div>
-        </article>
-        <article v-if="activityLabel" class="chat-message chat-message-assistant chat-activity" role="status" aria-live="polite" aria-atomic="true">
-          <span class="chat-avatar chat-avatar-assistant"><AgentIcon :name="waitingForConfirmation ? 'clock' : 'spark'" :size="18" /></span>
-          <div class="chat-activity-content">
-            <span v-if="responding || cancelling" class="chat-loading-dots" aria-hidden="true"><i></i><i></i><i></i></span>
-            <span>{{ activityLabel }}</span>
           </div>
         </article>
         <SessionActions
@@ -428,18 +441,19 @@ onMounted(() => {
 .chat-message-markdown { white-space: normal; }
 .chat-answer { min-width: 0; }
 .chat-answer + .chat-answer { margin-top: 16px; }
+.chat-answer + .chat-process, .chat-process + .chat-answer { margin-top: 12px; }
+.chat-process + .chat-process { margin-top: 2px; }
 .chat-message-actions { display: flex; margin-top: 10px; }
 .chat-message-actions :deep(.el-button) { color: var(--qdd-muted); font-size: 12px; }
 .chat-message-actions :deep(.el-button--primary) { color: var(--qdd-primary); }
 .chat-message-actions :deep(.el-button > span) { gap: 5px; }
-.chat-activity { color: var(--qdd-muted); font-size: 13px; }
-.chat-activity-content { display: flex; align-items: center; gap: 10px; min-height: 36px; line-height: 1.7; }
+.chat-activity { margin-top: 8px; color: var(--qdd-muted); font-size: 13px; }
+.chat-activity-content { display: flex; align-items: center; gap: 10px; min-height: 24px; line-height: 1.7; }
 .chat-loading-dots { display: flex; flex: 0 0 auto; align-items: center; gap: 4px; }
 .chat-loading-dots i { width: 5px; height: 5px; border-radius: 50%; background: var(--qdd-primary); animation: chat-loading-pulse 1.2s ease-in-out infinite; }
 .chat-loading-dots i:nth-child(2) { animation-delay: .16s; }
 .chat-loading-dots i:nth-child(3) { animation-delay: .32s; }
 @keyframes chat-loading-pulse { 0%, 80%, 100% { opacity: .35; transform: translateY(0); } 40% { opacity: 1; transform: translateY(-3px); } }
-.chat-activities { display: grid; gap: 2px; min-width: 0; margin: 0 0 14px; }
 .chat-process { min-width: 0; color: var(--qdd-muted); font-size: 13px; }
 .chat-process-summary { display: flex; align-items: center; gap: 7px; min-height: 30px; width: fit-content; max-width: 100%; padding: 3px 6px 3px 0; border-radius: 5px; cursor: pointer; list-style: none; line-height: 1.6; }
 .chat-process-summary::-webkit-details-marker { display: none; }

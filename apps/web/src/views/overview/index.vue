@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import StoreOverview from "@/components/StoreOverview.vue";
 import DashboardPending from "@/components/DashboardPending.vue";
-import { ElAlert } from "element-plus";
+import { ElAlert } from "element-plus/es/components/alert/index";
 import { useWorkspaceContext } from "@/composables/workspaceContext";
 
 const { workspace, overview, navigation } = useWorkspaceContext();

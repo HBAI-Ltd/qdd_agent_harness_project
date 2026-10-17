@@ -1,0 +1,10 @@
+{
+  "name": "@qdd/android-screen",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Native Android LAN screen source for QDD MCP",
+  "scripts": {
+    "build": "powershell -NoProfile -ExecutionPolicy Bypass -File tools/build.ps1",
+    "test": "powershell -NoProfile -ExecutionPolicy Bypass -File tools/test-stream.ps1"
+  }
+}

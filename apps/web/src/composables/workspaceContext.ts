@@ -20,6 +20,7 @@ export interface WorkspaceContext {
     newConversation: () => Promise<void>;
     runSkill: (skill: Skill) => Promise<void>;
     openPage: (slug: string) => Promise<void>;
+    openRecords: (name: string) => Promise<void>;
     openView: (view: WorkspaceView) => Promise<void>;
     editPage: (slug: string) => Promise<boolean>;
   };

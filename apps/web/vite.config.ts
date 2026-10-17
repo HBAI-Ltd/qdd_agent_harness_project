@@ -6,7 +6,6 @@ import vue from "@vitejs/plugin-vue";
 
 import AutoImport from "unplugin-auto-import/vite";
 import Components from "unplugin-vue-components/vite";
-import { ElementPlusResolver } from "unplugin-vue-components/resolvers";
 
 import { webUpdateNotice } from "@plugin-web-update-notification/vite";
 import { resolveGatewayTarget } from "./gateway.config";
@@ -60,10 +59,6 @@ export default defineConfig(({ command, mode }) => {
       outDir: "dist",
       assetsInlineLimit: Infinity,
     },
-    optimizeDeps: {
-      // Auto-imported components are injected after Vite's dependency scan.
-      include: ["element-plus", "element-plus/es", "element-plus/es/locale/lang/zh-cn"],
-    },
     plugins: [
       vue({
         template: {
@@ -76,13 +71,10 @@ export default defineConfig(({ command, mode }) => {
         dts: "src/types/auto-imports.d.ts",
         dtsMode: "overwrite",
         imports: ["vue", "pinia", "vue-router"],
-        resolvers: [ElementPlusResolver({ importStyle: false })],
       }),
       Components({
         dts: "src/types/components.d.ts",
         syncMode: "overwrite",
-
-        resolvers: [ElementPlusResolver({ importStyle: false })],
       }),
       ...(command === "build"
         ? [

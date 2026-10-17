@@ -63,6 +63,8 @@ function backend(initial = [], pages = []) {
           if (id) {
             if (!sessionStreams.has(id)) sessionStreams.set(id, new Set());
             sessionStreams.get(id).add(controller);
+            const since = Number(url.searchParams.get("since") ?? 0);
+            for (const event of sessions.get(id).events.slice(since)) controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`));
           }
           init.signal?.addEventListener("abort", () => {
             globalStreams.delete(controller);
@@ -120,11 +122,16 @@ function backend(initial = [], pages = []) {
       };
     },
     emitSession(id, event) {
-      sessions.get(id).events.push(event);
+      // Match the gateway: block deltas are realtime-only and have no since offset.
+      if (!(event.type === "text" || event.type === "thinking") || event.delta === undefined) sessions.get(id).events.push(event);
       const data = new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`);
       for (const stream of sessionStreams.get(id) ?? []) stream.enqueue(data);
     },
     streamCount(id) { return sessionStreams.get(id)?.size ?? 0; },
+    closeSessionStream(id) {
+      for (const stream of sessionStreams.get(id) ?? []) stream.close();
+      sessionStreams.get(id)?.clear();
+    },
     failNextDetail(id) { detailFailures.add(id); },
     gatewayEvent(event) {
       const data = new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`);
@@ -1043,4 +1050,200 @@ test("an aborted old connection's send failure cannot clear a new send to the sa
   newDelay.release();
   assert.equal(await newSend, true);
   assert.equal(workspace.sending.value, false);
+});
+
+test("streamed text and thinking accumulate separately while only snapshots, done and tool events advance history", async () => {
+  const service = backend([session("selected")]);
+  const { workspace } = mountWorkspace();
+  await ready(workspace);
+  const at = "2026-10-17T03:00:00Z";
+  service.emitSession("selected", { type: "status", status: "running", at });
+  service.emitSession("selected", { type: "thinking", blockId: "reply:0", delta: "检查", at });
+  service.emitSession("selected", { type: "text", blockId: "reply:1", delta: "初稿", at });
+  service.emitSession("selected", { type: "thinking", blockId: "reply:0", delta: "库存", at });
+  await setImmediate();
+  assert.deepEqual(workspace.liveBlocks.value, { sessionId: "selected", blocks: { "reply:0": { type: "thinking", content: "检查库存" }, "reply:1": { type: "text", content: "初稿" } } });
+  assert.equal(workspace.activeSession.value.events.length, 1);
+  service.emitSession("selected", { type: "text", blockId: "reply:1", content: "新的完整快照", done: false, at });
+  service.emitSession("selected", { type: "text", blockId: "reply:1", delta: "。", at });
+  await setImmediate();
+  assert.equal(workspace.liveBlocks.value.blocks["reply:1"].content, "新的完整快照。");
+  assert.equal(workspace.activeSession.value.events.length, 2);
+  service.emitSession("selected", { type: "text", blockId: "reply:1", content: "最终正文", done: true, at });
+  for (const tool of [
+    { id: "tool-1", name: "store__inventory", status: "running" },
+    { id: "tool-1", name: "store__inventory", status: "running", progress: "正在查询", args: { sku: "A" } },
+    { id: "tool-1", name: "store__inventory", status: "success", result: "库存 2 件" },
+  ]) service.emitSession("selected", { type: "tool", blockId: "reply:2", tool, at });
+  await setImmediate();
+  assert.equal(workspace.liveBlocks.value.blocks["reply:1"], undefined);
+  assert.equal(workspace.liveBlocks.value.blocks["reply:0"].content, "检查库存");
+  assert.equal(workspace.activeSession.value.events.length, 6);
+  service.emitSession("selected", { type: "thinking", blockId: "reply:0", content: "完整思考", done: true, at });
+  service.emitSession("selected", { type: "text", blockId: "reply:1", delta: "迟到的重复片段", at });
+  await setImmediate();
+  assert.deepEqual(workspace.liveBlocks.value.blocks, {});
+  assert.equal(workspace.activeSession.value.events.length, 7);
+  assert.deepEqual(workspace.activeSession.value.events, service.sessions.get("selected").events);
+});
+
+test("content snapshots replace partial stream text instead of appending it twice", async () => {
+  const service = backend([session("selected")]);
+  const { workspace } = mountWorkspace();
+  await ready(workspace);
+  const at = "2026-10-17T03:00:00Z";
+  service.emitSession("selected", { type: "text", blockId: "reply:0", delta: "已经", at });
+  service.emitSession("selected", { type: "text", blockId: "reply:0", content: "已经完成", delta: "完成", at });
+  await setImmediate();
+  assert.equal(workspace.liveBlocks.value.blocks["reply:0"].content, "已经完成");
+  assert.equal(workspace.activeSession.value.events.length, 0);
+  service.emitSession("selected", { type: "text", blockId: "reply:0", content: "", done: true, at });
+  await setImmediate();
+  assert.equal(workspace.liveBlocks.value.blocks["reply:0"], undefined);
+  assert.equal(workspace.activeSession.value.events[0].content, "");
+});
+
+test("user and terminal events discard interrupted fragments while waiting and running preserve them", async () => {
+  const service = backend([session("selected")]);
+  const { workspace } = mountWorkspace();
+  await ready(workspace);
+  const at = "2026-10-17T03:00:00Z";
+  for (const event of [
+    { type: "user", text: "下一轮" },
+    { type: "status", status: "idle" },
+    { type: "status", status: "error" },
+    { type: "error", message: "执行中断" },
+  ]) {
+    service.emitSession("selected", { type: "status", status: "running", at });
+    service.emitSession("selected", { type: "thinking", blockId: "interrupted:0", delta: "未完成思考", at });
+    service.emitSession("selected", { type: "text", blockId: "interrupted:1", delta: "未完成正文", at });
+    await setImmediate();
+    assert.equal(Object.keys(workspace.liveBlocks.value.blocks).length, 2);
+    service.emitSession("selected", { ...event, at });
+    await setImmediate();
+    assert.deepEqual(workspace.liveBlocks.value.blocks, {});
+  }
+  service.emitSession("selected", { type: "status", status: "running", at });
+  service.emitSession("selected", { type: "text", blockId: "pending:0", delta: "待确认正文", at });
+  for (const status of ["waiting", "running"]) service.emitSession("selected", { type: "status", status, at });
+  await setImmediate();
+  assert.equal(workspace.liveBlocks.value.blocks["pending:0"].content, "待确认正文");
+  assert.equal(workspace.activeSession.value.events.some((event) => event.delta !== undefined), false);
+});
+
+test("history selection, new draft, credentials and document disposal never retain another conversation's fragments", async () => {
+  const service = backend([session("A", "2026-10-17T02:00:00Z"), session("B")]);
+  const { workspace, app } = mountWorkspace();
+  await ready(workspace);
+  const stream = (id) => service.emitSession(id, { type: "text", blockId: "partial:0", delta: `来自 ${id}`, at: "2026-10-17T03:00:00Z" });
+  stream("A"); await setImmediate();
+  const selecting = workspace.selectSession("B");
+  assert.deepEqual(workspace.liveBlocks.value, { sessionId: "B", blocks: {} });
+  await selecting; stream("B"); await setImmediate();
+  assert.equal(workspace.liveBlocks.value.blocks["partial:0"].content, "来自 B");
+  workspace.startNewConversation();
+  assert.deepEqual(workspace.liveBlocks.value, { sessionId: null, blocks: {} });
+  await workspace.selectSession("A"); stream("A"); await setImmediate();
+  workspace.token.value = "replacement-token";
+  assert.deepEqual(workspace.liveBlocks.value, { sessionId: null, blocks: {} });
+  await workspace.loadWorkspace(); await ready(workspace); stream("A"); await setImmediate();
+  app.unmount(); mounted.splice(mounted.indexOf(app), 1);
+  assert.deepEqual(workspace.liveBlocks.value, { sessionId: null, blocks: {} });
+});
+
+test("starting an optimistic next turn and receiving a terminal cancellation drop leftover partial content", async () => {
+  const service = backend([session("selected")]);
+  const { workspace } = mountWorkspace();
+  await ready(workspace);
+  const at = "2026-10-17T03:00:00Z";
+  service.emitSession("selected", { type: "text", blockId: "old:0", delta: "上轮残片", at });
+  await setImmediate();
+  const held = service.hold("/api/sessions/selected/messages", "POST");
+  const pending = workspace.sendMessage("下一轮问题");
+  assert.equal(workspace.pendingMessage.value.text, "下一轮问题");
+  assert.deepEqual(workspace.liveBlocks.value.blocks, {});
+  held.release(); await pending;
+  service.emitSession("selected", { type: "text", blockId: "cancelled:0", delta: "停止中的残片", at });
+  await setImmediate();
+  assert.equal(await workspace.cancel(), true);
+  assert.deepEqual(workspace.liveBlocks.value.blocks, {});
+});
+
+test("session reconnect resets partial text, replays only persisted events and resumes at their exact cursor", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const original = session("selected");
+  original.events = [{ type: "user", text: "查询库存", at: original.createdAt }];
+  const service = backend([original]);
+  const { workspace } = mountWorkspace();
+  await ready(workspace);
+  const at = "2026-10-17T03:00:00Z";
+  service.emitSession("selected", { type: "text", blockId: "reply:0", delta: "连接中断前", at });
+  service.emitSession("selected", { type: "tool", blockId: "reply:1", tool: { id: "tool", name: "inventory", status: "running" }, at });
+  await setImmediate();
+  assert.equal(workspace.activeSession.value.events.length, 2);
+  service.closeSessionStream("selected");
+  await until(() => workspace.error.value.startsWith("事件连接中断"), "Stream interruption was not detected");
+  // These persisted events occur while disconnected and must arrive through since replay.
+  service.emitSession("selected", { type: "text", blockId: "reply:0", content: "最终的完整正文", done: true, at });
+  service.emitSession("selected", { type: "tool", blockId: "reply:1", tool: { id: "tool", name: "inventory", status: "success", result: "完成" }, at });
+  t.mock.timers.tick(2000);
+  await until(() => service.streamCount("selected") === 1 && workspace.activeSession.value.events.length === 4, "Reconnect failed to replay persisted events");
+  assert.equal(service.calls.filter((call) => call.path === "/api/sessions/selected/events").at(-1).search, "?since=2");
+  assert.deepEqual(workspace.liveBlocks.value.blocks, {});
+  assert.deepEqual(workspace.activeSession.value.events, service.sessions.get("selected").events);
+  service.emitSession("selected", { type: "thinking", blockId: "next:0", delta: "重连后新片段", at });
+  await setImmediate();
+  assert.equal(workspace.liveBlocks.value.blocks["next:0"].content, "重连后新片段");
+  assert.equal(workspace.activeSession.value.events.length, 4);
+  service.closeSessionStream("selected");
+  await until(() => workspace.error.value.startsWith("事件连接中断"), "Second interruption was not detected");
+  t.mock.timers.tick(2000);
+  await until(() => service.streamCount("selected") === 1, "Second reconnect failed");
+  assert.equal(service.calls.filter((call) => call.path === "/api/sessions/selected/events").at(-1).search, "?since=4");
+  assert.deepEqual(workspace.liveBlocks.value.blocks, {});
+  service.emitSession("selected", { type: "thinking", blockId: "next:0", delta: "重新发送片段", at });
+  await setImmediate();
+  assert.equal(workspace.liveBlocks.value.blocks["next:0"].content, "重新发送片段");
+});
+
+test("late deltas after persisted stop, error or idle stay discarded until a new persisted turn starts", async () => {
+  const service = backend([session("selected")]);
+  const { workspace } = mountWorkspace();
+  await ready(workspace);
+  const at = "2026-10-17T03:00:00Z";
+  const boundaries = [
+    { type: "status", status: "idle" },
+    { type: "status", status: "error" },
+    { type: "error", message: "执行已取消" },
+  ];
+  for (const [index, terminal] of boundaries.entries()) {
+    service.emitSession("selected", { type: "status", status: "running", at });
+    service.emitSession("selected", { type: "text", blockId: `old-${index}:0`, delta: "执行中的内容", at });
+    service.emitSession("selected", { ...terminal, at });
+    await setImmediate();
+    assert.deepEqual(workspace.liveBlocks.value.blocks, {});
+    const cursor = workspace.activeSession.value.events.length;
+    service.emitSession("selected", { type: "text", blockId: `old-${index}:0`, delta: "迟到正文", at });
+    service.emitSession("selected", { type: "thinking", blockId: `old-${index}:1`, delta: "迟到思考", at });
+    await setImmediate();
+    assert.deepEqual(workspace.liveBlocks.value.blocks, {});
+    assert.equal(workspace.activeSession.value.events.length, cursor);
+    // A waiting notification is not the start of another user/agent turn.
+    service.emitSession("selected", { type: "status", status: "waiting", at });
+    service.emitSession("selected", { type: "text", blockId: `old-${index}:0`, delta: "仍然迟到", at });
+    await setImmediate();
+    assert.deepEqual(workspace.liveBlocks.value.blocks, {});
+    assert.equal(workspace.activeSession.value.events.length, cursor + 1);
+    const start = index % 2 ? { type: "status", status: "running", at } : { type: "user", text: "开始下一轮", at };
+    service.emitSession("selected", start);
+    await setImmediate();
+    // Global metadata can arrive ahead of done events; it must not close a turn.
+    service.publish({ ...service.sessions.get("selected"), status: "idle", updatedAt: "2026-10-17T03:00:01Z" });
+    await setImmediate();
+    service.emitSession("selected", { type: "text", blockId: `new-${index}:0`, delta: "新一轮片段", at });
+    await setImmediate();
+    assert.equal(workspace.liveBlocks.value.blocks[`new-${index}:0`].content, "新一轮片段");
+    assert.equal(workspace.activeSession.value.events.length, cursor + 2);
+    assert.deepEqual(workspace.activeSession.value.events, service.sessions.get("selected").events);
+  }
 });

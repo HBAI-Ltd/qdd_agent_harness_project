@@ -23,6 +23,7 @@ declare module 'vue' {
     StoreOverview: typeof import('./../components/StoreOverview.vue')['default']
     TaskPreview: typeof import('./../components/TaskPreview.vue')['default']
     WorkspaceData: typeof import('./../components/WorkspaceData.vue')['default']
+    WorkspaceRecords: typeof import('./../components/WorkspaceRecords.vue')['default']
     WorkspaceSettings: typeof import('./../components/WorkspaceSettings.vue')['default']
     WorkspaceSidebar: typeof import('./../components/WorkspaceSidebar.vue')['default']
   }

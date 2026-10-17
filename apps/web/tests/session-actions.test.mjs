@@ -11,8 +11,9 @@ registerHooks({
   resolve(specifier, context, nextResolve) {
     if (context.parentURL?.startsWith("data:text/javascript,")) {
       if (dependencies.has(specifier)) return { url: dependencies.get(specifier), shortCircuit: true };
-      if (specifier === "element-plus") return { url: controls, shortCircuit: true };
+      if (specifier.startsWith("element-plus/es/components/")) return { url: controls, shortCircuit: true };
       if (specifier === "@/components/AgentIcon.vue") return { url: "data:text/javascript,export default {}", shortCircuit: true };
+      if (specifier === "@/utils/approvalPreview") return { url: new URL("../src/utils/approvalPreview.ts", import.meta.url).href, shortCircuit: true };
     }
     return nextResolve(specifier, context);
   },

@@ -1,0 +1,134 @@
+#include "qdd_ui_model.h"
+#include <string.h>
+
+static const char *notice(const char *feedback) {
+    if (!feedback || !*feedback) return "";
+    static const struct { const char *code; const char *text; } notes[] = {
+        {"PHYSICAL_STOP", "已紧急停止"},
+        {"UNLOCKED", "急停已解除"},
+        {"ENABLED", "现在可以操作手机"},
+        {"PAIRING", "配对窗口已打开两分钟"},
+        {"USB_REPLY_FAILED", "电脑通信已断开"},
+        {"LOCKED", "选择取消急停并确认"},
+        {"NOT_CONNECTED", "手机蓝牙尚未连接"},
+        {"NOT_AUTHENTICATED", "请先完成手机安全配对"},
+        {"HID_NOT_READY", "手机仍在连接，请稍候"},
+        {"HEARTBEAT_EXPIRED", "请先启动电脑操作台"},
+        {"HID_SEND_FAILED", "手机操作未送达"},
+        {"BAD_COMMAND", "电脑指令格式错误"},
+        {"LINE_TOO_LONG", "电脑指令过长"},
+        {"STARTUP_FAILED", "设备初始化失败"},
+        {"CONTROL_BUSY", "另一台电脑正在连接"},
+        {"CONFIGURING", "正在设置网络"},
+        {"WIFI_FAILED", "网络连接失败，可用数据线"},
+        {"WIFI_CONNECTED", "网络已连接，等待电脑"},
+    };
+    for (size_t i = 0; i < sizeof(notes) / sizeof(notes[0]); i++) {
+        if (strcmp(feedback, notes[i].code) == 0) return notes[i].text;
+    }
+    return "操作未完成，请重试";
+}
+
+qdd_ui_view_t qdd_ui_model(const qdd_hid_state_t *state, bool usb_connected,
+                          bool pairing_open, bool passkey_visible, uint32_t passkey,
+                          uint64_t now_ms, const char *feedback, uint64_t feedback_ms) {
+    qdd_ui_view_t view = {0};
+    view.computer_online = usb_connected && state->heartbeat_seen &&
+        now_ms >= state->last_ping_ms && now_ms - state->last_ping_ms <= QDD_HEARTBEAT_MS;
+    view.phone_secure = state->connected && state->encrypted && state->authenticated && state->bonded;
+    view.computer = view.computer_online ? "电脑已连接" : "电脑未连接";
+    view.phone = view.phone_secure ? "手机已连接" :
+        state->connected ? "手机配对中" : state->bonded ? "手机未连接" : "手机未配对";
+    view.accent = 0xF58C6C;
+    view.confirm = "上下选设置，确认进入";
+    view.show_passkey = pairing_open && passkey_visible && passkey <= 999999;
+    view.pairing = view.show_passkey ? "请在手机输入配对码" :
+        pairing_open ? "请在手机蓝牙中选择" : "手机蓝牙名称";
+    view.notice = now_ms >= feedback_ms && now_ms - feedback_ms < QDD_UI_NOTICE_MS ? notice(feedback) : "";
+
+    if (state->locked) {
+        view.stage = QDD_UI_LOCKED;
+        view.accent = 0xFF9B87;
+        view.title = "已紧急停止";
+        view.detail = "手机操作已经停止";
+        view.next = "选择取消急停并确认";
+    } else if (!view.computer_online) {
+        view.stage = QDD_UI_COMPUTER;
+        view.title = "等待电脑连接";
+        view.detail = "先连接Wi-Fi或电脑数据线";
+        view.next = "再打开电脑操作台";
+    } else if (!view.phone_secure) {
+        view.stage = QDD_UI_PHONE;
+        view.title = state->bonded && !state->connected ? "等待手机连接" : "请先配对手机";
+        view.detail = state->bonded && !state->connected ? "请打开手机蓝牙" : "在手机蓝牙中选择本设备";
+        view.next = pairing_open ? "配对窗口已打开" : "设置中选择手机蓝牙配对";
+    } else if (!state->ready) {
+        view.stage = QDD_UI_HID;
+        view.title = "手机连接中";
+        view.detail = "手机正在准备接收操作";
+        view.next = "请稍候";
+    } else {
+        view.stage = QDD_UI_ENABLED;
+        view.accent = 0x93DDB8;
+        view.title = "可以远程操作";
+        view.detail = "点击电脑画面即可操作";
+        view.next = "按Esc退出遥控";
+    }
+    return view;
+}
+
+qdd_ui_view_t qdd_ui_onboarding_model(const qdd_hid_state_t *state, bool computer_live,
+                          bool pairing_open, bool passkey_visible, uint32_t passkey,
+                          uint64_t now_ms, const char *feedback, uint64_t feedback_ms,
+                          const qdd_ui_onboarding_t *onboarding) {
+    qdd_ui_view_t view = qdd_ui_model(state, computer_live, pairing_open, passkey_visible,
+                                    passkey, now_ms, feedback, feedback_ms);
+    if (state->locked) return view;
+    // A working earlier installation remains usable without repeating setup.
+    // Once the new App registers, its projection state controls the guide.
+    if (!onboarding->require_full && !onboarding->phone_seen && view.computer_online && view.phone_secure && state->ready) {
+        view.onboarding_step = 6;
+        return view;
+    }
+    if (!onboarding->wifi_connected) {
+        view.stage = QDD_UI_WIFI;
+        view.onboarding_step = 1;
+        view.title = "连接无线网络";
+        view.detail = "上下选设置，确认进入";
+        view.next = "选择无线网络并连接";
+    } else if (!onboarding->phone_fresh) {
+        view.stage = onboarding->downloaded || onboarding->phone_seen ? QDD_UI_INSTALL : QDD_UI_DOWNLOAD;
+        view.onboarding_step = view.stage == QDD_UI_DOWNLOAD ? 2 : 3;
+        view.show_qr = true;
+        view.title = view.stage == QDD_UI_DOWNLOAD ? "手机扫码安装" : "打开手机投屏";
+        view.detail = view.stage == QDD_UI_DOWNLOAD ? "下载并安装投屏App" : "安装后打开投屏App";
+        view.next = "手机和控制板连同一Wi-Fi";
+    } else if (!view.phone_secure || !state->ready) {
+        view.stage = view.phone_secure ? QDD_UI_HID : QDD_UI_PHONE;
+        view.onboarding_step = 4;
+        view.title = view.phone_secure ? "蓝牙连接中" : "连接手机蓝牙";
+        view.detail = view.phone_secure ? "手机正在准备键盘鼠标" : "在手机蓝牙中选择";
+        view.next = view.phone_secure ? "请稍候" : pairing_open ? "按手机提示完成配对" : "设置中选择手机蓝牙配对";
+    } else if (!onboarding->projecting) {
+        view.stage = QDD_UI_COMPUTER;
+        view.onboarding_step = 5;
+        view.wait_projection = true;
+        view.title = "分享手机画面";
+        view.detail = "手机App点开始投屏";
+        view.next = "同意共享后启动电脑";
+    } else if (!view.computer_online) {
+        view.stage = QDD_UI_COMPUTER;
+        view.onboarding_step = 5;
+        view.title = "连接电脑操作台";
+        view.detail = "电脑打开设备操作台";
+        view.next = "自动找到手机和控制板";
+    } else {
+        view.onboarding_step = 6;
+        view.stage = QDD_UI_ENABLED;
+        view.accent = 0x93DDB8;
+        view.title = "可以远程操作";
+        view.detail = "电脑点击画面就能操作";
+        view.next = "按Esc退出远程操作";
+    }
+    return view;
+}

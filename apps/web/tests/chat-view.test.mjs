@@ -59,7 +59,7 @@ registerHooks({
   resolve(specifier, context, nextResolve) {
     if (context.parentURL?.startsWith("data:text/javascript,")) {
       if (specifier === "vue") return { url: vueUrl, shortCircuit: true };
-      if (specifier === "element-plus") return { url: controlsUrl, shortCircuit: true };
+      if (specifier.startsWith("element-plus/es/components/")) return { url: controlsUrl, shortCircuit: true };
       if (specifier === "@/composables/workspaceContext") return { url: contextUrl, shortCircuit: true };
       if (specifier === "@/api/workspace") return { url: workspaceApiUrl, shortCircuit: true };
       if (specifier === "@/composables/useComposer") return { url: composerUrl, shortCircuit: true };
@@ -86,10 +86,12 @@ const { default: ChatView } = await import(await compileComponent("../src/views/
 const { setContext } = await import(contextUrl);
 const mounted = [];
 const at = "2026-10-17T03:00:00Z";
+let blockIndex = 0;
 const user = (text) => ({ type: "user", text, at });
-const say = (text) => ({ type: "say", text, at });
-const thinking = (text) => ({ type: "thinking", text, at });
-const tool = (callId, status, extra = {}) => ({ type: "tool", callId, name: "查询库存", status, text: "查询库存", at, ...extra });
+const textBlock = (blockId, content) => ({ type: "text", blockId, content, done: true, at });
+const say = (text) => textBlock(`fixture:${blockIndex++}`, text);
+const thinking = (content, blockId = `fixture:${blockIndex++}`) => ({ type: "thinking", blockId, content, done: true, at });
+const tool = (id, status, extra = {}, blockId = `fixture:${blockIndex++}`) => ({ type: "tool", blockId, tool: { id, name: "查询库存", status, ...extra }, at });
 const session = (status = "idle", events = []) => ({ id: "session-1", title: "库存", events, status, slug: null });
 
 function remove(node) {
@@ -105,6 +107,7 @@ async function mount(initialSession, sendResult = async () => true) {
   const workspace = {
     activeSession: ref(initialSession),
     activeSessionId: ref(initialSession?.id ?? null),
+    liveBlocks: ref({ sessionId: initialSession?.id ?? null, blocks: {} }),
     revisionPageSlug: ref(null),
     preferences: ref({ enterToSend: true }),
     connected: ref(true),
@@ -187,6 +190,19 @@ const form = (root) => findAll(root, (node) => node.tag === "form")[0];
 const submit = (root) => form(root).props.onSubmit({ preventDefault() {} });
 const processes = (root) => findAll(root, (node) => node.tag === "details" && hasClass("chat-process")(node));
 const summary = (node) => node.children.find((child) => child.tag === "summary");
+const assistantMain = (assistant) => findAll(assistant, hasClass("chat-message-main"))[0];
+const replyParts = (assistant) => findAll(assistant, (node) => hasClass("chat-process")(node) || hasClass("chat-answer")(node));
+function inlineActivity(root, assistant = findAll(root, hasClass("chat-message-assistant")).at(-1)) {
+  const indicators = findAll(root, hasClass("chat-activity"));
+  assert.equal(indicators.length, 1);
+  assert.ok(assistant);
+  const main = assistantMain(assistant);
+  assert.equal(indicators[0].parent, main);
+  assert.equal(main.children.filter((node) => node.tag).at(-1), indicators[0]);
+  assert.equal(indicators[0].props.role, "status");
+  assert.equal(findAll(assistant, hasClass("chat-avatar-assistant")).length, 1);
+  return indicators[0];
+}
 
 afterEach(() => {
   for (const { app, scope } of mounted.splice(0)) {
@@ -298,6 +314,9 @@ test("first send immediately replaces welcome with the optimistic message, loadi
   assert.equal(findAll(root, hasClass("chat-welcome")).length, 0);
   assert.match(textContent(root), /正在发送…/);
   assert.equal(findAll(root, (node) => node.props?.role === "status").length, 1);
+  assert.equal(findAll(root, hasClass("chat-message-assistant")).length, 1);
+  assert.equal(findAll(root, hasClass("chat-avatar-assistant")).length, 1);
+  const activity = inlineActivity(root);
   assert.equal(button(root, "停止回复").props.type, "button");
   assert.equal(button(root, "发送消息"), undefined);
   await button(root, "停止回复").props.onClick();
@@ -306,11 +325,13 @@ test("first send immediately replaces welcome with the optimistic message, loadi
   assert.equal(workspace.cancelling.value, true);
   assert.equal(button(root, "停止回复").props.disabled, true);
   assert.match(textContent(root), /正在停止…/);
+  assert.equal(inlineActivity(root), activity);
 });
 
 test("existing messages stay mounted while submitting and the server echo replaces the optimistic bubble", async () => {
-  const { root, workspace, draft } = await mount(session("done", [user("已有问题"), say("已有回复")]));
+  const { root, workspace, draft } = await mount(session("idle", [user("已有问题"), say("已有回复")]));
   const originalList = findAll(root, hasClass("chat-messages-scroll"))[0];
+  const historicalAssistant = findAll(root, hasClass("chat-message-assistant"))[0];
   draft.value = "继续分析库存";
   await nextTick();
   await submit(root);
@@ -319,6 +340,9 @@ test("existing messages stay mounted while submitting and the server echo replac
   assert.deepEqual(messages(root), ["已有问题", "已有回复", "继续分析库存"]);
   assert.equal(findAll(root, hasClass("chat-messages-scroll"))[0], originalList);
   assert.equal(findAll(root, hasClass("chat-loading")).length, 0);
+  assert.equal(findAll(root, hasClass("chat-message-assistant")).length, 2);
+  assert.equal(findAll(historicalAssistant, hasClass("chat-activity")).length, 0);
+  inlineActivity(root);
   workspace.activeSession.value.events.push(user("继续分析库存"));
   workspace.pendingMessage.value = undefined;
   workspace.activeSession.value.status = "running";
@@ -327,6 +351,10 @@ test("existing messages stay mounted while submitting and the server echo replac
   assert.deepEqual(messages(root), ["已有问题", "已有回复", "继续分析库存"]);
   assert.equal(findAll(root, hasClass("chat-messages-scroll"))[0], originalList);
   assert.match(textContent(root), /助手正在回复…/);
+  assert.equal(findAll(root, hasClass("chat-message-assistant")).length, 2);
+  assert.equal(findAll(root, hasClass("chat-message-assistant"))[0], historicalAssistant);
+  assert.equal(findAll(historicalAssistant, hasClass("chat-activity")).length, 0);
+  inlineActivity(root);
 });
 
 test("busy Enter never submits again, drafts remain editable and stopping restores sending", async () => {
@@ -351,7 +379,8 @@ test("busy Enter never submits again, drafts remain editable and stopping restor
   await button(root, "停止回复").props.onClick();
   await nextTick();
   assert.match(textContent(root), /正在停止…/);
-  workspace.activeSession.value.status = "cancelled";
+  workspace.activeSession.value.status = "idle";
+  workspace.activeSession.value.events.push({ type: "error", message: "已取消", at });
   workspace.responding.value = false;
   workspace.sending.value = false;
   workspace.canCancel.value = false;
@@ -360,6 +389,7 @@ test("busy Enter never submits again, drafts remain editable and stopping restor
   assert.equal(draft.value, "下一条草稿");
   assert.equal(button(root, "停止回复"), undefined);
   assert.equal(button(root, "发送消息").props.disabled, false);
+  assert.equal(findAll(root, hasClass("chat-activity")).length, 0);
   input(root).props.onKeydown(event());
   assert.deepEqual(calls.submit, ["下一条草稿"]);
 });
@@ -372,6 +402,8 @@ test("waiting for questions or approval has an explicit prompt and can be stoppe
   await nextTick();
   assert.match(textContent(root), /等待你的确认/);
   assert.equal(findAll(root, hasClass("chat-loading-dots")).length, 0);
+  assert.equal(findAll(root, hasClass("chat-message-assistant")).length, 1);
+  const activity = inlineActivity(root);
   assert.equal(button(root, "停止回复").props.disabled, false);
   await submit(root);
   assert.deepEqual(calls.submit, []);
@@ -379,6 +411,7 @@ test("waiting for questions or approval has an explicit prompt and can be stoppe
   await nextTick();
   assert.equal(calls.cancel, 1);
   assert.match(textContent(root), /正在停止…/);
+  assert.equal(inlineActivity(root), activity);
   assert.equal(draft.value, "保留的草稿");
 });
 
@@ -404,11 +437,11 @@ test("empty, disconnected and loading states do not send and Enter-to-send prefe
   assert.deepEqual(calls.submit, ["有效内容"]);
 });
 
-test("each assistant turn places independently collapsed process rows above its Markdown answer", async () => {
-  const { root } = await mount(session("done", [
+test("each assistant turn renders independently collapsed process rows in the order of its Markdown answers", async () => {
+  const { root } = await mount(session("idle", [
     user("查看库存"),
     thinking("**先核对**数据来源"),
-    tool("inventory", "completed", { input: { store: "A" }, output: "120 件" }),
+    tool("inventory", "success", { args: { store: "A" }, result: "120 件" }),
     say("## 库存结果\n\n库存 **120** 件。"),
     user("继续分析"),
     thinking("检查变化"),
@@ -425,10 +458,9 @@ test("each assistant turn places independently collapsed process rows above its 
     assert.ok(summary(row));
     assert.equal(summary(row).props.onClick, undefined);
   }
-  const main = findAll(assistants[0], hasClass("chat-message-main"))[0];
-  const activity = findAll(main, hasClass("chat-activities"))[0];
-  const answer = findAll(main, hasClass("chat-answer"))[0];
-  assert.ok(main.children.indexOf(activity) < main.children.indexOf(answer));
+  const answer = findAll(assistants[0], hasClass("chat-answer"))[0];
+  assert.deepEqual(replyParts(assistants[0]), [rows[0], rows[1], answer]);
+  assert.equal(findAll(root, hasClass("chat-activities")).length, 0);
   assert.match(textContent(summary(rows[0])), /思考/);
   assert.match(textContent(summary(rows[1])), /查询库存已完成/);
   assert.match(findAll(rows[0], hasClass("markdown-content"))[0].props.innerHTML, /<strong>先核对<\/strong>/);
@@ -441,16 +473,16 @@ test("each assistant turn places independently collapsed process rows above its 
 test("tool lifecycle updates one keyed row, preserves native expansion and distinguishes failure from running", async () => {
   const { root, workspace } = await mount(session("running", [
     user("查询门店"),
-    thinking("先查询库存"),
-    tool("inventory", "running", { input: { store: "A" } }),
-    tool("sales", "running", { name: "查询销售" }),
+    thinking("先查询库存", "reply:0"),
+    tool("inventory", "running", { args: { store: "A" } }, "reply:1"),
+    tool("sales", "running", { name: "查询销售" }, "reply:2"),
   ]));
   const [thought, inventory, sales] = processes(root);
   inventory.open = true;
   thought.open = false;
   workspace.activeSession.value.events.push(
-    tool("inventory", undefined, { text: "已读取 100 条" }),
-    tool("inventory", "failed", { output: "连接超时" }),
+    tool("inventory", "running", { progress: "已读取 100 条" }, "reply:1"),
+    tool("inventory", "error", { result: "连接超时" }, "reply:1"),
     say("稍后重试。"),
   );
   await nextTick();
@@ -468,8 +500,230 @@ test("tool lifecycle updates one keyed row, preserves native expansion and disti
   assert.deepEqual(messages(root), ["查询门店", "稍后重试。"]);
 });
 
+test("text, tool, text and later tools append in sequence with inline loading after the last part", async () => {
+  const { root, workspace } = await mount(session("running", [user("分析门店"), textBlock("reply:0", "先读取库存。")]));
+  workspace.responding.value = true;
+  await nextTick();
+  const assistant = findAll(root, hasClass("chat-message-assistant"))[0];
+  const firstAnswer = replyParts(assistant)[0];
+  const loading = inlineActivity(root, assistant);
+  workspace.activeSession.value.events.push(tool("inventory", "running", {}, "reply:1"));
+  await nextTick();
+  const inventory = processes(root)[0];
+  inventory.open = true;
+  assert.deepEqual(replyParts(assistant), [firstAnswer, inventory]);
+  assert.equal(inlineActivity(root), loading);
+  workspace.activeSession.value.events.push(textBlock("reply:2", "库存已读取，继续查询销售。"), tool("sales", "running", { name: "查询销售" }, "reply:3"));
+  await nextTick();
+  const secondAnswer = findAll(assistant, hasClass("chat-answer"))[1];
+  const sales = processes(root)[1];
+  sales.open = true;
+  assert.deepEqual(replyParts(assistant), [firstAnswer, inventory, secondAnswer, sales]);
+  assert.equal(inlineActivity(root), loading);
+  workspace.activeSession.value.events.push(tool("inventory", "success", { result: "120 件" }, "reply:1"));
+  await nextTick();
+  assert.deepEqual(replyParts(assistant), [firstAnswer, inventory, secondAnswer, sales]);
+  assert.equal(inventory.open, true);
+  assert.equal(sales.open, true);
+  assert.equal(inventory.props["data-status"], "completed");
+  assert.equal(inlineActivity(root), loading);
+  workspace.activeSession.value.events.push(tool("sales", "success", { result: "100 元" }, "reply:3"), textBlock("reply:4", "**汇总完成**。"));
+  workspace.activeSession.value.status = "idle";
+  workspace.responding.value = false;
+  await nextTick();
+  const finalAnswer = findAll(assistant, hasClass("chat-answer"))[2];
+  assert.deepEqual(replyParts(assistant), [firstAnswer, inventory, secondAnswer, sales, finalAnswer]);
+  assert.equal(findAll(root, hasClass("chat-message-assistant"))[0], assistant);
+  assert.equal(findAll(root, hasClass("chat-message-assistant")).length, 1);
+  assert.equal(findAll(root, hasClass("chat-avatar-assistant")).length, 1);
+  assert.equal(findAll(root, hasClass("chat-activity")).length, 0);
+  assert.equal(inventory.open, true);
+  assert.equal(sales.open, true);
+  assert.deepEqual(messages(root), ["分析门店", "先读取库存。", "库存已读取，继续查询销售。", "汇总完成。"]);
+});
+
+test("skill and browser rows stay between their surrounding Markdown answers", async () => {
+  const { root } = await mount(session("idle", [
+    user("分析网页"),
+    textBlock("reply:0", "先加载分析技能。"),
+    { type: "skill", skill: { id: "analysis", name: "网页分析" }, action: "loaded", at },
+    textBlock("reply:1", "继续打开网页。"),
+    browserEvent(),
+    textBlock("reply:2", "开始读取页面。"),
+    tool("read", "success", { name: "读取页面", result: "读取完成" }, "reply:3"),
+    textBlock("reply:4", "**分析完成**。"),
+  ]));
+  const assistant = findAll(root, hasClass("chat-message-assistant"))[0];
+  const [skill, browser, read] = processes(root);
+  const [beforeSkill, beforeBrowser, beforeTool, final] = findAll(assistant, hasClass("chat-answer"));
+  assert.deepEqual(replyParts(assistant), [beforeSkill, skill, beforeBrowser, browser, beforeTool, read, final]);
+  assert.match(textContent(summary(skill)), /网页分析已加载/);
+  assert.match(textContent(summary(browser)), /浏览器已打开/);
+  assert.match(textContent(summary(read)), /读取页面已完成/);
+  assert.equal(findAll(root, hasClass("chat-avatar-assistant")).length, 1);
+  assert.equal(findAll(root, hasClass("chat-activity")).length, 0);
+});
+
+test("streamed thinking and answer Markdown update in place and done snapshots preserve expanded rows", async () => {
+  const { root, workspace } = await mount(session("running", [user("分析库存")]));
+  workspace.responding.value = true;
+  await nextTick();
+  const assistant = findAll(root, hasClass("chat-message-assistant"))[0];
+  const loading = inlineActivity(root, assistant);
+  assert.deepEqual(replyParts(assistant), []);
+  workspace.liveBlocks.value.blocks["reply:0"] = { type: "thinking", content: "**先核对**" };
+  await nextTick();
+  const thought = processes(root)[0];
+  assert.ok(thought);
+  assert.equal(findAll(root, hasClass("chat-message-assistant"))[0], assistant);
+  assert.equal(inlineActivity(root), loading);
+  thought.open = true;
+  assert.match(findAll(thought, hasClass("markdown-content"))[0].props.innerHTML, /<strong>先核对<\/strong>/);
+  workspace.liveBlocks.value.blocks["reply:0"].content += "数据来源";
+  workspace.liveBlocks.value.blocks["reply:1"] = { type: "text", content: "## 库存结果\n\n库存 **120** 件。" };
+  await nextTick();
+  const answer = findAll(assistant, hasClass("chat-answer"))[0];
+  assert.deepEqual(replyParts(assistant), [thought, answer]);
+  assert.equal(inlineActivity(root), loading);
+  assert.match(textContent(thought), /先核对数据来源/);
+  assert.match(findAll(answer, hasClass("markdown-content"))[0].props.innerHTML, /<h2>库存结果<\/h2>/);
+  assert.match(findAll(answer, hasClass("markdown-content"))[0].props.innerHTML, /<strong>120<\/strong>/);
+  workspace.activeSession.value.events.push(thinking("**已核对**最终来源", "reply:0"), textBlock("reply:1", "最终库存 **121** 件。"));
+  // A done snapshot wins even if a stale live block survives the same render tick.
+  await nextTick();
+  assert.equal(findAll(root, hasClass("chat-message-assistant"))[0], assistant);
+  assert.deepEqual(processes(root), [thought]);
+  assert.equal(findAll(assistant, hasClass("chat-answer"))[0], answer);
+  assert.equal(inlineActivity(root), loading);
+  assert.equal(thought.open, true);
+  assert.match(textContent(thought), /已核对最终来源/);
+  assert.doesNotMatch(textContent(thought), /先核对/);
+  assert.deepEqual(messages(root), ["分析库存", "最终库存 121 件。"]);
+  delete workspace.liveBlocks.value.blocks["reply:0"];
+  delete workspace.liveBlocks.value.blocks["reply:1"];
+  await nextTick();
+  assert.equal(processes(root)[0], thought);
+  assert.equal(thought.open, true);
+  assert.equal(findAll(assistant, hasClass("chat-answer"))[0], answer);
+  assert.equal(inlineActivity(root), loading);
+  workspace.activeSession.value.status = "idle";
+  workspace.responding.value = false;
+  await nextTick();
+  assert.equal(findAll(root, hasClass("chat-message-assistant"))[0], assistant);
+  assert.deepEqual(replyParts(assistant), [thought, answer]);
+  assert.equal(thought.open, true);
+  assert.equal(findAll(root, hasClass("chat-avatar-assistant")).length, 1);
+  assert.equal(findAll(root, hasClass("chat-activity")).length, 0);
+});
+
+test("stream content follows the scroll position and never pulls a reader away from older messages", async () => {
+  const { root, workspace } = await mount(session("running", [user("分析库存")]));
+  workspace.liveBlocks.value.blocks["reply:0"] = { type: "text", content: "第一段" };
+  await nextTick();
+  await nextTick();
+  const list = findAll(root, hasClass("chat-messages-scroll"))[0];
+  list.scrollHeight = 1000;
+  list.clientHeight = 300;
+  list.scrollTop = 660;
+  workspace.liveBlocks.value.blocks["reply:0"].content += "继续回复";
+  await nextTick();
+  await nextTick();
+  assert.equal(list.scrollTop, 1000);
+  list.scrollTop = 120;
+  workspace.liveBlocks.value.blocks["reply:0"].content += "更多回复";
+  await nextTick();
+  await nextTick();
+  assert.equal(list.scrollTop, 120);
+  assert.deepEqual(messages(root), ["分析库存", "第一段继续回复更多回复"]);
+});
+
+test("tool success merges several progress updates and a late running event cannot reopen the call", async () => {
+  const { root, workspace } = await mount(session("running", [
+    user("查询门店"), tool("inventory", "running", { args: { store: "A" }, progress: "准备读取" }, "reply:0"),
+  ]));
+  const row = processes(root)[0];
+  row.open = true;
+  workspace.activeSession.value.events.push(
+    tool("inventory", "running", { progress: "已读取 100 条" }, "reply:0"),
+    tool("inventory", "running", { progress: "已读取 120 条" }, "reply:0"),
+    tool("inventory", "success", { result: "120 件" }, "reply:0"),
+    tool("inventory", "running", { progress: "迟到的进度" }, "reply:0"),
+  );
+  await nextTick();
+  assert.deepEqual(processes(root), [row]);
+  assert.equal(row.open, true);
+  assert.equal(row.props["data-status"], "completed");
+  assert.match(textContent(summary(row)), /查询库存已完成/);
+  assert.match(textContent(row), /准备读取/);
+  assert.match(textContent(row), /已读取 100 条/);
+  assert.match(textContent(row), /已读取 120 条/);
+  assert.match(textContent(row), /迟到的进度/);
+  assert.match(textContent(row), /结果120 件/);
+  assert.match(textContent(row), /"store": "A"/);
+});
+
+test("out of order completed blocks use their backend sequence while warnings remain after older answers", async () => {
+  const { root } = await mount(session("idle", [
+    user("生成报告"),
+    tool("inventory", "success", {}, "reply:1"),
+    thinking("最后汇总", "reply:3"),
+    textBlock("reply:4", "第二段"),
+    thinking("先核对来源", "reply:0"),
+    textBlock("reply:2", "第一段"),
+    { type: "warn", text: "部分数据缺失", at },
+    { type: "error", message: "连接中断", at },
+  ]));
+  const rows = processes(root);
+  assert.equal(rows.length, 3);
+  assert.match(textContent(rows[0]), /先核对来源/);
+  assert.match(textContent(rows[1]), /查询库存已完成/);
+  assert.match(textContent(rows[2]), /最后汇总/);
+  const assistant = findAll(root, hasClass("chat-message-assistant"))[0];
+  const answers = findAll(assistant, hasClass("chat-answer"));
+  assert.deepEqual(replyParts(assistant), [rows[0], rows[1], answers[0], rows[2], answers[1], answers[2], answers[3]]);
+  assert.deepEqual(messages(root), ["生成报告", "第一段", "第二段", "部分数据缺失", "连接中断"]);
+});
+
+test("terminal sessions distinguish an explicitly cancelled tool from an incomplete failed request", async () => {
+  const { root, workspace } = await mount(session("running", [user("查询"), tool("inventory", "running")]));
+  const row = processes(root)[0];
+  workspace.activeSession.value.events.push({ type: "error", message: "已取消", at });
+  workspace.activeSession.value.status = "idle";
+  await nextTick();
+  assert.equal(processes(root)[0], row);
+  assert.equal(row.props["data-status"], "cancelled");
+  assert.match(textContent(summary(row)), /已中断/);
+  workspace.activeSession.value = session("idle", [user("查询"), tool("inventory", "running"), { type: "error", message: "网络中断", at }]);
+  await nextTick();
+  assert.equal(processes(root)[0].props["data-status"], "ended");
+  assert.match(textContent(summary(processes(root)[0])), /未完成/);
+  assert.doesNotMatch(textContent(summary(processes(root)[0])), /已完成|已中断|调用中/);
+});
+
+test("reused tool IDs stay isolated in separate assistant turns and old session live blocks remain hidden", async () => {
+  const { root, workspace } = await mount(session("running", [
+    user("第一轮"), tool("reused", "success", { result: "第一轮结果" }, "first:0"),
+    user("第二轮"), tool("reused", "error", { result: "第二轮错误" }, "second:0"),
+  ]));
+  const rows = processes(root);
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].props["data-status"], "completed");
+  assert.equal(rows[1].props["data-status"], "failed");
+  assert.match(textContent(rows[0]), /第一轮结果/);
+  assert.doesNotMatch(textContent(rows[0]), /第二轮错误/);
+  assert.equal(findAll(root, hasClass("chat-avatar-assistant")).length, 2);
+  workspace.liveBlocks.value.blocks["second:1"] = { type: "text", content: "旧会话流式回复" };
+  await nextTick();
+  assert.match(textContent(root), /旧会话流式回复/);
+  workspace.activeSessionId.value = "session-2";
+  workspace.activeSession.value = { ...session("idle", [user("新会话")]), id: "session-2" };
+  await nextTick();
+  assert.deepEqual(messages(root), ["新会话"]);
+  assert.doesNotMatch(textContent(root), /旧会话流式回复/);
+});
+
 test("legacy tool records stay inspectable without inventing successful completion", async () => {
-  const { root } = await mount(session("done", [
+  const { root } = await mount(session("idle", [
     user("查库存"),
     { type: "tool", text: "查询 store__get_inventory", at },
     { type: "tool", text: "工具连接异常", at },
@@ -484,25 +738,25 @@ test("legacy tool records stay inspectable without inventing successful completi
 });
 
 test("switching conversations remounts process rows so expansion cannot leak across sessions", async () => {
-  const events = [user("查库存"), thinking("检查数据"), tool("inventory", "completed")];
-  const { root, workspace } = await mount(session("done", events));
+  const events = [user("查库存"), thinking("检查数据"), tool("inventory", "success")];
+  const { root, workspace } = await mount(session("idle", events));
   const original = processes(root)[0];
   original.open = true;
   workspace.activeSessionId.value = "session-2";
-  workspace.activeSession.value = { ...session("done", events), id: "session-2" };
+  workspace.activeSession.value = { ...session("idle", events), id: "session-2" };
   await nextTick();
   const selected = processes(root)[0];
   assert.notEqual(selected, original);
   assert.equal(selected.open, undefined);
   workspace.activeSessionId.value = "session-1";
-  workspace.activeSession.value = session("done", events);
+  workspace.activeSession.value = session("idle", events);
   await nextTick();
   assert.notEqual(processes(root)[0], selected);
   assert.equal(processes(root)[0].open, undefined);
 });
 
 test("actual Markdown component renders answer tables and code and escapes unsafe HTML in answers and thinking", async () => {
-  const { root } = await mount(session("done", [
+  const { root } = await mount(session("idle", [
     user("生成报告"),
     thinking('**核对来源**\n\n<img src=x onerror="alert(1)">'),
     say('| 门店 | 库存 |\n| --- | ---: |\n| A | **120** |\n\n```js\nconst label = "<script>";\n```\n\n<script>alert(1)</script>\n\n[打开](javascript:alert(1))'),

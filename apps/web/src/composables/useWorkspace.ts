@@ -128,6 +128,10 @@ export function useWorkspace() {
     try { localStorage.setItem(PREFERENCES_KEY, JSON.stringify(preferences.value)); } catch { /* 保留内存中的偏好。 */ }
   }, { deep: true });
 
+  function resetLiveBlocks(sessionId: string | null = null) {
+    liveBlocks.value = { sessionId, blocks: {} };
+  }
+
   function stopConnections() {
     connectionVersion++;
     selectionVersion.value++;
@@ -141,6 +145,7 @@ export function useWorkspace() {
     for (const controller of actionControllers) controller.abort();
     actionControllers.clear();
     reconnectingStreams.clear();
+    resetLiveBlocks();
     connected.value = false;
     loadingSessions.value = false;
     loadingPages.value = false;
@@ -297,14 +302,27 @@ export function useWorkspace() {
   function receiveEvent(id: string, event: SessionEvent) {
     const session = activeSession.value;
     if (!session || session.id !== id) return;
-    if (liveBlocks.value.sessionId !== id) liveBlocks.value = { sessionId: id, blocks: {} };
-    if ((event.type === "text" || event.type === "thinking") && event.delta !== undefined) {
-      // 流式增量不落盘，不能进入 events，否则会打乱 since 续传偏移
-      const block = liveBlocks.value.blocks[event.blockId] ??= { type: event.type, content: "" };
-      block.content += event.delta;
-      return;
+    if (liveBlocks.value.sessionId !== id) resetLiveBlocks(id);
+    if (event.type === "user" || event.type === "error"
+      || (event.type === "status" && (event.status === "idle" || event.status === "error"))) resetLiveBlocks(id);
+    if (event.type === "text" || event.type === "thinking") {
+      if (event.delta !== undefined) {
+        // Deltas are never persisted: adding one to events would corrupt the SSE cursor.
+        // A full content snapshot replaces previous text; only delta-only events append.
+        const boundary = session.events.findLast((entry) => entry.type === "user" || entry.type === "error"
+          || (entry.type === "status" && entry.status !== "waiting"));
+        if (boundary?.type === "error" || (boundary?.type === "status" && (boundary.status === "idle" || boundary.status === "error"))) return;
+        const live = liveBlocks.value.blocks[event.blockId];
+        const persisted = live ? undefined : session.events.findLast((entry) => (entry.type === "text" || entry.type === "thinking") && entry.blockId === event.blockId);
+        if (persisted && (persisted.type === "text" || persisted.type === "thinking") && persisted.done) return;
+        const previous = live?.content
+          ?? (persisted && (persisted.type === "text" || persisted.type === "thinking") ? persisted.content : undefined) ?? "";
+        liveBlocks.value.blocks[event.blockId] = { type: event.type, content: event.content ?? previous + event.delta };
+        return;
+      }
+      if (event.done) delete liveBlocks.value.blocks[event.blockId];
+      else if (event.content !== undefined) liveBlocks.value.blocks[event.blockId] = { type: event.type, content: event.content };
     }
-    if ((event.type === "text" || event.type === "thinking") && event.done) delete liveBlocks.value.blocks[event.blockId];
     session.events.push(event);
     if (event.type === "status" && event.at >= session.updatedAt) session.status = event.status;
     if (event.type === "published") {
@@ -321,10 +339,13 @@ export function useWorkspace() {
     const version = connectionVersion;
     while (!controller.signal.aborted && !disposed && version === connectionVersion && activeSessionId.value === id) {
       try {
+        // Partial deltas have no replay offset. Discard the previous connection's
+        // fragments before replaying persisted events on this stream attempt.
+        resetLiveBlocks(id);
         // 以已加载的事件数量续传，历史回放和重连不会重复追加消息。
         const since = activeSession.value?.events.length ?? 0;
         await api.sessionEvents(gatewayUrl.value, token.value, id, since, (event) => {
-          if (!controller.signal.aborted && !disposed && activeSessionId.value === id) receiveEvent(id, event);
+          if (!controller.signal.aborted && !disposed && version === connectionVersion && activeSessionId.value === id) receiveEvent(id, event);
         }, controller.signal, () => streamOpened(controller));
         if (!controller.signal.aborted) throw new Error("网关关闭了会话事件流。");
       } catch (cause) {
@@ -341,6 +362,7 @@ export function useWorkspace() {
     const selection = ++selectionVersion.value;
     detailController?.abort();
     sessionController?.abort();
+    resetLiveBlocks(id);
     if (sessionController) reconnectingStreams.delete(sessionController);
     const controller = new AbortController();
     detailController = controller;
@@ -371,6 +393,7 @@ export function useWorkspace() {
     selectionVersion.value++;
     detailController?.abort();
     sessionController?.abort();
+    resetLiveBlocks();
     if (sessionController) reconnectingStreams.delete(sessionController);
     activeSessionId.value = null;
     activeSession.value = undefined;
@@ -481,6 +504,7 @@ export function useWorkspace() {
         if (sessionController) reconnectingStreams.delete(sessionController);
         activeSessionId.value = null;
         activeSession.value = undefined;
+        resetLiveBlocks();
       }
     } catch (cause) {
       if (!controller.signal.aborted && !disposed) error.value = errorMessage(cause);
@@ -517,6 +541,7 @@ export function useWorkspace() {
     const controller = new AbortController();
     const request = { stopRequested: false, sessionId: undefined as string | undefined, signal: controller.signal };
     let responseTarget = target;
+    resetLiveBlocks(id);
     sendControllers.add(controller);
     sendRequests.set(target, request);
     pendingSends.value.add(target);
@@ -615,7 +640,10 @@ export function useWorkspace() {
       if (signal.aborted || disposed) return false;
       applyResponseMeta(meta);
       const latest = sessions.value.find((session) => session.id === id);
-      if (latest?.status === "idle" || latest?.status === "error") pendingStops.value.delete(id);
+      if (latest?.status === "idle" || latest?.status === "error") {
+        pendingStops.value.delete(id);
+        if (activeSessionId.value === id) resetLiveBlocks(id);
+      }
       return true;
     } catch (cause) {
       if (!signal.aborted) pendingStops.value.delete(id);

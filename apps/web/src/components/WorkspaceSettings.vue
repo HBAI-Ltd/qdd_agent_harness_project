@@ -1,9 +1,15 @@
 <script setup lang="ts">
 import { computed, nextTick, reactive, ref, watch } from "vue";
-import {
-  ElAlert, ElButton, ElCard, ElDivider, ElForm, ElFormItem, ElInput,
-  ElRadioButton, ElRadioGroup, ElSkeleton, ElSwitch, ElTag,
-} from "element-plus";
+import { ElAlert } from "element-plus/es/components/alert/index";
+import { ElButton } from "element-plus/es/components/button/index";
+import { ElCard } from "element-plus/es/components/card/index";
+import { ElDivider } from "element-plus/es/components/divider/index";
+import { ElForm, ElFormItem } from "element-plus/es/components/form/index";
+import { ElInput } from "element-plus/es/components/input/index";
+import { ElRadioButton, ElRadioGroup } from "element-plus/es/components/radio/index";
+import { ElSkeleton } from "element-plus/es/components/skeleton/index";
+import { ElSwitch } from "element-plus/es/components/switch/index";
+import { ElTag } from "element-plus/es/components/tag/index";
 import type { FormInstance, FormRules } from "element-plus";
 import AgentIcon from "@/components/AgentIcon.vue";
 import { DEFAULT_GATEWAY_URL, normalizeGatewayUrl } from "@/api/workspace";

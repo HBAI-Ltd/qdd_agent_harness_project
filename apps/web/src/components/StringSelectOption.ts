@@ -1,5 +1,5 @@
 import { createVNode, defineComponent } from "vue";
-import { ElOption } from "element-plus";
+import { ElOption } from "element-plus/es/components/select/index";
 
 // The vendor's option prop declarations do not support exactOptionalPropertyTypes.
 // Adapt string-valued options at this boundary without weakening project checks.

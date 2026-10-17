@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import { ElButton, ElCard, ElCheckboxButton, ElCheckboxGroup, ElInput, ElRadioButton, ElRadioGroup } from "element-plus";
+import { ElButton, ElCard, ElCheckboxButton, ElCheckboxGroup, ElCollapse, ElCollapseItem, ElInput, ElRadioButton, ElRadioGroup } from "element-plus";
 import type { ClarifyAnswers, ClarifyQuestion, SessionEvent, SessionStatus } from "@qdd/shared";
 import AgentIcon from "@/components/AgentIcon.vue";
 
@@ -111,6 +111,14 @@ function submitAnswers() {
 function approve(requestId: string, approved: boolean) {
   if (!props.busy) emit("approve", requestId, approved);
 }
+function skillPreview(request: ApprovalEvent) {
+  if (request.tool !== "save_skill") return undefined;
+  const { name, description, steps, tools } = request.args;
+  if (typeof name !== "string" || typeof description !== "string" || !Array.isArray(steps)
+    || !steps.every((step): step is string => typeof step === "string")
+    || (tools !== undefined && (!Array.isArray(tools) || !tools.every((tool): tool is string => typeof tool === "string")))) return undefined;
+  return { name, description, steps, tools: (tools ?? []) as string[] };
+}
 </script>
 
 <template>
@@ -119,7 +127,7 @@ function approve(requestId: string, approved: boolean) {
       <span class="action-avatar"><AgentIcon name="spark" :size="18" /></span>
       <ElCard class="action-card question-card" shadow="never">
         <form @submit.prevent="submitAnswers">
-          <header class="action-heading"><strong>门店助手</strong><span>确认需求 · 第 {{ pendingQuestion.round }} 轮</span></header>
+          <header class="action-heading"><strong>门店助手</strong><span>确认需求<template v-if="pendingQuestion.round > 0"> · 第 {{ pendingQuestion.round }} 轮</template></span></header>
           <p class="action-description">先确认{{ pendingQuestion.questions.length > 1 ? "几件事" : "一件事" }}，再继续执行。已默认选择推荐项。</p>
           <div class="question-list">
             <section
@@ -174,13 +182,25 @@ function approve(requestId: string, approved: boolean) {
     <div v-for="request in pendingApprovals" :key="request.requestId" class="action-message">
       <span class="action-avatar"><AgentIcon name="spark" :size="18" /></span>
       <ElCard class="action-card approval-card" shadow="never">
-        <header class="action-heading"><strong>需要你的授权</strong><span>写入操作</span></header>
-        <p class="action-description">助手申请执行以下操作，请确认后继续。</p>
+        <header class="action-heading"><strong>{{ request.tool === "save_skill" ? "把这套做法保存为技能" : "需要你的授权" }}</strong><span>{{ request.tool === "save_skill" ? "保存前确认" : "写入操作" }}</span></header>
+        <p class="action-description">{{ request.tool === "save_skill" ? "助手整理了以下步骤，确认后可以在其他对话和定时任务中复用。" : "助手申请执行以下操作，请确认后继续。" }}</p>
+        <template v-if="skillPreview(request)">
+          <div class="skill-preview">
+            <h3>{{ skillPreview(request)?.name }}</h3>
+            <p>{{ skillPreview(request)?.description }}</p>
+            <ol><li v-for="(step, index) in skillPreview(request)?.steps" :key="index">{{ step }}</li></ol>
+            <div v-if="skillPreview(request)?.tools.length" class="skill-preview-tools"><span>会用到的工具</span><div><span v-for="tool in skillPreview(request)?.tools" :key="tool">{{ tool }}</span></div></div>
+          </div>
+        </template>
         <dl class="approval-details"><div><dt>工具</dt><dd>{{ request.tool }}</dd></div><div><dt>来源</dt><dd>{{ request.source }}</dd></div></dl>
-        <details class="approval-arguments"><summary>查看操作参数</summary><pre>{{ JSON.stringify(request.args, null, 2) }}</pre></details>
+        <ElCollapse class="approval-arguments">
+          <ElCollapseItem :name="request.requestId" title="查看操作参数">
+            <pre>{{ JSON.stringify(request.args, null, 2) }}</pre>
+          </ElCollapseItem>
+        </ElCollapse>
         <footer class="action-footer">
-          <ElButton :disabled="busy" @click="approve(request.requestId, false)">拒绝</ElButton>
-          <ElButton type="warning" :disabled="busy" @click="approve(request.requestId, true)">允许执行</ElButton>
+          <ElButton :disabled="busy" @click="approve(request.requestId, false)">{{ request.tool === "save_skill" ? "再改改" : "拒绝" }}</ElButton>
+          <ElButton type="warning" :disabled="busy" @click="approve(request.requestId, true)">{{ request.tool === "save_skill" ? "就这样，保存为技能" : "允许执行" }}</ElButton>
         </footer>
       </ElCard>
     </div>
@@ -216,11 +236,20 @@ function approve(requestId: string, approved: boolean) {
 .action-footer :deep(.el-button > span) { gap: 5px; }
 .approval-card { border-color: color-mix(in srgb, var(--qdd-warn) 40%, var(--qdd-border)); background: color-mix(in srgb, var(--qdd-warn) 5%, var(--qdd-surface)); }
 .approval-card .action-heading strong { color: var(--qdd-warn); }
+.skill-preview { margin-bottom: 18px; padding-bottom: 16px; border-bottom: 1px solid var(--qdd-border); }
+.skill-preview h3 { margin: 0 0 5px; color: var(--qdd-text); font-size: 20px; font-weight: 600; }
+.skill-preview > p { margin: 0 0 12px; color: var(--qdd-muted); font-size: 13px; line-height: 1.8; }
+.skill-preview ol { margin: 0 0 14px; padding-left: 22px; color: var(--qdd-text); font-size: 13px; line-height: 1.9; }
+.skill-preview-tools > span { color: var(--qdd-muted); font-size: 12px; }
+.skill-preview-tools > div { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 7px; }
+.skill-preview-tools > div > span { padding: 3px 8px; border: 1px solid var(--qdd-border); border-radius: 5px; background: var(--qdd-surface); font-size: 12px; }
 .approval-details { display: grid; gap: 7px; margin: 0 0 12px; font-size: 13px; }
 .approval-details > div { display: flex; gap: 16px; }
 .approval-details dt { flex: 0 0 auto; color: var(--qdd-muted); }
 .approval-details dd { min-width: 0; margin: 0; color: var(--qdd-text); overflow-wrap: anywhere; }
-.approval-arguments summary { width: fit-content; color: var(--qdd-muted); cursor: pointer; font-size: 12px; }
+.approval-arguments { --el-collapse-header-height: 28px; --el-collapse-header-bg-color: transparent; --el-collapse-header-text-color: var(--qdd-muted); --el-collapse-header-font-size: 12px; --el-collapse-content-bg-color: transparent; border: 0; }
+.approval-arguments :deep(.el-collapse-item__header), .approval-arguments :deep(.el-collapse-item__wrap) { border: 0; }
+.approval-arguments :deep(.el-collapse-item__content) { padding-bottom: 0; }
 .approval-arguments pre { max-height: 220px; overflow: auto; margin: 10px 0 0; padding: 12px; border: 1px solid var(--qdd-border); border-radius: 6px; background: var(--qdd-surface); color: var(--qdd-text); font: 12px/1.7 Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
 @media (max-width: 760px) {
   .question-row { grid-template-columns: 88px minmax(0, 1fr); gap: 9px; }

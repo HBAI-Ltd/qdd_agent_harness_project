@@ -12,9 +12,11 @@ export {}
 declare module 'vue' {
   export interface GlobalComponents {
     AgentIcon: typeof import('./../components/AgentIcon.vue')['default']
+    DashboardPending: typeof import('./../components/DashboardPending.vue')['default']
     RouterLink: typeof import('vue-router')['RouterLink']
     RouterView: typeof import('vue-router')['RouterView']
     SessionActions: typeof import('./../components/SessionActions.vue')['default']
+    SessionBrowser: typeof import('./../components/SessionBrowser.vue')['default']
     StoreOverview: typeof import('./../components/StoreOverview.vue')['default']
     TaskPreview: typeof import('./../components/TaskPreview.vue')['default']
     WorkspaceSettings: typeof import('./../components/WorkspaceSettings.vue')['default']

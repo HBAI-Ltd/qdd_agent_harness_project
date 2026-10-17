@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import type { PageView, SessionDetail, SessionMeta, SessionStatus } from "@qdd/shared";
+import type { Overview, PageView, SessionDetail, SessionMeta, SessionStatus } from "@qdd/shared";
 import { ElAlert, ElButton, ElCard, ElEmpty, ElSkeleton, ElTag } from "element-plus";
 import AgentIcon from "@/components/AgentIcon.vue";
 
@@ -10,6 +10,7 @@ const props = defineProps<{
   pages: PageView[];
   connected: boolean;
   loading: boolean;
+  overview?: Overview | undefined;
 }>();
 const emit = defineEmits<{
   openConversation: [];
@@ -39,9 +40,10 @@ const recentSessions = computed(() => orderedSessions.value.slice(0, 4));
 const recentPages = computed(() => [...props.pages].sort((a, b) => timeValue(b.updatedAt) - timeValue(a.updatedAt)).slice(0, 6));
 const staleCount = computed(() => props.pages.filter((page) => !!page.stale).length);
 const kpis = computed(() => [
-  { label: "进行中对话", value: runningSessions.value.length, icon: "chat", tone: "primary", hint: runningSessions.value.length ? runningSessions.value.slice(0, 2).map((session) => session.title || "未命名对话").join("、") : "当前没有正在执行的对话" },
-  { label: "待处理确认", value: waitingSessions.value.length, icon: "clock", tone: "warning", hint: waitingSessions.value.length ? "回答问题或确认操作，让助手继续执行" : "当前没有需要你处理的确认" },
-  { label: "已发布任务", value: props.pages.length, icon: "plan", tone: "good", hint: staleCount.value ? `${staleCount.value} 个页面待复核` : "分析成果与经营工具，随时打开使用" },
+  { label: "进行中对话", value: props.overview?.sessions.running ?? runningSessions.value.length, icon: "chat", tone: "primary", hint: runningSessions.value.length ? runningSessions.value.slice(0, 2).map((session) => session.title || "未命名对话").join("、") : "当前没有正在执行的对话" },
+  { label: "待处理确认", value: props.overview?.pending.length ?? waitingSessions.value.length, icon: "clock", tone: "warning", hint: "回答问题或确认操作，让助手继续执行" },
+  { label: "已发布任务", value: props.overview?.pages.total ?? props.pages.length, icon: "plan", tone: "good", hint: staleCount.value ? `${staleCount.value} 个页面待复核` : "分析成果与经营工具，随时打开使用" },
+  { label: "已启用定时任务", value: props.overview?.schedules.enabled ?? 0, icon: "clock", tone: "primary", hint: props.overview?.schedules.next ? `下次：${props.overview.schedules.next.name} · ${displayDate(props.overview.schedules.next.at)}` : "暂无下次执行计划" },
 ]);
 
 function timeValue(value: string): number {
@@ -71,20 +73,20 @@ function displayDate(value: string): string {
 
     <ElAlert v-if="!connected" class="overview-connection" title="连接工作空间后，对话进度与任务页面会在这里集中展示。" type="info" show-icon :closable="false" />
     <template v-else>
-      <section class="pending-section" aria-labelledby="pending-confirmations-title">
+      <slot name="pending"><section class="pending-section" aria-labelledby="pending-confirmations-title">
         <div class="overview-section-heading"><div><h2 id="pending-confirmations-title">待处理确认<ElTag v-if="waitingSessions.length" type="warning" effect="plain" round size="small">{{ waitingSessions.length }}</ElTag></h2><p>涉及问题补充或操作授权时，助手会等你确认。</p></div></div>
         <ElSkeleton v-if="loading" :rows="2" animated />
         <div v-else-if="waitingSessions.length" class="pending-list">
           <ElCard v-for="session in waitingSessions" :key="session.id" class="pending-card" shadow="never"><div class="pending-content"><span class="pending-icon"><AgentIcon name="clock" :size="21" /></span><div><h3>{{ session.title || "未命名对话" }}</h3><p>{{ session.summary || "助手正在等待你回答问题或确认操作。" }}</p></div><ElButton type="primary" plain @click="emit('openSession', session.id)">查看并确认<AgentIcon name="chevron" :size="14" /></ElButton></div></ElCard>
         </div>
         <div v-else class="pending-clear"><span><AgentIcon name="check" :size="17" /></span><div><strong>当前没有待处理的确认</strong><p>需要你决定的事项，会在这里提醒。</p></div></div>
-      </section>
+      </section></slot>
 
       <section aria-labelledby="recent-conversations-title">
         <div class="overview-section-heading"><div><h2 id="recent-conversations-title">最近对话</h2><p>查看助手的最新进展，继续未完成的工作。</p></div><ElButton link type="primary" @click="emit('openConversation')">{{ activeSession ? "继续当前对话" : "进入对话" }}<AgentIcon name="chevron" :size="14" /></ElButton></div>
         <ElSkeleton v-if="loading" :rows="3" animated />
         <div v-else-if="recentSessions.length" class="overview-conversation-grid">
-          <ElCard v-for="session in recentSessions" :key="session.id" class="overview-session-card" shadow="never"><div class="session-card-top"><ElTag :type="statusTypes[session.status]" size="small" effect="plain"><span v-if="session.status === 'running'" class="running-dot" />{{ statusLabels[session.status] }}</ElTag><time :datetime="session.updatedAt">{{ displayDate(session.updatedAt) }}</time></div><h3><button @click="emit('openSession', session.id)">{{ session.title || "未命名对话" }}</button></h3><p>{{ session.summary || (session.status === "running" ? "助手正在处理你的需求。" : "打开对话，查看历史消息与处理结果。") }}</p><ElButton link type="primary" @click="emit('openSession', session.id)">{{ session.status === "running" ? "查看进度" : session.status === "waiting" ? "前往确认" : "打开对话" }}<AgentIcon name="chevron" :size="14" /></ElButton></ElCard>
+          <ElCard v-for="session in recentSessions" :key="session.id" class="overview-session-card" shadow="never"><div class="session-card-top"><ElTag :type="statusTypes[session.status]" size="small" effect="plain"><span v-if="session.status === 'running'" class="running-dot" />{{ statusLabels[session.status] }}</ElTag><time :datetime="session.updatedAt">{{ displayDate(session.updatedAt) }}</time></div><h3><ElButton class="overview-card-title" link @click="emit('openSession', session.id)">{{ session.title || "未命名对话" }}</ElButton></h3><p>{{ session.summary || (session.status === "running" ? "助手正在处理你的需求。" : "打开对话，查看历史消息与处理结果。") }}</p><ElButton link type="primary" @click="emit('openSession', session.id)">{{ session.status === "running" ? "查看进度" : session.status === "waiting" ? "前往确认" : "打开对话" }}<AgentIcon name="chevron" :size="14" /></ElButton></ElCard>
         </div>
         <ElCard v-else shadow="never" class="overview-empty"><ElEmpty description="从一个经营问题开始新的对话" :image-size="65"><ElButton type="primary" @click="emit('newConversation')">新建对话</ElButton></ElEmpty></ElCard>
       </section>
@@ -93,7 +95,7 @@ function displayDate(value: string): string {
         <div class="overview-section-heading"><div><h2 id="recent-tasks-title">最近任务页面<ElTag v-if="pages.length" type="info" effect="plain" size="small" round>{{ pages.length }}</ElTag></h2><p>经营看板、分析结果和专属工具，集中管理。</p></div><ElButton link type="primary" @click="emit('openTasks')">查看全部<AgentIcon name="chevron" :size="14" /></ElButton></div>
         <ElSkeleton v-if="loading" :rows="3" animated />
         <div v-else-if="recentPages.length" class="overview-task-grid">
-          <ElCard v-for="page in recentPages" :key="page.slug" class="overview-task-card" shadow="never"><div class="task-card-top"><ElTag type="success" size="small" effect="plain">已发布 · v{{ page.version }}</ElTag><ElTag v-if="page.stale" type="warning" size="small" effect="plain">待复核</ElTag><ElTag v-else-if="page.gaps.length" type="info" size="small" effect="plain">有能力说明</ElTag></div><h3><button @click="emit('openPage', page.slug)">{{ page.title }}</button></h3><p>{{ page.summary || page.wish }}</p><div class="task-card-footer"><time :datetime="page.updatedAt">{{ displayDate(page.updatedAt) }} 更新</time><div><ElButton link type="primary" @click="emit('revisePage', page.slug)">修改</ElButton><ElButton link type="primary" @click="emit('openPage', page.slug)">打开<AgentIcon name="chevron" :size="13" /></ElButton></div></div></ElCard>
+          <ElCard v-for="page in recentPages" :key="page.slug" class="overview-task-card" shadow="never"><div class="task-card-top"><ElTag type="success" size="small" effect="plain">已发布 · v{{ page.version }}</ElTag><ElTag v-if="page.stale" type="warning" size="small" effect="plain">待复核</ElTag><ElTag v-else-if="page.gaps.length" type="info" size="small" effect="plain">有能力说明</ElTag></div><h3><ElButton class="overview-card-title" link @click="emit('openPage', page.slug)">{{ page.title }}</ElButton></h3><p>{{ page.summary || page.wish }}</p><div class="task-card-footer"><time :datetime="page.updatedAt">{{ displayDate(page.updatedAt) }} 更新</time><div><ElButton link type="primary" @click="emit('revisePage', page.slug)">修改</ElButton><ElButton link type="primary" @click="emit('openPage', page.slug)">打开<AgentIcon name="chevron" :size="13" /></ElButton></div></div></ElCard>
         </div>
         <ElCard v-else shadow="never" class="overview-empty"><ElEmpty description="完成一段对话，让经营想法变成可用的页面" :image-size="65"><ElButton @click="emit('openConversation')">前往对话</ElButton></ElEmpty></ElCard>
       </section>
@@ -106,7 +108,7 @@ function displayDate(value: string): string {
 .store-overview { display: grid; align-content: start; gap: 30px; }
 .overview-header { margin-bottom: 0; }
 .overview-header > :deep(.el-button > span), .overview-section-heading :deep(.el-button > span), .pending-card :deep(.el-button > span), .overview-session-card :deep(.el-button > span), .overview-task-card :deep(.el-button > span) { display: inline-flex; align-items: center; gap: 6px; }
-.overview-kpis { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px; }
+.overview-kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 20px; }
 .overview-kpi :deep(.el-card__body) { padding: 23px 25px; }
 .kpi-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; color: var(--qdd-muted); font-size: 13px; }
 .kpi-value { display: block; margin: 15px 0 10px; font-size: 37px; line-height: 1.3; font-weight: 600; font-variant-numeric: tabular-nums; }
@@ -137,10 +139,11 @@ function displayDate(value: string): string {
 .session-card-top time, .task-card-footer time { color: var(--qdd-muted); font-size: 11px; white-space: nowrap; }
 .running-dot { display: inline-block; width: 5px; height: 5px; margin-right: 5px; border-radius: 50%; background: var(--qdd-good); vertical-align: middle; }
 .overview-session-card h3, .overview-task-card h3 { font-size: 15px; font-weight: 600; margin: 17px 0 9px; line-height: 1.7; }
-.overview-session-card h3 button, .overview-task-card h3 button { padding: 0; color: var(--qdd-text); background: transparent; text-align: left; overflow-wrap: anywhere; }
-.overview-session-card h3 button:hover, .overview-task-card h3 button:hover { color: var(--qdd-primary); }
+.overview-card-title.el-button { display: block; width: 100%; height: auto; margin: 0; padding: 0; border: 0; color: var(--qdd-text); background: transparent; font: inherit; text-align: left; white-space: normal; overflow-wrap: anywhere; }
+.overview-card-title.el-button :deep(> span) { display: block; min-width: 0; }
+.overview-card-title.el-button:hover { color: var(--qdd-primary); }
 .overview-session-card p, .overview-task-card p { color: var(--qdd-muted); font-size: 12px; line-height: 1.8; margin: 0 0 18px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-.overview-session-card :deep(.el-button.is-link) { align-self: flex-start; margin-top: auto; font-size: 12px; }
+.overview-session-card :deep(.el-card__body > .el-button.is-link) { align-self: flex-start; margin-top: auto; font-size: 12px; }
 .overview-task-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
 .overview-task-card h3 { margin-top: 15px; }
 .task-card-footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding-top: 15px; margin-top: auto; border-top: 1px solid var(--qdd-border); }
@@ -149,7 +152,7 @@ function displayDate(value: string): string {
 .task-card-footer :deep(.el-button) { font-size: 12px; }
 .overview-empty :deep(.el-empty) { padding: 22px 0; }
 .overview-footnote { display: flex; align-items: center; gap: 6px; color: var(--qdd-muted); font-size: 11px; margin: 0; }
-@media (max-width: 1180px) { .overview-task-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .overview-kpi :deep(.el-card__body) { padding: 20px; } }
+@media (max-width: 1180px) { .overview-kpis, .overview-task-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .overview-kpi :deep(.el-card__body) { padding: 20px; } }
 @media (max-width: 760px) {
   .store-overview { gap: 25px; }
   .overview-kpis, .overview-conversation-grid, .overview-task-grid { grid-template-columns: minmax(0, 1fr); gap: 14px; }

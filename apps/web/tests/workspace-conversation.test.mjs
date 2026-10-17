@@ -113,6 +113,10 @@ function backend(initial = [], pages = []) {
     },
     streamCount(id) { return sessionStreams.get(id)?.size ?? 0; },
     failNextDetail(id) { detailFailures.add(id); },
+    gatewayEvent(event) {
+      const data = new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`);
+      for (const stream of globalStreams) stream.enqueue(data);
+    },
     publish(value) {
       sessions.set(value.id, value);
       const data = new TextEncoder().encode(`data: ${JSON.stringify({ type: "session_updated", session: metadata(value) })}\n\n`);
@@ -509,4 +513,44 @@ test("selecting history or a new conversation clears the previous page revision 
   assert.equal(workspace.revisionPageSlug.value, null);
   assert.equal(await workspace.sendMessage("全新需求"), true);
   assert.deepEqual(JSON.parse(service.calls.find((call) => call.path === "/api/wishes").body), { wish: "全新需求" });
+});
+
+test("skill execution preloads the selected skill only on a newly created wish", async () => {
+  const service = backend([session("existing")]);
+  const { workspace } = mountWorkspace();
+  await ready(workspace);
+  workspace.startNewConversation();
+  assert.equal(await workspace.sendMessage("运行经营日报", { skillId: "daily-report" }), true);
+  assert.deepEqual(JSON.parse(service.calls.find((call) => call.path === "/api/wishes").body), {
+    wish: "运行经营日报", skillId: "daily-report",
+  });
+  assert.equal(await workspace.sendMessage("调整日报内容"), true);
+  assert.deepEqual(JSON.parse(service.calls.find((call) => call.path.endsWith("/messages")).body), { text: "调整日报内容" });
+});
+
+test("new global resource events refresh their own resource and overview without changing conversation", async () => {
+  const service = backend([session("selected")]);
+  const { workspace } = mountWorkspace();
+  await ready(workspace);
+  for (const key of ["skills", "schedules", "connectors", "pending"]) {
+    service.gatewayEvent({ type: `${key}_changed` });
+    await setImmediate();
+    assert.equal(workspace.gatewayChanges.value[key], 1);
+    assert.equal(workspace.activeSessionId.value, "selected");
+  }
+  assert.equal(workspace.gatewayChanges.value.overview, 4);
+  assert.equal(workspace.error.value, "");
+});
+
+test("schedule origin survives detail loading and live metadata updates", async () => {
+  const original = { ...session("scheduled"), origin: { kind: "schedule", scheduleId: "daily", scheduleName: "经营日报" } };
+  const service = backend([original]);
+  const { workspace } = mountWorkspace();
+  await ready(workspace);
+  assert.deepEqual(workspace.sessions.value[0].origin, original.origin);
+  service.publish({ ...original, status: "waiting", updatedAt: "2026-10-17T04:00:00Z" });
+  await setImmediate();
+  assert.deepEqual(workspace.sessions.value[0].origin, original.origin);
+  assert.deepEqual(workspace.activeSession.value.origin, original.origin);
+  assert.equal(workspace.gatewayChanges.value.overview, 1);
 });

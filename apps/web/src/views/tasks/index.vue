@@ -65,7 +65,7 @@ async function handleTaskMessage(message: TaskPageEvent) {
     <div v-else class="task-cards">
       <ElCard v-for="page in filteredPages" :key="page.slug" class="work-task-card" shadow="never">
         <div class="work-task-heading"><ElTag type="success" effect="plain" size="small">已发布 · v{{ page.version }}</ElTag><ElTag v-if="page.stale" type="warning" effect="light" size="small" round>待复核</ElTag><AgentIcon name="code" :size="20" /></div>
-        <h2><button class="task-title-button" @click="openPage(page.slug)">{{ page.title }}</button></h2>
+        <h2><ElButton link class="task-title-button" @click="openPage(page.slug)">{{ page.title }}</ElButton></h2>
         <p class="work-task-description">{{ page.summary || page.wish }}</p>
         <div class="work-task-footer"><time :datetime="page.updatedAt">{{ new Date(page.updatedAt).toLocaleDateString("zh-CN") }} 更新</time><ElButton link type="primary" @click="openPage(page.slug)">打开页面<AgentIcon name="chevron" :size="14" /></ElButton></div>
       </ElCard>
@@ -85,7 +85,8 @@ async function handleTaskMessage(message: TaskPageEvent) {
 .work-task-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 .work-task-heading > svg { margin-left: auto; color: var(--qdd-muted); }
 .work-task-card h2 { margin: 17px 0 8px; font-size: 20px; line-height: 1.5; }
-.task-title-button { padding: 0; background: transparent; text-align: left; color: var(--qdd-text); font-weight: 600; overflow-wrap: anywhere; }
+.task-title-button.el-button { max-width: 100%; padding: 0; background: transparent; text-align: left; color: var(--qdd-text); font: inherit; font-weight: 600; white-space: normal; overflow-wrap: anywhere; }
+.task-title-button :deep(> span) { display: block; min-width: 0; }
 .task-title-button:hover { color: var(--qdd-primary); }
 .work-task-description { flex: 1; margin: 0 0 24px; color: var(--qdd-muted); font-size: 13px; line-height: 1.8; overflow-wrap: anywhere; }
 .work-task-footer { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; padding-top: 16px; border-top: 1px solid var(--qdd-border); }

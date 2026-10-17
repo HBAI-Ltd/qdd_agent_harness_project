@@ -59,6 +59,8 @@ async function json<T>(base: string, token: string, path: string, init: RequestI
   return (await request(base, token, path, init)).json() as Promise<T>;
 }
 
+export { json as gatewayJson };
+
 export function listSessions(base: string, token: string, signal?: AbortSignal): Promise<SessionMeta[]> {
   return json(base, token, "/api/sessions", { signal: signal ?? null });
 }
@@ -137,6 +139,8 @@ async function stream<T>(base: string, token: string, path: string, onEvent: (ev
     reader.releaseLock();
   }
 }
+
+export { stream as gatewayStream };
 
 export function sessionEvents(base: string, token: string, id: string, since: number, onEvent: (event: SessionEvent) => void, signal: AbortSignal, onOpen?: () => void): Promise<void> {
   return stream(base, token, `/api/sessions/${encodeURIComponent(id)}/events?since=${since}`, onEvent, signal, onOpen);

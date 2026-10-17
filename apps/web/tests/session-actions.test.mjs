@@ -6,7 +6,7 @@ import { compileScript, parse } from "@vue/compiler-sfc";
 import { createRenderer, h, nextTick, reactive } from "vue";
 
 const dependencies = new Map([["vue", import.meta.resolve("vue")]]);
-const controls = "data:text/javascript,export const ElButton={},ElCard={},ElCheckboxButton={},ElCheckboxGroup={},ElInput={},ElRadioButton={},ElRadioGroup={}";
+const controls = "data:text/javascript,export const ElButton={},ElCard={},ElCheckboxButton={},ElCheckboxGroup={},ElCollapse={},ElCollapseItem={},ElInput={},ElRadioButton={},ElRadioGroup={}";
 registerHooks({
   resolve(specifier, context, nextResolve) {
     if (context.parentURL?.startsWith("data:text/javascript,")) {
@@ -152,4 +152,15 @@ test("empty multiple choices require an answer and authorization emits an explic
   assert.match(state.validationError, /至少选择一项.*品类/);
   state.approve("approval-1", false);
   assert.deepEqual(approvals, [["approval-1", false]]);
+});
+
+test("save_skill approvals preview the exact name, steps and tools without modifying authorization", () => {
+  const args = { name: "临期预警", description: "每天检查临期库存", steps: ["查库存", "发送提醒"], tools: ["store__get_inventory", "send_notification"] };
+  const request = { ...approval(), tool: "save_skill", source: "harness", args };
+  const { state, approvals } = mount([request]);
+  assert.deepEqual(state.skillPreview(request), args);
+  state.approve(request.requestId, true);
+  assert.deepEqual(approvals, [["approval-1", true]]);
+  assert.deepEqual(request.args, args);
+  assert.equal(state.skillPreview({ ...request, args: { name: "不完整技能", steps: [123] } }), undefined);
 });

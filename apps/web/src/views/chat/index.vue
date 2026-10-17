@@ -4,6 +4,7 @@ import { ElButton, ElCard, ElInput, type InputInstance } from "element-plus";
 import type { SessionEvent } from "@qdd/shared";
 import AgentIcon from "@/components/AgentIcon.vue";
 import SessionActions from "@/components/SessionActions.vue";
+import SessionBrowser from "@/components/SessionBrowser.vue";
 import { useWorkspaceContext } from "@/composables/workspaceContext";
 
 const { workspace, draft, submitMessage, notify, navigation } = useWorkspaceContext();
@@ -14,11 +15,13 @@ const {
 const { openPage, openView } = navigation;
 const composer = ref<InputInstance>();
 const messageList = ref<HTMLElement>();
+const browserOpen = ref(false);
+const latestBrowser = computed(() => activeSession.value?.events.findLast((event) => event.type === "browser")?.browser);
 const gapLabels = { missing_data: "缺少数据", estimate: "估测说明", unsupported: "暂不支持", permission: "需要授权" };
 const timeline = computed(() =>
   (activeSession.value?.events ?? [])
     .map((event, index) => ({ event, index }))
-    .filter(({ event }) => ["user", "say", "tool", "warn", "error", "published", "gaps"].includes(event.type)),
+    .filter(({ event }) => ["user", "say", "tool", "skill", "browser", "warn", "error", "published", "gaps"].includes(event.type)),
 );
 const suggestions = [
   { title: "经营看板", description: "查看销售与毛利，发现经营机会", prompt: "展示最近 30 天各品类销售额和毛利" },
@@ -63,6 +66,7 @@ watch([activeSessionId, () => activeSession.value?.id], () => {
   void scrollToLatest();
   focusComposer();
 });
+watch(activeSessionId, () => { browserOpen.value = false; });
 watch(() => activeSession.value?.events.length, async () => {
   const element = messageList.value;
   const nearBottom = !element || element.scrollHeight - element.scrollTop - element.clientHeight < 100;
@@ -115,6 +119,16 @@ onMounted(() => {
               <div class="chat-message-meta"><strong>执行进度</strong><time :datetime="entry.event.at">{{ new Date(entry.event.at).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }) }}</time></div>
               <div class="chat-tool"><span>工具</span><div>{{ entry.event.text }}</div></div>
             </template>
+            <div v-else-if="entry.event.type === 'skill'" class="chat-skill">
+              <span class="chat-skill-kind">技能</span>
+              <div><strong>{{ entry.event.skill.name }}</strong><span>{{ entry.event.action === "loaded" ? "已加载，按技能步骤继续执行" : "已保存，可在技能页面复用" }}</span></div>
+              <ElButton link type="primary" @click="openView('skills')">查看技能<AgentIcon name="chevron" :size="13" /></ElButton>
+            </div>
+            <div v-else-if="entry.event.type === 'browser'" class="chat-browser-event">
+              <AgentIcon name="code" :size="17" />
+              <div><strong>{{ entry.event.browser.status === "closed" ? "浏览器已关闭" : "会话浏览器已打开" }}</strong><span>{{ entry.event.browser.title || entry.event.browser.url }}</span></div>
+              <ElButton v-if="latestBrowser" link type="primary" @click="browserOpen = !browserOpen">{{ browserOpen ? "收起画面" : "查看实时画面" }}</ElButton>
+            </div>
             <div v-else class="chat-bubble" :class="{ 'chat-bubble-warning': entry.event.type === 'warn' || entry.event.type === 'gaps', 'chat-bubble-error': entry.event.type === 'error' }">
               <div v-if="entry.event.type !== 'user'" class="chat-message-meta">
                 <strong>门店助手</strong>
@@ -146,6 +160,8 @@ onMounted(() => {
       </div>
     </div>
 
+    <SessionBrowser v-if="browserOpen && latestBrowser && activeSession" :key="`${activeSession.id}:${latestBrowser.browserSessionId}`" :browser="latestBrowser" :session-id="activeSession.id" @close="browserOpen = false" />
+
     <div class="chat-composer-area">
       <p v-if="!connected" class="chat-composer-note">先在 <ElButton link type="primary" @click="openView('settings')">设置</ElButton> 中填写网关地址和 token。</p>
       <p v-else-if="revisionPageSlug" class="chat-composer-note">正在修改页面：<ElButton link type="primary" @click="openPage(revisionPageSlug)">{{ revisionPageSlug }}</ElButton></p>
@@ -175,6 +191,7 @@ onMounted(() => {
         <div class="chat-conversation-actions">
           <ElButton v-if="activeSession?.status === 'running'" link :loading="cancelling" @click="cancel"><AgentIcon v-if="!cancelling" name="stop" :size="13" />停止执行</ElButton>
           <ElButton v-if="activeSession?.slug" link type="primary" @click="openPage(activeSession.slug)">查看生成页面</ElButton>
+          <ElButton v-if="latestBrowser" link @click="browserOpen = !browserOpen">{{ browserOpen ? "收起浏览器" : "查看浏览器" }}</ElButton>
         </div>
         <p class="chat-keyboard-hint">{{ preferences.enterToSend ? "Enter 发送 · Shift + Enter 换行" : "点击发送 · Enter 换行" }}</p>
       </div>
@@ -218,6 +235,13 @@ onMounted(() => {
 .chat-tool { display: flex; align-items: flex-start; gap: 10px; padding: 10px 13px; border: 1px solid var(--qdd-border); border-radius: 8px; background: var(--qdd-surface); color: var(--qdd-text); font-size: 13px; line-height: 1.7; }
 .chat-tool > span { flex: 0 0 auto; margin-top: 1px; padding: 0 6px; border-radius: 4px; background: var(--qdd-bg); color: var(--qdd-muted); font-size: 11px; }
 .chat-tool > div { min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.chat-skill, .chat-browser-event { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; padding: 14px 16px; border: 1px solid var(--qdd-border); border-radius: 9px; background: var(--qdd-surface); }
+.chat-skill-kind { flex: 0 0 auto; padding: 2px 7px; border-radius: 4px; background: var(--qdd-primary-soft); color: var(--qdd-primary); font-size: 11px; }
+.chat-skill > div, .chat-browser-event > div { flex: 1; min-width: 100px; }
+.chat-skill strong, .chat-browser-event strong { display: block; color: var(--qdd-text); font-size: 14px; font-weight: 600; }
+.chat-skill > div > span, .chat-browser-event > div > span { display: block; margin-top: 3px; color: var(--qdd-muted); font-size: 12px; overflow-wrap: anywhere; }
+.chat-skill :deep(.el-button), .chat-browser-event :deep(.el-button) { margin: 0; font-size: 12px; }
+.chat-browser-event > svg { color: var(--qdd-primary); }
 .chat-bubble-warning { background: color-mix(in srgb, var(--qdd-warn) 5%, var(--qdd-surface)); border-color: color-mix(in srgb, var(--qdd-warn) 30%, var(--qdd-border)); }
 .chat-bubble-error { color: var(--qdd-bad); border-color: color-mix(in srgb, var(--qdd-bad) 30%, var(--qdd-border)); }
 .chat-gaps { display: grid; gap: 12px; font-size: 13px; line-height: 1.8; }

@@ -6,6 +6,9 @@ import AgentIcon from "@/components/AgentIcon.vue";
 import WorkspaceSidebar from "@/components/WorkspaceSidebar.vue";
 import { useWorkspace } from "@/composables/useWorkspace";
 import { useConversationDrafts } from "@/composables/useConversationDrafts";
+import { useGatewayResource } from "@/composables/useGatewayResource";
+import { getOverview, listPending } from "@/api/dashboard";
+import type { Skill } from "@qdd/shared";
 import { WORKSPACE_CONTEXT, type WorkspaceView } from "@/composables/workspaceContext";
 
 const workspace = useWorkspace();
@@ -32,9 +35,12 @@ const sidebarOpen = ref(false);
 const sidebarCollapsed = ref(false);
 const mediaQuery = window.matchMedia("(max-width: 760px)");
 const isMobile = ref(mediaQuery.matches);
+const pendingSkillId = ref<string | null>(null);
 const { draft, submitMessage, beginSelection, startNewDraft, clear: clearDrafts } = useConversationDrafts(
-  gatewayUrl, activeSessionId, workspace.sendMessage,
+  gatewayUrl, activeSessionId, (text) => workspace.sendMessage(text, pendingSkillId.value ? { skillId: pendingSkillId.value } : {}),
 );
+const overview = useGatewayResource("overview", getOverview, workspace);
+const pending = useGatewayResource("pending", listPending, workspace);
 let navigationVersion = 0;
 
 try { sidebarCollapsed.value = localStorage.getItem("harness-sidebar-collapsed") === "true"; }
@@ -45,6 +51,7 @@ watch(sidebarCollapsed, (collapsed) => {
   catch { /* Retain the preference for this visit. */ }
 });
 watch(token, clearDrafts, { flush: "sync" });
+watch([activeSessionId, gatewayUrl, token], () => { pendingSkillId.value = null; }, { flush: "sync" });
 watch(() => route.fullPath, () => {
   navigationVersion++;
   sidebarOpen.value = false;
@@ -92,9 +99,18 @@ async function editPage(slug: string): Promise<boolean> {
     && navigationVersion === version + (route.fullPath === previousPath ? 0 : 1);
 }
 async function newConversation() {
+  pendingSkillId.value = null;
   startNewDraft();
   workspace.startNewConversation();
   await openView("chat");
+}
+async function runSkill(skill: Skill) {
+  const opening = newConversation();
+  pendingSkillId.value = skill.id;
+  draft.value = `请执行「${skill.name}」技能。${skill.description}`;
+  const running = submitMessage();
+  await opening;
+  await running;
 }
 async function selectConversation(id: string) {
   beginSelection();
@@ -120,8 +136,8 @@ function shortcut(event: KeyboardEvent) {
 }
 
 provide(WORKSPACE_CONTEXT, {
-  workspace, draft, submitMessage, notify,
-  navigation: { openConversation, openSession: selectConversation, newConversation, openPage, openView, editPage },
+  workspace, overview, pending, draft, submitMessage, notify,
+  navigation: { openConversation, openSession: selectConversation, newConversation, runSkill, openPage, openView, editPage },
 });
 onMounted(() => {
   document.addEventListener("keydown", shortcut);

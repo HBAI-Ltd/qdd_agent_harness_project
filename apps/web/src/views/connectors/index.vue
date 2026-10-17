@@ -1,153 +1,329 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, reactive, ref, watch } from "vue";
-import { ElAlert, ElButton, ElCard, ElDialog, ElEmpty, ElForm, ElFormItem, ElInput, ElRadioButton, ElRadioGroup, ElSkeleton, ElSwitch, ElTag } from "element-plus";
-import type { ToolInfo } from "@qdd/shared";
+import { ElAlert, ElButton, ElCard, ElDialog, ElEmpty, ElForm, ElFormItem, ElInput, ElRadioButton, ElRadioGroup, ElSelect, ElSkeleton, ElTag } from "element-plus";
+import type { ConnectorCatalogEntry, ConnectorPermission, ConnectorView, FeishuConnectorInput } from "@qdd/shared";
 import AgentIcon from "@/components/AgentIcon.vue";
-import { listTools } from "@/api/catalog";
+import StringSelectOption from "@/components/StringSelectOption";
+import * as api from "@/api/connectors";
+import { useGatewayResource } from "@/composables/useGatewayResource";
 import { useWorkspaceContext } from "@/composables/workspaceContext";
 
-const { workspace, navigation } = useWorkspaceContext();
+type ReceiveIdType = NonNullable<FeishuConnectorInput["receiveIdType"]>;
+type ConnectorAction = "verify" | "test" | "delete";
+const { workspace, navigation, notify } = useWorkspaceContext();
 const { connected, gatewayUrl, token } = workspace;
-// TODO: Replace this planned catalog with connector catalog and installation-status APIs when available.
-const connectors = [
-  { id: "pos", mark: "收", name: "收银系统", description: "看懂销售和订单，让每天的经营有据可依。", tags: ["销售", "订单"], method: "账号授权", detail: "接入门店收银系统后，助手可以按你的授权范围查看销售与订单数据。" },
-  { id: "erp", mark: "进", name: "进销存 ERP", description: "把库存、采购和商品信息放到一起分析。", tags: ["库存", "采购"], method: "账号授权", detail: "接入进销存系统后，可查询商品库存、采购和库存变化。数据修改遵守授权设置。" },
-  { id: "message", mark: "通", name: "消息通知", description: "经营结果和待办提醒，送到你常用的消息里。", tags: ["飞书", "微信", "企业微信"], method: "绑定通知渠道", detail: "选择通知渠道，让日报、异常提醒和待确认事项及时送达。" },
-  { id: "camera", mark: "摄", name: "门店摄像头", description: "观察门店客流与货架，补充现场信息。", tags: ["客流统计", "货架识别"], method: "扫码绑定", detail: "通过设备绑定连接门店摄像头，在授权范围内辅助观察客流与货架。" },
-  { id: "phone", mark: "机", name: "门店手机 · 助手操控", description: "把门店的内容发布和评价回复交给助手协助。", tags: ["小红书", "抖音", "大众点评"], method: "扫码绑定", detail: "绑定门店专用手机后，可规划社交内容发布与门店评价处理。" },
-  { id: "delivery", mark: "外", name: "外卖平台", description: "汇总外卖订单与评价，发现需要关注的变化。", tags: ["外卖订单", "评价"], method: "平台授权", detail: "连接外卖平台后，助手可以结合订单和评价分析门店服务表现。" },
+const { data, loading, error, refresh } = useGatewayResource("connectors", api.listConnectors);
+const catalog = computed(() => data.value?.catalog ?? []);
+const connectors = computed(() => data.value?.connectors ?? []);
+const connectedCount = computed(() => connectors.value.filter((entry) => entry.status === "connected").length);
+const originLabels = { installed: "已安装", builtin: "内置数据", mcp: "配置文件" };
+const permissions: { value: ConnectorPermission; label: string }[] = [
+  { value: "read", label: "只查看数据" },
+  { value: "confirm", label: "助手推送需确认" },
+  { value: "auto", label: "助手自动推送" },
 ];
-const selectedConnector = ref<(typeof connectors)[number]>();
-const dialogOpen = ref(false);
-const connectionPreview = reactive({ account: "", password: "", readOnly: true, deviceName: "", channel: "飞书" });
-const tools = ref<ToolInfo[]>([]);
-const toolsLoading = ref(false);
-const toolsError = ref("");
-let toolsController: AbortController | undefined;
-const sources = computed(() => {
-  const grouped = new Map<string, ToolInfo[]>();
-  for (const tool of tools.value) grouped.set(tool.source, [...(grouped.get(tool.source) ?? []), tool]);
-  return [...grouped].map(([name, entries]) => ({ name, tools: entries }));
+const receiveTypes: { value: ReceiveIdType; label: string }[] = [
+  { value: "chat_id", label: "群 ID（chat_id）" }, { value: "open_id", label: "Open ID" },
+  { value: "user_id", label: "用户 ID" }, { value: "union_id", label: "Union ID" }, { value: "email", label: "邮箱" },
+];
+const formOpen = ref(false);
+const editing = ref<ConnectorView>();
+const formBusy = ref(false);
+const formError = ref("");
+const form = reactive({
+  name: "", mode: "webhook" as "webhook" | "app", permission: "confirm" as ConnectorPermission,
+  webhookUrl: "", signSecret: "", appId: "", appSecret: "", receiveId: "", receiveIdType: "chat_id" as ReceiveIdType,
 });
+const availableModes = ref<string[]>([]);
+const actionOpen = ref(false);
+const actionTarget = ref<ConnectorView>();
+const action = ref<ConnectorAction>("verify");
+const actionBusy = ref(false);
+const actionError = ref("");
+const testText = ref("【钱多多】这是一条测试消息。");
+let formVersion = 0;
+let actionVersion = 0;
+let formController: AbortController | undefined;
+let actionController: AbortController | undefined;
+let disposed = false;
 
-function toolTitle(tool: ToolInfo): string {
-  return tool.description.split(/[：:。\r\n]/)[0]?.trim() || "数据工具";
+function configText(connector: ConnectorView, key: string): string {
+  const value = connector.config[key];
+  return typeof value === "string" ? value : "";
 }
-
-function previewConnector(connector: (typeof connectors)[number]) {
-  selectedConnector.value = connector;
-  Object.assign(connectionPreview, { account: "", password: "", readOnly: true, deviceName: "", channel: "飞书" });
-  dialogOpen.value = true;
+function modeLabel(connector: ConnectorView): string {
+  return configText(connector, "mode") === "app" ? "企业自建应用" : "群机器人 Webhook";
 }
-function connectConnector() {
-  // TODO: Connect installation, account/OAuth authorization and device-binding APIs when available.
+function permissionLabel(permission: ConnectorPermission, origin: ConnectorView["origin"]): string {
+  if (origin !== "installed") return permission === "auto" ? "允许自动写入" : permission === "confirm" ? "写入需确认" : "只查看数据";
+  return permissions.find((entry) => entry.value === permission)?.label ?? permission;
 }
-async function refreshTools() {
-  toolsController?.abort();
-  if (!connected.value) {
-    tools.value = [];
-    toolsLoading.value = false;
-    toolsError.value = "";
-    return;
+function displayDate(value: string | null): string {
+  if (!value) return "尚未验证";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "时间待同步" : date.toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+function canInstall(entry: ConnectorCatalogEntry): boolean {
+  // TODO: Add installation forms for other catalog types when their APIs become available.
+  return entry.available && entry.type === "feishu" && entry.modes.some((mode) => mode === "webhook" || mode === "app");
+}
+function sendsVerificationMessage(connector: ConnectorView): boolean {
+  return configText(connector, "mode") === "webhook" || !!configText(connector, "receiveId");
+}
+function canSendTest(connector: ConnectorView): boolean {
+  return connector.permission !== "read" && (configText(connector, "mode") === "webhook" || !!configText(connector, "receiveId"));
+}
+function resetSecrets() {
+  form.webhookUrl = "";
+  form.signSecret = "";
+  form.appSecret = "";
+}
+function stopForm() {
+  formVersion++;
+  formController?.abort();
+  formController = undefined;
+  formBusy.value = false;
+  resetSecrets();
+}
+function stopAction() {
+  actionVersion++;
+  actionController?.abort();
+  actionController = undefined;
+  actionBusy.value = false;
+}
+function openInstall(entry: ConnectorCatalogEntry) {
+  if (!connected.value || !canInstall(entry)) return;
+  stopForm();
+  editing.value = undefined;
+  availableModes.value = entry.modes;
+  Object.assign(form, { name: "", mode: entry.modes.includes("webhook") ? "webhook" : "app", permission: "confirm", webhookUrl: "", signSecret: "", appId: "", appSecret: "", receiveId: "", receiveIdType: "chat_id" });
+  formError.value = "";
+  formOpen.value = true;
+}
+function openEdit(connector: ConnectorView) {
+  if (!connected.value || connector.origin !== "installed") return;
+  stopForm();
+  editing.value = connector;
+  Object.assign(form, {
+    name: connector.name, permission: connector.permission,
+    mode: configText(connector, "mode") === "app" ? "app" : "webhook",
+    appId: configText(connector, "appId"), receiveId: configText(connector, "receiveId"),
+    receiveIdType: configText(connector, "receiveIdType") || "chat_id",
+  });
+  formError.value = "";
+  formOpen.value = true;
+}
+function openAction(connector: ConnectorView, next: ConnectorAction) {
+  if (!connected.value || connector.origin !== "installed" || (next === "test" && !canSendTest(connector))) return;
+  stopAction();
+  actionTarget.value = connector;
+  action.value = next;
+  actionError.value = "";
+  testText.value = "【钱多多】这是一条测试消息。";
+  actionOpen.value = true;
+}
+function validateForm(): string {
+  if (editing.value && !form.name.trim()) return "请填写连接器名称。";
+  if (!editing.value && form.mode === "webhook") {
+    try {
+      const url = new URL(form.webhookUrl.trim());
+      if (url.protocol !== "https:" || !["open.feishu.cn", "open.larksuite.com"].includes(url.hostname)
+        || url.port || url.username || url.password || !/^\/open-apis\/bot\/v2\/hook\/[^/\s]+/.test(url.pathname)) throw new Error();
+    } catch { return "请填写飞书自定义机器人的 HTTPS Webhook 地址。"; }
   }
+  if (!editing.value && form.mode === "app" && (!form.appId.trim() || !form.appSecret.trim())) return "请填写 App ID 和 App Secret。";
+  return "";
+}
+function requestError(cause: unknown): string {
+  return cause instanceof TypeError ? "无法连接网关，请检查连接后重试。" : cause instanceof Error ? cause.message : "请求失败，请稍后重试。";
+}
+async function saveConnector() {
+  if (formBusy.value || !connected.value) return;
+  formError.value = validateForm();
+  if (formError.value) return;
   const controller = new AbortController();
-  toolsController = controller;
-  toolsLoading.value = true;
-  toolsError.value = "";
+  formController = controller;
+  const version = formVersion;
+  const base = gatewayUrl.value;
+  const accessToken = token.value;
+  const target = editing.value;
+  const current = () => !disposed && !controller.signal.aborted && version === formVersion && formOpen.value && base === gatewayUrl.value && accessToken === token.value;
+  formBusy.value = true;
   try {
-    const result = await listTools(gatewayUrl.value, token.value, controller.signal);
-    if (!controller.signal.aborted) tools.value = result;
-  } catch (cause) {
-    if (!controller.signal.aborted) {
-      tools.value = [];
-      toolsError.value = cause instanceof TypeError ? "暂时无法读取工具，请检查网关连接。" : cause instanceof Error ? cause.message : "工具列表读取失败，请稍后重试。";
+    if (target) {
+      await api.updateConnector(base, accessToken, target.id, {
+        name: form.name.trim(), permission: form.permission,
+        ...(form.mode === "app" ? { receiveId: form.receiveId.trim(), receiveIdType: form.receiveIdType } : {}),
+      }, controller.signal);
+    } else {
+      const input: FeishuConnectorInput = {
+        type: "feishu", mode: form.mode, permission: form.permission,
+        ...(form.name.trim() ? { name: form.name.trim() } : {}),
+        ...(form.mode === "webhook" ? {
+          webhookUrl: form.webhookUrl.trim(), ...(form.signSecret.trim() ? { signSecret: form.signSecret.trim() } : {}),
+        } : {
+          appId: form.appId.trim(), appSecret: form.appSecret.trim(),
+          ...(form.receiveId.trim() ? { receiveId: form.receiveId.trim(), receiveIdType: form.receiveIdType } : {}),
+        }),
+      };
+      await api.installConnector(base, accessToken, input, controller.signal);
     }
+    if (!current()) return;
+    await refresh();
+    if (!current()) return;
+    notify(target ? "连接器设置已保存" : "连接器已验证并安装");
+    formOpen.value = false;
+  } catch (cause) {
+    if (current()) formError.value = requestError(cause);
   } finally {
-    if (toolsController === controller) toolsLoading.value = false;
+    if (formController === controller) { formController = undefined; formBusy.value = false; }
   }
 }
-watch([connected, gatewayUrl, token], () => { void refreshTools(); }, { immediate: true });
-onBeforeUnmount(() => { toolsController?.abort(); });
+async function runAction() {
+  const target = actionTarget.value;
+  if (!target || target.origin !== "installed" || actionBusy.value || !connected.value) return;
+  const selectedAction = action.value;
+  if (selectedAction === "test" && !testText.value.trim()) { actionError.value = "请填写测试消息。"; return; }
+  const controller = new AbortController();
+  actionController = controller;
+  const version = actionVersion;
+  const base = gatewayUrl.value;
+  const accessToken = token.value;
+  const current = () => !disposed && !controller.signal.aborted && version === actionVersion && actionOpen.value && base === gatewayUrl.value && accessToken === token.value;
+  actionBusy.value = true;
+  actionError.value = "";
+  try {
+    let verification: ConnectorView | undefined;
+    if (selectedAction === "verify") verification = await api.verifyConnector(base, accessToken, target.id, controller.signal);
+    else if (selectedAction === "test") await api.testConnector(base, accessToken, target.id, testText.value.trim(), controller.signal);
+    else await api.deleteConnector(base, accessToken, target.id, controller.signal);
+    if (!current()) return;
+    await refresh();
+    if (!current()) return;
+    if (verification?.status === "error") { actionError.value = verification.detail || "连接器验证失败。"; return; }
+    notify(selectedAction === "verify" ? "连接器验证成功" : selectedAction === "test" ? "测试消息已发送" : "连接器已删除");
+    actionOpen.value = false;
+  } catch (cause) {
+    if (current()) actionError.value = requestError(cause);
+  } finally {
+    if (actionController === controller) { actionController = undefined; actionBusy.value = false; }
+  }
+}
+watch(formOpen, (open) => { if (!open) stopForm(); }, { flush: "sync" });
+watch(actionOpen, (open) => { if (!open) stopAction(); }, { flush: "sync" });
+watch([gatewayUrl, token, connected], () => {
+  stopForm(); stopAction(); formOpen.value = false; actionOpen.value = false;
+  formError.value = ""; actionError.value = "";
+}, { flush: "sync" });
+onBeforeUnmount(() => { disposed = true; stopForm(); stopAction(); });
 </script>
 
 <template>
   <div class="feature-page connectors-page">
     <header class="feature-header">
-      <div><span class="feature-eyebrow">连接器</span><h1>把门店里的系统和设备接给助手</h1><p>销售、库存、现场与消息，在一个工作台里协同。</p></div>
-      <ElTag type="info" effect="plain" round>接入功能即将开放</ElTag>
+      <div><span class="feature-eyebrow">连接器</span><h1>把门店里的系统和设备接给助手</h1><p>连接真实的数据来源与通知渠道，按你的授权范围工作。</p></div>
+      <ElTag :type="connected ? 'success' : 'info'" effect="plain" round>{{ connected && data ? `已连接 ${connectedCount} 个` : '连接网关后同步' }}</ElTag>
     </header>
+    <ElAlert v-if="error" :title="error" type="error" show-icon :closable="false" />
+    <ElCard v-if="!connected" shadow="never"><ElEmpty description="连接工作空间后，查看和安装连接器" :image-size="70"><ElButton type="primary" @click="navigation.openView('settings')">连接工作空间</ElButton></ElEmpty></ElCard>
+    <ElSkeleton v-else-if="loading && !data" :rows="8" animated />
+    <template v-else>
+      <section aria-labelledby="installed-connectors-title">
+        <div class="section-heading"><div><h2 id="installed-connectors-title">工作空间连接器</h2><p>内置数据与配置文件来源只读展示；已安装的连接器可单独管理。</p></div><ElButton :loading="loading" @click="refresh"><AgentIcon name="refresh" :size="15" />刷新</ElButton></div>
+        <ElEmpty v-if="!connectors.length && !loading" description="暂无连接器" :image-size="65" />
+        <div class="installed-grid">
+          <ElCard v-for="connector in connectors" :key="connector.id" class="installed-card" shadow="never">
+            <div class="connector-heading"><span class="connector-mark" aria-hidden="true">{{ connector.name.slice(0, 1) }}</span><ElTag :type="connector.status === 'connected' ? 'success' : 'danger'" size="small" effect="plain">{{ connector.status === 'connected' ? '已连接' : '连接异常' }}</ElTag></div>
+            <h2>{{ connector.name }}</h2>
+            <div class="connector-tags"><ElTag type="info" size="small" effect="plain">{{ originLabels[connector.origin] }}</ElTag><ElTag :type="connector.permission === 'auto' ? 'warning' : 'info'" size="small" effect="plain">{{ permissionLabel(connector.permission, connector.origin) }}</ElTag><ElTag v-if="connector.origin === 'installed'" type="info" size="small" effect="plain">{{ modeLabel(connector) }}</ElTag></div>
+            <p class="connector-detail">{{ connector.detail }}</p>
+            <dl v-if="connector.origin === 'installed'" class="connector-config">
+              <template v-if="configText(connector, 'mode') === 'webhook'"><dt>Webhook</dt><dd>{{ configText(connector, 'webhookUrl') || '地址不可用' }}</dd><dt>签名密钥</dt><dd>{{ connector.config.signSecret ? '已设置' : '未设置' }}</dd></template>
+              <template v-else><dt>App ID</dt><dd>{{ configText(connector, 'appId') }}</dd><dt>App Secret</dt><dd>{{ connector.config.appSecret ? '已设置' : '未设置' }}</dd><dt>接收方</dt><dd>{{ configText(connector, 'receiveId') || '尚未设置，暂不能推送' }}</dd></template>
+            </dl>
+            <div v-if="connector.origin === 'installed'" class="installed-footer">
+              <small>{{ displayDate(connector.lastVerifiedAt) }} 验证</small>
+              <div class="connector-actions"><ElButton link type="primary" @click="openEdit(connector)">设置</ElButton><ElButton link @click="openAction(connector, 'verify')">重新验证</ElButton><ElButton link :disabled="!canSendTest(connector)" :title="canSendTest(connector) ? '向接收方发送测试消息' : '只查看权限或未设置接收方时不能推送'" @click="openAction(connector, 'test')">测试消息</ElButton><ElButton link type="danger" @click="openAction(connector, 'delete')">删除</ElButton></div>
+            </div>
+            <p v-else class="readonly-note">{{ connector.origin === 'mcp' ? '在网关配置文件中管理此来源。' : '内置只读数据，无需安装。' }}</p>
+          </ElCard>
+        </div>
+      </section>
 
-    <section class="connector-grid" aria-label="系统与设备连接器">
-      <ElCard v-for="connector in connectors" :key="connector.id" class="connector-card" shadow="never">
-        <div class="connector-heading"><span class="connector-mark" aria-hidden="true">{{ connector.mark }}</span><ElTag type="info" size="small" effect="plain">即将开放</ElTag></div>
-        <h2>{{ connector.name }}</h2><p>{{ connector.description }}</p>
-        <div class="connector-tags"><ElTag v-for="tag in connector.tags" :key="tag" type="info" effect="plain" size="small" round>{{ tag }}</ElTag></div>
-        <div class="connector-footer"><ElButton disabled>即将开放</ElButton><ElButton link type="primary" @click="previewConnector(connector)">接入说明<AgentIcon name="chevron" :size="14" /></ElButton></div>
-      </ElCard>
-    </section>
+      <section class="catalog-section" aria-labelledby="connector-catalog-title">
+        <div class="section-heading"><div><h2 id="connector-catalog-title">添加连接器</h2><p>可安装的类型由当前网关提供，其余类型将在开放后支持。</p></div></div>
+        <div class="connector-grid">
+          <ElCard v-for="entry in catalog" :key="entry.type" class="connector-card" shadow="never">
+            <div class="connector-heading"><span class="connector-mark" aria-hidden="true">{{ entry.name.slice(0, 1) }}</span><ElTag :type="canInstall(entry) ? 'success' : 'info'" size="small" effect="plain">{{ canInstall(entry) ? '可安装' : '暂未开放' }}</ElTag></div>
+            <h2>{{ entry.name }}</h2><p>{{ entry.category }}</p>
+            <div class="connector-tags"><ElTag v-for="tag in entry.tags" :key="tag" type="info" effect="plain" size="small" round>{{ tag }}</ElTag></div>
+            <ElButton :type="canInstall(entry) ? 'primary' : 'default'" :disabled="!canInstall(entry)" @click="openInstall(entry)">{{ canInstall(entry) ? '安装连接器' : '暂未开放' }}</ElButton>
+          </ElCard>
+        </div>
+      </section>
+    </template>
 
-    <section class="loaded-tools" aria-labelledby="loaded-tools-title">
-      <div class="section-heading"><div><h2 id="loaded-tools-title">工作空间可用工具</h2><p>查看当前工作空间实际加载的数据来源与工具。</p></div><ElButton :disabled="!connected || toolsLoading" :loading="toolsLoading" @click="refreshTools"><AgentIcon name="refresh" :size="15" />刷新</ElButton></div>
-      <ElAlert v-if="toolsError" :title="toolsError" type="error" show-icon :closable="false" />
-      <ElCard v-if="!connected" shadow="never" class="tool-empty"><ElEmpty description="连接工作空间后，查看可用的数据工具" :image-size="70"><ElButton type="primary" @click="navigation.openView('settings')">连接工作空间</ElButton></ElEmpty></ElCard>
-      <ElSkeleton v-else-if="toolsLoading" :rows="4" animated />
-      <ElCard v-else-if="!sources.length && !toolsError" shadow="never" class="tool-empty"><ElEmpty description="当前工作空间还没有可用工具" :image-size="70" /></ElCard>
-      <div v-else class="tool-source-grid">
-        <ElCard v-for="source in sources" :key="source.name" shadow="never" class="tool-source-card">
-          <div class="source-heading"><h3>{{ source.name === 'store' ? '门店数据' : source.name }}</h3><ElTag type="success" size="small" effect="plain">{{ source.tools.length }} 个工具</ElTag></div>
-          <ul><li v-for="tool in source.tools" :key="tool.name"><div><strong :title="tool.name">{{ toolTitle(tool) }}</strong><ElTag :type="tool.mutating ? 'warning' : 'info'" size="small" effect="plain">{{ tool.mutating ? '修改数据' : '只读查询' }}</ElTag></div><p>{{ tool.description }}</p></li></ul>
-        </ElCard>
-      </div>
-    </section>
+    <ElDialog v-model="formOpen" :title="editing ? `${editing.name} · 设置` : '安装飞书连接器'" width="min(620px, calc(100vw - 32px))" destroy-on-close>
+      <ElAlert v-if="formError" :title="formError" type="error" show-icon :closable="false" />
+      <ElAlert v-if="!editing" title="安装前会验证连接：群机器人会发送一条验证消息；自建应用设置了接收方时也会发送。只查看权限同样会执行这次安装验证。" type="info" show-icon :closable="false" />
+      <ElForm label-position="top" class="connector-form" :disabled="formBusy" @submit.prevent="saveConnector">
+        <ElFormItem label="连接器名称"><ElInput v-model="form.name" maxlength="30" placeholder="例如：门店经营通知群" autocomplete="off" /></ElFormItem>
+        <ElFormItem label="接入方式"><ElTag v-if="editing" type="info" effect="plain">{{ modeLabel(editing) }}</ElTag><ElRadioGroup v-else v-model="form.mode"><ElRadioButton v-if="availableModes.includes('webhook')" value="webhook">群机器人 Webhook</ElRadioButton><ElRadioButton v-if="availableModes.includes('app')" value="app">企业自建应用</ElRadioButton></ElRadioGroup></ElFormItem>
+        <template v-if="!editing && form.mode === 'webhook'"><ElFormItem label="Webhook 地址" required><ElInput v-model="form.webhookUrl" type="password" show-password placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/…" autocomplete="off" /></ElFormItem><ElFormItem label="签名校验密钥（选填）"><ElInput v-model="form.signSecret" type="password" show-password autocomplete="new-password" placeholder="机器人开启签名校验时填写" /></ElFormItem></template>
+        <template v-if="!editing && form.mode === 'app'"><ElFormItem label="App ID" required><ElInput v-model="form.appId" placeholder="cli_…" autocomplete="off" /></ElFormItem><ElFormItem label="App Secret" required><ElInput v-model="form.appSecret" type="password" show-password autocomplete="new-password" /></ElFormItem></template>
+        <template v-if="form.mode === 'app'"><div class="recipient-fields"><ElFormItem label="接收方类型" for="connector-receive-type"><ElSelect id="connector-receive-type" v-model="form.receiveIdType" class="recipient-select" :disabled="formBusy"><StringSelectOption v-for="item in receiveTypes" :key="item.value" :value="item.value" :label="item.label" /></ElSelect></ElFormItem><ElFormItem label="接收方 ID（选填）"><ElInput v-model="form.receiveId" placeholder="群 ID、用户 ID 或邮箱" autocomplete="off" /></ElFormItem></div><p class="form-note">可稍后补充接收方；未设置时不能推送。修改接收方后，可重新验证确认可达。</p></template>
+        <ElFormItem label="推送权限"><ElRadioGroup v-model="form.permission" class="permission-options"><ElRadioButton v-for="item in permissions" :key="item.value" :value="item.value">{{ item.label }}</ElRadioButton></ElRadioGroup></ElFormItem>
+        <ElAlert v-if="form.permission === 'auto'" title="助手自动推送：助手在对话中可以直接发送消息，无需店长逐次确认。" type="warning" show-icon :closable="false" />
+        <p v-else class="form-note">{{ form.permission === 'read' ? '只查看数据，不能发送后续通知或测试消息。安装与重新验证仍可能发送验证消息。' : '助手在对话中发起的推送，需要店长逐次确认。手动测试消息由你点击发送。' }}</p>
+        <p v-if="form.permission !== 'read'" class="form-note">为定时任务配置此通知接收方，即授权该任务在完成后推送结果，无需每次再次确认。</p>
+        <p v-if="editing" class="form-note">这里只修改名称、推送权限与接收方。更换 Webhook 或应用凭据，请删除后重新安装。</p>
+      </ElForm>
+      <template #footer><ElButton @click="formOpen = false">取消</ElButton><ElButton type="primary" :loading="formBusy" :disabled="!connected" @click="saveConnector">{{ editing ? '保存设置' : '验证并安装' }}</ElButton></template>
+    </ElDialog>
 
-    <ElDialog v-model="dialogOpen" :title="selectedConnector ? `${selectedConnector.name} · 接入说明` : '接入说明'" width="min(560px, calc(100vw - 32px))" destroy-on-close @closed="connectionPreview.password = ''">
-      <div v-if="selectedConnector" class="connector-dialog-content">
-        <p class="dialog-description">{{ selectedConnector.detail }}</p>
-        <ElAlert title="接入功能即将开放，下面是授权信息预览。" type="info" show-icon :closable="false" />
-        <ElForm label-position="top" class="connector-preview-form" @submit.prevent>
-          <template v-if="['pos', 'erp', 'delivery'].includes(selectedConnector.id)">
-            <ElFormItem label="账号"><ElInput v-model="connectionPreview.account" placeholder="门店系统账号" autocomplete="off" /></ElFormItem>
-            <ElFormItem label="密码"><ElInput v-model="connectionPreview.password" type="password" show-password placeholder="门店系统密码" autocomplete="off" /></ElFormItem>
-            <ElFormItem label="授权范围"><ElSwitch v-model="connectionPreview.readOnly" active-text="只允许查看数据" inactive-text="允许申请修改" /></ElFormItem>
-          </template>
-          <ElFormItem v-else-if="selectedConnector.id === 'message'" label="通知渠道"><ElRadioGroup v-model="connectionPreview.channel"><ElRadioButton value="飞书">飞书</ElRadioButton><ElRadioButton value="微信">微信</ElRadioButton><ElRadioButton value="企业微信">企业微信</ElRadioButton></ElRadioGroup></ElFormItem>
-          <template v-else><ElFormItem label="设备名称"><ElInput v-model="connectionPreview.deviceName" placeholder="例如：一楼门店设备" /></ElFormItem><div class="device-binding-preview"><AgentIcon name="panel" :size="36" /><strong>扫码绑定即将开放</strong><span>开放后，可在这里获取设备绑定二维码。</span></div></template>
-        </ElForm>
-      </div>
-      <template #footer><ElButton @click="dialogOpen = false">关闭</ElButton><ElButton type="primary" disabled @click="connectConnector">{{ selectedConnector?.method }} · 即将开放</ElButton></template>
+    <ElDialog v-model="actionOpen" :title="action === 'delete' ? '删除连接器' : action === 'test' ? '发送测试消息' : '重新验证连接器'" width="min(520px, calc(100vw - 32px))" destroy-on-close>
+      <template v-if="actionTarget"><p class="action-target">{{ actionTarget.name }}</p><ElAlert v-if="actionError" :title="actionError" type="error" show-icon :closable="false" />
+        <p v-if="action === 'delete'" class="form-note">删除后将停止通过此连接器推送。若有定时任务正在使用，请先修改对应任务的通知设置。</p>
+        <template v-else-if="action === 'verify'"><ElAlert :title="sendsVerificationMessage(actionTarget) ? '重新验证会向机器人或已配置的接收方发送一条验证消息，即使权限是只查看。' : '本次验证应用凭据与机器人信息；尚未配置接收方，不会推送消息。'" type="info" show-icon :closable="false" /></template>
+        <template v-else><p class="form-note">点击发送后，这条消息会立即发送到连接器配置的接收方。</p><ElInput v-model="testText" type="textarea" :autosize="{ minRows: 3, maxRows: 7 }" :maxlength="500" show-word-limit :disabled="actionBusy" aria-label="测试消息内容" /></template>
+      </template>
+      <template #footer><ElButton @click="actionOpen = false">取消</ElButton><ElButton :type="action === 'delete' ? 'danger' : 'primary'" :loading="actionBusy" :disabled="!connected" @click="runAction">{{ action === 'delete' ? '删除连接器' : action === 'test' ? '发送测试消息' : '开始验证' }}</ElButton></template>
     </ElDialog>
   </div>
 </template>
 
 <style scoped>
-.connector-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; }
-.connector-card { border-radius: var(--qdd-radius); }
-.connector-card :deep(.el-card__body) { display: flex; flex-direction: column; min-height: 264px; padding: 23px; }
-.connector-heading, .connector-footer, .source-heading, .section-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.connector-grid, .installed-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; }
+.installed-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.connector-card :deep(.el-card__body), .installed-card :deep(.el-card__body) { display: flex; flex-direction: column; height: 100%; padding: 23px; }
+.connector-card :deep(.el-card__body) { min-height: 240px; }
+.connector-heading, .section-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .connector-mark { display: grid; place-items: center; width: 44px; height: 44px; border-radius: 10px; background: var(--qdd-bg); color: var(--qdd-muted); font-size: 21px; font-weight: 600; }
-.connector-card h2 { font-size: 17px; font-weight: 600; margin: 17px 0 7px; line-height: 1.5; }
-.connector-card p { margin: 0; color: var(--qdd-muted); font-size: 12px; line-height: 1.8; min-height: 44px; }
-.connector-tags { display: flex; flex-wrap: wrap; gap: 6px; margin: 14px 0 20px; }
-.connector-footer { margin-top: auto; }
-.connector-footer :deep(.el-button.is-link) { gap: 3px; font-size: 12px; }
-.loaded-tools { margin-top: 34px; }
+.connector-card h2, .installed-card h2 { font-size: 17px; font-weight: 600; margin: 17px 0 7px; line-height: 1.5; overflow-wrap: anywhere; }
+.connector-card p, .connector-detail { margin: 0; color: var(--qdd-muted); font-size: 12px; line-height: 1.8; overflow-wrap: anywhere; }
+.connector-tags { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 15px; }
+.connector-card :deep(.el-button) { align-self: flex-start; margin-top: auto; }
+.catalog-section { margin-top: 34px; }
 .section-heading { margin-bottom: 17px; }
 .section-heading h2 { font-size: 17px; font-weight: 600; margin: 0 0 6px; }
-.section-heading p { margin: 0; color: var(--qdd-muted); font-size: 12px; }
-.section-heading > :deep(.el-button > span) { display: flex; gap: 6px; }
-.tool-source-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
-.source-heading h3 { font-size: 14px; margin: 0; overflow-wrap: anywhere; }
-.tool-source-card ul { list-style: none; padding: 0; margin: 16px 0 0; }
-.tool-source-card li { padding: 12px 0; border-top: 1px solid var(--qdd-border); }
-.tool-source-card li > div { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
-.tool-source-card strong { font-size: 12px; font-weight: 500; overflow-wrap: anywhere; }
-.tool-source-card p { color: var(--qdd-muted); font-size: 12px; line-height: 1.8; margin: 6px 0 0; overflow-wrap: anywhere; }
-.tool-empty :deep(.el-empty) { padding: 24px 0; }
-.dialog-description { margin: 0 0 18px; color: var(--qdd-muted); line-height: 1.8; }
-.connector-preview-form { margin-top: 24px; }
-.device-binding-preview { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 25px 14px; border: 1px dashed var(--qdd-border); border-radius: var(--qdd-radius); background: var(--qdd-bg); color: var(--qdd-muted); text-align: center; }
-.device-binding-preview strong { color: var(--qdd-text); font-size: 14px; }
-.device-binding-preview span { font-size: 12px; }
+.section-heading p { margin: 0; color: var(--qdd-muted); font-size: 12px; line-height: 1.8; }
+.section-heading > :deep(.el-button) { flex-shrink: 0; }
+.connector-config { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 7px 12px; margin: 17px 0; font-size: 12px; }
+.connector-config dt { color: var(--qdd-muted); }
+.connector-config dd { margin: 0; color: var(--qdd-text); overflow-wrap: anywhere; }
+.installed-footer { margin-top: auto; padding-top: 14px; border-top: 1px solid var(--qdd-border); }
+.installed-footer small, .readonly-note { color: var(--qdd-muted); font-size: 11px; }
+.readonly-note { margin: auto 0 0; padding-top: 18px; }
+.connector-actions { display: flex; flex-wrap: wrap; gap: 8px 14px; margin-top: 10px; }
+.connector-actions :deep(.el-button) { margin: 0; font-size: 12px; }
+.connector-form { margin-top: 20px; }
+.recipient-fields { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); gap: 14px; }
+.recipient-select { width: 100%; }
+.permission-options { display: flex; flex-wrap: wrap; gap: 4px 0; }
+.form-note { margin: 10px 0 18px; color: var(--qdd-muted); line-height: 1.8; font-size: 13px; }
+.action-target { margin: 0 0 16px; font-size: 16px; color: var(--qdd-text); font-weight: 600; overflow-wrap: anywhere; }
+.connector-form :deep(.el-alert), .connectors-page :deep(.el-dialog__body > .el-alert) { margin-top: 12px; }
 @media (max-width: 1120px) { .connector-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-@media (max-width: 760px) { .connector-grid, .tool-source-grid { grid-template-columns: minmax(0, 1fr); } .connector-card :deep(.el-card__body) { min-height: 0; padding: 21px; } .loaded-tools { margin-top: 26px; } .section-heading { align-items: flex-start; } }
+@media (max-width: 920px) { .installed-grid { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 760px) { .connector-grid { grid-template-columns: minmax(0, 1fr); } .connector-card :deep(.el-card__body), .installed-card :deep(.el-card__body) { min-height: 0; padding: 21px; } .section-heading { align-items: flex-start; } .recipient-fields { grid-template-columns: minmax(0, 1fr); gap: 0; } }
 </style>

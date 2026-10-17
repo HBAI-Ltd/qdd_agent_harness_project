@@ -1,5 +1,5 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import type { ClarifyAnswers, PageView, SessionDetail, SessionEvent, SessionMeta } from "@qdd/shared";
+import type { ClarifyAnswers, CreateWishBody, PageView, SessionDetail, SessionEvent, SessionMeta } from "@qdd/shared";
 import * as api from "@/api/workspace";
 import { createConversationSelection } from "./conversationSelection";
 
@@ -48,6 +48,7 @@ export function useWorkspace() {
   const loadingSession = ref(false);
   const error = ref("");
   const connected = ref(false);
+  const gatewayChanges = ref({ overview: 0, pending: 0, skills: 0, schedules: 0, connectors: 0 });
   const selectionVersion = ref(0);
   const pendingSends = ref(new Set<string>());
   const pendingCancellations = ref(new Set<string>());
@@ -141,6 +142,7 @@ export function useWorkspace() {
     const entry: SessionMeta = {
       id: meta.id, title: meta.title, summary: meta.summary, slug: meta.slug,
       status: meta.status, createdAt: meta.createdAt, updatedAt: meta.updatedAt,
+      ...(meta.origin ? { origin: meta.origin } : {}),
     };
     const index = sessions.value.findIndex((session) => session.id === meta.id);
     if (index === -1) sessions.value.push(entry);
@@ -198,11 +200,17 @@ export function useWorkspace() {
           if (controller.signal.aborted || disposed || version !== connectionVersion) return;
           if (event.type === "pages_changed") void refreshPages();
           else if (event.type === "session_updated") applyMeta(event.session);
+          else if (event.type === "pending_changed") gatewayChanges.value.pending++;
+          else if (event.type === "skills_changed") gatewayChanges.value.skills++;
+          else if (event.type === "schedules_changed") gatewayChanges.value.schedules++;
+          else if (event.type === "connectors_changed") gatewayChanges.value.connectors++;
+          gatewayChanges.value.overview++;
         }, controller.signal, () => {
           streamOpened(controller);
           if (reconnecting) {
             void refreshPages();
             void refreshSessionList(controller.signal, version);
+            for (const key of Object.keys(gatewayChanges.value) as (keyof typeof gatewayChanges.value)[]) gatewayChanges.value[key]++;
           }
         });
         if (!controller.signal.aborted) throw new Error("网关关闭了事件流。");
@@ -389,7 +397,7 @@ export function useWorkspace() {
     }
   }
 
-  async function sendMessage(content: string): Promise<boolean> {
+  async function sendMessage(content: string, options: Pick<CreateWishBody, "skillId"> = {}): Promise<boolean> {
     const text = content.trim();
     if (!text || sending.value || loadingSession.value || disposed) return false;
     if (!connected.value) {
@@ -420,6 +428,7 @@ export function useWorkspace() {
         ? await api.sendMessage(gatewayUrl.value, token.value, id, text, controller.signal)
         : await api.createWish(gatewayUrl.value, token.value, {
           wish: text, ...(revisionPageSlug.value ? { slug: revisionPageSlug.value } : {}),
+          ...(options.skillId ? { skillId: options.skillId } : {}),
         }, controller.signal);
       if (controller.signal.aborted || disposed) return false;
       // Keep the identity even if the following detail/SSE request fails.
@@ -504,7 +513,7 @@ export function useWorkspace() {
   return {
     sessions, activeSessionId, activeSession, pages, activePageSlug, activePage, revisionPageSlug,
     preferences, token, gatewayUrl, loadingSessions, loadingPages, loadingSession,
-    error, connected, sending, cancelling, eventActionBusy,
+    error, connected, gatewayChanges, sending, cancelling, eventActionBusy,
     loadWorkspace, openConversation, selectSession, startNewConversation,
     sendMessage, answerQuestions, resolveApproval, cancel, revisePage,
   };

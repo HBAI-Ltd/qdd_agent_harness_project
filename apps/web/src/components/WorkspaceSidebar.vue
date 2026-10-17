@@ -17,7 +17,7 @@ const emit = defineEmits<{
   newConversation: [];
   selectConversation: [id: string];
 }>();
-const { workspace, navigation } = useWorkspaceContext();
+const { workspace, overview, navigation } = useWorkspaceContext();
 const {
   sessions, activeSessionId, pages, activePageSlug, token,
   loadingSessions, loadingPages, connected, loadWorkspace,
@@ -41,9 +41,9 @@ interface NavigationItem {
 const navItems = computed<NavigationItem[]>(() => [
   { view: "chat", label: "对话", icon: "chat", count: sessions.value.length },
   { view: "tasks", label: "任务", icon: "plan", count: pages.value.length },
-  { view: "schedules", label: "定时任务", icon: "clock" },
-  { view: "skills", label: "技能", icon: "spark" },
-  { view: "connectors", label: "连接器", icon: "folder" },
+  { view: "schedules", label: "定时任务", icon: "clock", ...(overview.data.value ? { count: overview.data.value.schedules.total } : {}) },
+  { view: "skills", label: "技能", icon: "spark", ...(overview.data.value ? { count: overview.data.value.skills.total } : {}) },
+  { view: "connectors", label: "连接器", icon: "folder", ...(overview.data.value ? { count: overview.data.value.connectors.connected } : {}) },
   { view: "overview", label: "工作台总览", icon: "shop" },
 ]);
 const filteredSessions = computed(() => [...sessions.value]
@@ -175,12 +175,13 @@ defineExpose({ focusSearch });
         </div>
         <ElScrollbar class="conversation-list" tabindex="0" aria-label="对话记录列表">
           <p v-if="loadingSessions" class="sidebar-status" role="status">正在加载对话…</p>
-          <button
+          <ElButton
             v-for="session in filteredSessions"
             :key="session.id"
             class="conversation-select"
             :class="{ active: view === 'chat' && activeSessionId === session.id }"
-            type="button"
+            text
+            native-type="button"
             :aria-label="`${sessionTitle(session)}，${statusLabels[session.status]}`"
             :title="sessionTooltip(session)"
             :aria-current="view === 'chat' && activeSessionId === session.id ? 'true' : undefined"
@@ -189,7 +190,7 @@ defineExpose({ focusSearch });
             <span class="conversation-title">{{ sessionTitle(session) }}</span>
             <ElTag v-if="session.status === 'waiting'" class="session-tag" type="warning" effect="light" size="small" round>待确认</ElTag>
             <ElTag v-else-if="session.status === 'error'" class="session-tag" type="danger" effect="light" size="small" round>失败</ElTag>
-          </button>
+          </ElButton>
           <p v-if="!filteredSessions.length && !loadingSessions" class="sidebar-status">
             {{ searchTerm ? "没有找到相关对话" : connected ? "暂无对话，点击上方新建对话" : "连接网关后加载对话记录" }}
           </p>
@@ -202,19 +203,20 @@ defineExpose({ focusSearch });
         </div>
         <ElScrollbar class="page-list" tabindex="0" aria-label="任务页面列表">
           <p v-if="loadingPages" class="sidebar-status" role="status">正在加载页面…</p>
-          <button
+          <ElButton
             v-for="page in filteredPages"
             :key="page.slug"
             class="task-select"
             :class="{ active: view === 'tasks' && activePageSlug === page.slug }"
-            type="button"
+            text
+            native-type="button"
             :aria-label="`打开页面：${page.title}`"
             :title="page.title"
             :aria-current="view === 'tasks' && activePageSlug === page.slug ? 'true' : undefined"
             @click="navigation.openPage(page.slug)">
             <AgentIcon name="code" :size="15" />
-            <span>{{ page.title }}</span>
-          </button>
+            <span class="task-title">{{ page.title }}</span>
+          </ElButton>
           <p v-if="!filteredPages.length && !loadingPages" class="sidebar-status">
             {{ searchTerm ? "没有找到相关页面" : connected ? "已发布页面将在这里显示" : "连接网关后加载页面" }}
           </p>
@@ -223,21 +225,22 @@ defineExpose({ focusSearch });
     </div>
 
     <div class="sidebar-bottom">
-      <button
+      <ElButton
         class="profile"
         :class="{ selected: view === 'settings' }"
-        type="button"
+        text
+        native-type="button"
         aria-label="工作空间设置"
         title="工作空间设置"
         :aria-current="view === 'settings' ? 'page' : undefined"
         @click="navigation.openView('settings')">
         <span class="avatar" aria-hidden="true">Q</span>
-        <div class="sidebar-label profile-description">
+        <span class="sidebar-label profile-description">
           <strong>我的工作空间</strong>
           <span><i class="connection-dot" :class="{ connected }" aria-hidden="true" />{{ connected ? "网关已连接" : "网关未连接" }}</span>
-        </div>
+        </span>
         <AgentIcon class="sidebar-label profile-settings-icon" name="sliders" :size="18" />
-      </button>
+      </ElButton>
     </div>
   </aside>
 </template>
@@ -302,25 +305,29 @@ defineExpose({ focusSearch });
   align-items: center;
   gap: 8px;
   width: 100%;
+  height: auto;
   min-height: 38px;
   padding: 8px 12px;
-  margin-bottom: 3px;
+  margin: 0 0 3px;
   border-radius: 8px;
   text-align: left;
   background: transparent;
   color: var(--qdd-text);
   font-size: 13px !important;
+  font-weight: 400;
   line-height: 22px;
 }
-.conversation-select:hover, .task-select:hover { background: var(--qdd-hover); }
-.conversation-select.active, .task-select.active { background: var(--qdd-bg); }
-.conversation-title, .task-select > span:last-child { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.conversation-select :deep(> span), .task-select :deep(> span) { display: flex; width: 100%; min-width: 0; gap: 8px; }
+.conversation-select.el-button:hover, .task-select.el-button:hover { background: var(--qdd-hover); }
+.conversation-select.el-button.active, .task-select.el-button.active { background: var(--qdd-bg); }
+.conversation-title, .task-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .session-status-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; background: var(--qdd-primary); }
 .session-tag { height: 20px; padding: 0 7px; font-size: 11px; border-color: transparent; flex-shrink: 0; }
 .sidebar-status { padding: 8px 12px; margin: 0; color: var(--qdd-muted); font-size: 12px; line-height: 1.7; }
 .sidebar-bottom { flex-shrink: 0; margin-top: auto; padding-top: 6px; }
-.profile { width: 100%; min-height: 64px; background: transparent; color: var(--qdd-text); text-align: left; gap: 10px; padding: 12px 7px 14px; }
-.profile:hover, .profile.selected { background: var(--qdd-hover); }
+.profile { width: 100%; height: auto; min-height: 64px; margin: 0; border-radius: 0; background: transparent; color: var(--qdd-text); text-align: left; gap: 10px; padding: 12px 7px 14px; font-weight: 400; line-height: 1.6; }
+.profile :deep(> span) { display: flex; width: 100%; min-width: 0; gap: 10px; }
+.profile.el-button:hover, .profile.el-button.selected { background: var(--qdd-hover); }
 .profile-description { flex: 1; min-width: 0; }
 .profile strong { font-size: 12px; font-weight: 500; }
 .profile-description > span { display: flex; align-items: center; gap: 5px; font-size: 11px; }
@@ -337,6 +344,7 @@ defineExpose({ focusSearch });
 .is-collapsed .workspace-menu :deep(.el-menu-item) { justify-content: center; padding: 0 !important; }
 .is-collapsed .workspace-menu :deep(.el-menu-tooltip__trigger) { justify-content: center; padding: 0 !important; }
 .is-collapsed .profile { justify-content: center; padding-left: 0; padding-right: 0; }
+.is-collapsed .profile :deep(> span) { justify-content: center; }
 @media (min-height: 561px) and (max-height: 650px) {
   .sidebar { padding-top: 16px; }
   .brand-row { margin-bottom: 12px; }

@@ -2,7 +2,7 @@ import { watch } from "node:fs";
 import { mkdir, readFile, stat } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import path from "node:path";
-import type { AnswerBody, AskBody, CreateWishBody, GatewayEvent, JsonObject, Overview, PageView, SendMessageBody, ToolInfo } from "@qdd/shared";
+import type { AnswerBody, AskBody, BrowserStreamEvent, CreateWishBody, GatewayEvent, JsonObject, Overview, PageView, SendMessageBody, ToolInfo } from "@qdd/shared";
 import { runAsk } from "../agent/ask.js";
 import type { ChatFn } from "../agent/llm.js";
 import type { LoadedConfig } from "../config.js";
@@ -118,7 +118,8 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
 
   const server = createServer((req, res) => {
     route(req, res).catch((error: Error) => {
-      const status = error instanceof HttpError ? error.status : error instanceof NotFound || error instanceof Missing ? 404 : error instanceof Conflict ? 409 : error instanceof BadRequest || error instanceof InvalidInput ? 400 : 500;
+      const tagged = (error as { status?: unknown }).status;
+      const status = error instanceof HttpError ? error.status : typeof tagged === "number" ? tagged : error.name === "ZodError" ? 400 : error instanceof NotFound || error instanceof Missing ? 404 : error instanceof Conflict ? 409 : error instanceof BadRequest || error instanceof InvalidInput ? 400 : 500;
       if (res.headersSent) {
         res.end();
         return;
@@ -327,6 +328,53 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
       }
     }
 
+    // ---------------------------------------------------------------- 浏览器实时画面与人工接管
+    const browserRoute = /^\/api\/browser\/([^/]+)(\/stream|\/input)?$/.exec(p);
+    if (browserRoute) {
+      const browser = workbench.browser;
+      if (!browser) throw new HttpError(404, "浏览器工具未启用");
+      const id = decodeURIComponent(browserRoute[1]!);
+      const sub = browserRoute[2];
+      if (!sub && m === "GET") {
+        const state = browser.state(id);
+        if (!state) throw new HttpError(404, "浏览器会话不存在或已关闭");
+        return json(res, 200, state);
+      }
+      if (sub === "/stream" && m === "GET") {
+        const stream = openSse(req, res);
+        // 背压：写缓冲未清空时只保留最新一帧，drain 后补发
+        let pendingFrame: BrowserStreamEvent | undefined;
+        res.on("drain", () => {
+          if (pendingFrame) {
+            const frame = pendingFrame;
+            pendingFrame = undefined;
+            stream(frame);
+          }
+        });
+        const listener = (event: BrowserStreamEvent) => {
+          if (event.type === "frame" && res.writableNeedDrain) pendingFrame = event;
+          else stream(event);
+          if (event.type === "closed") res.end();
+        };
+        let off: () => void;
+        try {
+          off = browser.runtime.subscribe(browser.cwd, id, listener);
+        } catch (error) {
+          stream({ type: "error", message: (error as Error).message });
+          res.end();
+          return;
+        }
+        req.on("close", off);
+        return;
+      }
+      if (sub === "/input" && m === "POST") {
+        const body = (await readJson(req)) as ({ tabId?: unknown } & Record<string, unknown>) | undefined;
+        if (!body || typeof body.tabId !== "string") throw new HttpError(400, "tabId 不能为空");
+        const { tabId, ...input } = body;
+        return json(res, 200, await browser.runtime.input(browser.cwd, id, tabId, input));
+      }
+    }
+
     if (p === "/api/connectors") {
       if (m === "GET") return json(res, 200, { catalog: CONNECTOR_CATALOG, connectors: await workbench.connectors.list(mcpInfo()) });
       if (m === "POST") {
@@ -495,6 +543,7 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
       new Promise((resolve) => {
         watcher.close();
         scheduler.stop();
+        void workbench.browser?.close();
         clearTimeout(timer);
         clearInterval(refreshTimer);
         for (const c of globalClients) c.end();

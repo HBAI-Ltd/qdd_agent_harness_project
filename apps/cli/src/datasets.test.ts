@@ -159,6 +159,11 @@ describe("数据集", () => {
     );
     await assert.rejects(queryAggregate(ctx(), { dataset: "order_items", metrics: ["revenue"], groupBy: ["品类"] }), /字段 品类 不存在/);
     await assert.rejects(queryAggregate(ctx(), { dataset: "order_items", metrics: ["revenue"], filter: [["date", "between" as never, 1]] }), /操作 between 不支持/);
+    // 回归：指标依赖的字段不在数据集里时报错，而不是静默聚合出 0
+    await assert.rejects(
+      queryAggregate(ctx(), { dataset: "inventory_moves", metrics: ["quantity"], groupBy: ["type"] }),
+      /不支持指标 quantity（需要字段 qty）；该数据集可用指标：.*stock/,
+    );
     const ok = await queryAggregate(ctx(), { dataset: "order_items", metrics: ["revenue"], groupBy: ["category"], sort: [{ by: "revenue", desc: true }] });
     assert.ok(Number(ok[0]!.revenue) >= Number(ok[1]!.revenue));
   });

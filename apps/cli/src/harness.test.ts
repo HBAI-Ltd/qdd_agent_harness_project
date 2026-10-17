@@ -467,6 +467,21 @@ describe("gateway", () => {
     assert.match(outputs.at(-1)!, /已保存 data\/sales_30d\.js/);
   });
 
+  test("熔断：换参数反复查询但结果不变时拦截（真实场景回归）", async () => {
+    const outputs: string[] = [];
+    let i = 0;
+    const scripted: ChatFn = async (messages) => {
+      const last = messages.at(-1)!;
+      if (last.role === "tool") outputs.push(String(last.content));
+      // 每次多加一个不影响结果的过滤条件
+      if (i < 4) return call("store__aggregate", { dataset: "order_items", metrics: ["revenue"], filter: Array.from({ length: ++i }, () => ["revenue", ">", -1]) });
+      return call("reply", { text: "好", gaps: [] });
+    };
+    await runWish(base, sources, scripted, { wish: "看看", sessionId: "00000000-0000-0000-0000-000000000003" }, { onEvent: () => {}, authorize: async () => false });
+    assert.doesNotMatch(outputs[1]!, /^重复调用/);
+    assert.match(outputs[2]!, /^重复调用：你已连续 3 次修改参数调用 store__aggregate（order_items），结果完全相同/);
+  });
+
   test("风格提示词接口", async () => {
     assert.equal((await api("/api/style", { method: "PUT", body: "# 新风格" })).status, 200);
     assert.equal(await (await api("/api/style")).text(), "# 新风格");

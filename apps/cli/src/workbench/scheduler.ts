@@ -123,8 +123,15 @@ export class Scheduler {
     return this.launch(s);
   }
 
-  /** 检查并执行到期任务（测试可直接调用）。 */
-  async tick(): Promise<void> {
+  private ticking: Promise<void> | undefined;
+
+  /** 检查并执行到期任务（测试可直接调用）；并发调用共用同一次检查，避免重复执行。 */
+  tick(): Promise<void> {
+    this.ticking ??= this.check().finally(() => (this.ticking = undefined));
+    return this.ticking;
+  }
+
+  private async check(): Promise<void> {
     const now = this.now();
     const due = (await this.list()).filter((s) => s.enabled && s.nextRunAt && new Date(s.nextRunAt) <= now && !this.active.has(s.id));
     for (const s of due) {

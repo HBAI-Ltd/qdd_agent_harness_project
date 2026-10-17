@@ -1,3 +1,4 @@
+import { BrowserService } from "../browser/index.js";
 import type { LoadedConfig } from "../config.js";
 import { ConnectorStore } from "./connectors.js";
 import { FeishuClient } from "./feishu.js";
@@ -8,8 +9,15 @@ import { SkillStore } from "./skills.js";
 export interface Workbench {
   skills: SkillStore;
   connectors: ConnectorStore;
+  /** browser.enabled 时提供 */
+  browser?: BrowserService | undefined;
 }
 
-export async function openWorkbench({ paths }: LoadedConfig, feishu = new FeishuClient()): Promise<Workbench> {
-  return { skills: new SkillStore(paths), connectors: new ConnectorStore(paths, await SecretBox.open(paths), feishu) };
+export async function openWorkbench(loaded: LoadedConfig, feishu = new FeishuClient()): Promise<Workbench> {
+  const { paths, config } = loaded;
+  return {
+    skills: new SkillStore(paths),
+    connectors: new ConnectorStore(paths, await SecretBox.open(paths), feishu),
+    browser: config.browser.enabled ? new BrowserService(loaded) : undefined,
+  };
 }

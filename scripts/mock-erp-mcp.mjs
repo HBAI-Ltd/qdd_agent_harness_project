@@ -42,7 +42,19 @@ for (let i = 60; i >= 1; i--) {
     sales.push({ date: dayStr(d), sku: p.sku, qty, revenue: round2(qty * p.price * (0.9 + rand() * 0.1)), cost: round2(qty * p.cost) });
   }
 }
-const inventory = products.map((p) => ({ sku: p.sku, name: p.name, on_hand: Math.round(rand() * 200), safety_stock: 30, updated_at: `${dayStr(today)}T08:00:00+08:00` }));
+// 保质期：生鲜按品类给出批次到期日（今天起 0-12 天，粮油 30-180 天）
+const shelfDays = { 蔬菜: 4, 水果: 7, 肉禽: 3, 水产: 2, 蛋奶: 12 };
+const inventory = products.map((p) => ({
+  sku: p.sku,
+  name: p.name,
+  category: p.category,
+  on_hand: Math.round(rand() * 200),
+  safety_stock: 30,
+  expire_date: dayStr(new Date(today.getTime() + (p.category in shelfDays ? Math.floor(rand() * (shelfDays[p.category] + 1)) : 30 + Math.floor(rand() * 150)) * 86400e3)),
+  shelf: `${p.category}区-${1 + Math.floor(rand() * 4)}号架`,
+  updated_at: `${dayStr(today)}T08:00:00+08:00`,
+}));
+const priceChanges = [];
 
 const members = Array.from({ length: 50 }, (_, i) => ({ member_id: `M${String(i + 1).padStart(4, "0")}`, level: pick(["普通", "银卡", "金卡"]), joined: dayStr(new Date(today.getTime() - Math.floor(rand() * 700) * 86400e3)), points: Math.floor(rand() * 5000) }));
 const orders = Array.from({ length: 200 }, (_, i) => {
@@ -81,6 +93,31 @@ const tools = [
     run: ({ limit = 50, channel }) => ({ orders: orders.filter((o) => !channel || o.channel === channel).slice(0, Math.min(limit, 200)) }),
   },
   {
+    name: "query_expiring", description: "查询指定天数内到期的库存批次（含货架位置）", annotations: ro,
+    inputSchema: { type: "object", properties: { within_days: { type: "integer", default: 3 } } },
+    run: ({ within_days = 3 }) => {
+      const limit = dayStr(new Date(today.getTime() + within_days * 86400e3));
+      return { as_of: dayStr(today), items: inventory.filter((x) => x.expire_date <= limit && x.on_hand > 0) };
+    },
+  },
+  {
+    name: "update_price", description: "修改商品售价（写入 ERP，需店长授权）", annotations: { destructiveHint: true },
+    inputSchema: { type: "object", properties: { sku: str("SKU"), price: { type: "number", description: "新售价" }, reason: str("调价原因") }, required: ["sku", "price"] },
+    run: ({ sku, price, reason = "" }) => {
+      const p = products.find((x) => x.sku === sku);
+      if (!p) throw new Error(`未知 SKU ${sku}`);
+      if (!(price > 0)) throw new Error("price 必须大于 0");
+      priceChanges.push({ sku, name: p.name, from: p.price, to: price, reason, at: new Date().toISOString() });
+      p.price = round2(price);
+      return { ok: true, sku, name: p.name, price: p.price };
+    },
+  },
+  {
+    name: "get_price_changes", description: "本次运行中的调价记录", annotations: ro,
+    inputSchema: { type: "object", properties: {} },
+    run: () => ({ changes: priceChanges }),
+  },
+  {
     name: "list_members", description: "会员列表", annotations: ro,
     inputSchema: { type: "object", properties: { level: str("普通/银卡/金卡") } },
     run: ({ level }) => ({ members: members.filter((m) => !level || m.level === level) }),
@@ -102,7 +139,12 @@ function handle(msg) {
     case "tools/call": {
       const tool = tools.find((t) => t.name === msg.params?.name);
       if (!tool) return fail(-32602, `未知工具 ${msg.params?.name}`);
-      const data = tool.run(msg.params?.arguments ?? {});
+      let data;
+      try {
+        data = tool.run(msg.params?.arguments ?? {});
+      } catch (error) {
+        return ok({ content: [{ type: "text", text: error.message }], isError: true });
+      }
       return ok({ content: [{ type: "text", text: JSON.stringify(data) }], structuredContent: data });
     }
     default:

@@ -51,6 +51,10 @@ Aidol 创造营参赛项目——钱多多门店人工智能助手：店铺管�
 - **定时任务**（`workspace/schedules.json`）：5 段 cron，网关内调度；到点无人值守执行（可绑定技能），结论推送到连接器；停机错过的执行会补跑。
 - **连接器**（`workspace/connectors.json`）：目前开放飞书（群机器人 webhook / 企业自建应用），安装前先验证，凭据加密存储；agent 用 `send_notification` 推送（按连接器权限需店长确认）。
 
+### 浏览器
+
+`browser.enabled: true` 后 agent 可操作本机 Chrome/Edge（移植自 Toonflow-app 的浏览器工具），前端通过 `/api/browser/:id/stream` 实时观看、`/input` 接管；首次点击/输入需店长授权。
+
 ### 统一风格
 
 `workspace/style.md` 是所有页面共用的风格提示词（内置主题 `assets/theme.css`）。前端设置页调用 `GET/PUT/DELETE /api/style`，或在终端执行 `npm run qdd -- style --edit`。

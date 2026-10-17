@@ -7,12 +7,19 @@ import { createHmac } from "node:crypto";
 export const FEISHU_BASE_URL = "https://open.feishu.cn";
 const LARK_BASE_URL = "https://open.larksuite.com";
 const TIMEOUT_MS = 10_000;
+/** 自定义机器人单个 webhook 限频 5 次/秒（飞书文档），本地按此节流 */
+const WEBHOOK_PER_SEC = 5;
+/** 仍被限流（code 11232 / HTTP 429）时的重试次数 */
+const RATE_RETRIES = 3;
+const RATE_LIMITED = new Set([11232, 9499]);
 
 export type Fetch = typeof fetch;
 
 export interface FeishuOptions {
   baseUrl?: string;
   fetch?: Fetch;
+  /** 单次请求超时（毫秒） */
+  timeoutMs?: number;
 }
 
 export interface WebhookCredentials {
@@ -45,11 +52,17 @@ export function feishuSign(timestamp: number, secret: string): string {
 export class FeishuClient {
   private readonly baseUrl: string;
   private readonly fetch: Fetch;
+  private readonly timeoutMs: number;
   private readonly tokens = new Map<string, { token: string; expiresAt: number }>();
+  /** 正在换取中的 token：并发请求共用同一次换取 */
+  private readonly inflight = new Map<string, Promise<string>>();
+  /** 每个 webhook 最近 1 秒内的发送时间与排队链 */
+  private readonly windows = new Map<string, { sent: number[]; chain: Promise<void> }>();
 
   constructor(options: FeishuOptions = {}) {
     this.baseUrl = (options.baseUrl ?? process.env.FEISHU_BASE_URL ?? FEISHU_BASE_URL).replace(/\/+$/, "");
     this.fetch = options.fetch ?? fetch;
+    this.timeoutMs = options.timeoutMs ?? TIMEOUT_MS;
   }
 
   /** webhook 只能指向飞书（或 Lark）机器人地址，避免把消息与签名发往任意主机。 */
@@ -66,15 +79,48 @@ export class FeishuClient {
       body.timestamp = String(timestamp);
       body.sign = feishuSign(timestamp, signSecret);
     }
-    const reply = await this.post(webhookUrl, body);
-    const code = reply.code ?? reply.StatusCode ?? 0;
-    if (code !== 0) throw new FeishuError(describe(code, reply.msg ?? reply.StatusMessage));
+    for (let attempt = 0; ; attempt++) {
+      await this.throttle(webhookUrl);
+      const reply = await this.post(webhookUrl, body);
+      const code = reply.code ?? reply.StatusCode ?? 0;
+      if (code === 0) return;
+      if (!RATE_LIMITED.has(code) || attempt >= RATE_RETRIES) throw new FeishuError(describe(code, reply.msg ?? reply.StatusMessage));
+      await sleep(1000 * 2 ** attempt);
+    }
+  }
+
+  /** 按 webhook 排队，保证任意 1 秒内最多发出 WEBHOOK_PER_SEC 次。 */
+  private throttle(key: string): Promise<void> {
+    const w = this.windows.get(key) ?? { sent: [], chain: Promise.resolve() };
+    this.windows.set(key, w);
+    const turn = w.chain.then(async () => {
+      for (;;) {
+        const now = Date.now();
+        // 窗口留 100ms 余量，抵消网络抖动导致的服务端计数偏差
+        w.sent = w.sent.filter((t) => now - t < 1100);
+        if (w.sent.length < WEBHOOK_PER_SEC) break;
+        await sleep(w.sent[0]! + 1100 - now + 5);
+      }
+      w.sent.push(Date.now());
+    });
+    w.chain = turn;
+    return turn;
   }
 
   /** 企业自建应用：换取 tenant_access_token（带缓存，提前 5 分钟刷新）。 */
   async tenantToken({ appId, appSecret }: AppCredentials, fresh = false): Promise<string> {
     const cached = this.tokens.get(appId);
     if (!fresh && cached && cached.expiresAt > Date.now()) return cached.token;
+    // 按凭据去重：同一 appId 用错误密钥的验证不会搭上正确密钥的换取
+    const key = `${appId}\n${appSecret}`;
+    const pending = this.inflight.get(key);
+    if (pending) return pending;
+    const request = this.fetchToken({ appId, appSecret }).finally(() => this.inflight.delete(key));
+    this.inflight.set(key, request);
+    return request;
+  }
+
+  private async fetchToken({ appId, appSecret }: AppCredentials): Promise<string> {
     const reply = await this.post(`${this.baseUrl}/open-apis/auth/v3/tenant_access_token/internal`, { app_id: appId, app_secret: appSecret });
     if (reply.code !== 0 || !reply.tenant_access_token) throw new FeishuError(describe(reply.code ?? -1, reply.msg));
     this.tokens.set(appId, { token: reply.tenant_access_token, expiresAt: Date.now() + Math.max(60, (reply.expire ?? 7200) - 300) * 1000 });
@@ -106,7 +152,7 @@ export class FeishuClient {
   private async request(url: string, init: RequestInit): Promise<FeishuReply> {
     let res: Response;
     try {
-      res = await this.fetch(url, { ...init, signal: AbortSignal.timeout(TIMEOUT_MS) });
+      res = await this.fetch(url, { ...init, signal: AbortSignal.timeout(this.timeoutMs) });
     } catch (error) {
       throw new FeishuError(`无法连接飞书：${(error as Error).message}`);
     }
@@ -121,7 +167,10 @@ export class FeishuClient {
   }
 }
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 const HINTS: Record<number, string> = {
+  11232: "推送过于频繁，已被飞书限流",
   19001: "webhook 地址无效或机器人已被移除",
   19021: "签名校验失败：请检查签名密钥，或确认服务器时间准确",
   19022: "IP 不在机器人白名单内",

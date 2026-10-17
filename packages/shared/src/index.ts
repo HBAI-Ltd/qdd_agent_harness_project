@@ -40,6 +40,14 @@ export interface HarnessConfig {
   };
   /** 授权请求等待店长处理的时长（分钟），超时视为拒绝；工作台可集中处理。 */
   approvalTimeoutMin: number;
+  /** 浏览器工具：agent 操作本机 Chrome/Edge，前端可实时观看与接管 */
+  browser: {
+    enabled: boolean;
+    /** 浏览器程序绝对路径；留空自动查找 Chrome / Edge / Chromium */
+    executablePath: string;
+    /** confirm：每个会话首次点击/输入前需店长授权；auto：无需授权 */
+    permission: "confirm" | "auto";
+  };
   gateway: {
     host: string;
     port: number;
@@ -203,6 +211,7 @@ export type SessionEvent = At &
     | { type: "published"; page: PageEntry; files: string[] }
     | { type: "gaps"; gaps: CapabilityGap[] }
     | { type: "skill"; skill: { id: string; name: string }; action: "loaded" | "saved" }
+    | { type: "browser"; browser: BrowserSessionState }
     | { type: "error"; message: string }
   );
 
@@ -395,3 +404,37 @@ export interface ConnectorView {
   lastVerifiedAt: string | null;
   createdAt: string | null;
 }
+
+// ---------------------------------------------------------------- 浏览器（实时画面）
+
+export interface BrowserSessionState {
+  browserSessionId: string;
+  tabId: string;
+  url: string;
+  title: string;
+  canGoBack: boolean;
+  canGoForward: boolean;
+  status: "running" | "closed";
+}
+
+/** GET /api/browser/:id/stream 的 SSE 事件；frame.data 为 base64 JPEG。 */
+export type BrowserStreamEvent =
+  | { type: "state"; session: BrowserSessionState }
+  | { type: "frame"; sessionId: string; tabId: string; data: string; mimeType: "image/jpeg"; width: number; height: number }
+  | { type: "closed"; sessionId: string }
+  | { type: "error"; message: string };
+
+type Modifier = "Alt" | "Control" | "Meta" | "Shift";
+
+/** POST /api/browser/:id/input 的人工接管输入；坐标为画面像素。 */
+export type BrowserInput =
+  | { type: "mouse"; event: "move" | "down" | "up"; x: number; y: number; button?: "left" | "right" | "middle"; clickCount?: 1 | 2; modifiers?: Modifier[] }
+  | { type: "click"; x: number; y: number; button?: "left" | "right" | "middle"; clickCount?: 1 | 2; modifiers?: Modifier[] }
+  | { type: "wheel"; x: number; y: number; deltaX: number; deltaY: number; modifiers?: Modifier[] }
+  | { type: "key"; key: string; event?: "down" | "up" | "press"; modifiers?: Modifier[] }
+  | { type: "text"; text: string }
+  | { type: "release" }
+  | { type: "navigate"; url: string }
+  | { type: "back" }
+  | { type: "forward" }
+  | { type: "reload" };

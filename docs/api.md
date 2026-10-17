@@ -130,6 +130,28 @@ POST   /api/connectors/:id/test     { "text"? } 发送测试消息
 
 常见失败会翻译成中文提示（签名错误、关键词不匹配、IP 白名单、App Secret 错误、机器人不在群中等）。凭据用 AES-256-GCM 加密保存在 `workspace/connectors.json`（密钥来自 `QDD_SECRET_KEY` 或自动生成的 `workspace/.secret-key`），接口只返回脱敏后的地址与「是否已设置」。
 
+## 浏览器（实时画面与人工接管）
+
+在 `harness.config.json` 中开启（需要本机 Chrome / Edge / Chromium）：
+
+```json
+"browser": { "enabled": true, "executablePath": "", "permission": "confirm" }
+```
+
+agent 获得 `browser` 工具（open / navigate / snapshot / read / click / hover / type / pressKey / scroll / screenshot / tabs / newTab / selectTab / closeTab / close）。每个会话一个独立浏览器会话（临时资料，不读个人浏览器登录），可跨多轮续用；取消会话会关闭浏览器。`permission: confirm` 时，每个会话首次点击、输入或按键前触发 `approval_required`（`tool: browser`, `source: browser`）。只允许 HTTP/HTTPS 网页。
+
+会话事件 `{ "type": "browser", "browser": BrowserSessionState }` 给出 `browserSessionId`、`tabId`、当前地址与标题，前端据此打开画面：
+
+```http
+GET  /api/browser/:browserSessionId          → BrowserSessionState
+GET  /api/browser/:browserSessionId/stream   → SSE BrowserStreamEvent：state / frame（base64 JPEG，1280×800）/ closed / error
+POST /api/browser/:browserSessionId/input    { "tabId": "…", "type": "click", "x": 100, "y": 200 } → BrowserSessionState
+```
+
+`input` 支持 `mouse`（move/down/up）、`click`、`wheel`、`key`、`text`、`release`、`navigate`、`back`、`forward`、`reload`，坐标为画面像素（类型见 `BrowserInput`）。标签页切换或页面变化后返回 409，等待新画面后重试；画面失焦或停止观看时发送 `release` 释放按住的鼠标和按键。
+
+运行时移植自 [Toonflow-app](https://github.com/HBAI-Ltd/Toonflow-app) 的 `packages/tools/browser`（MIT），默认减少常见自动化特征，但并非完全隐身；遇到登录或人工验证时请在实时画面中手动接管。
+
 ## 页面
 
 ```http

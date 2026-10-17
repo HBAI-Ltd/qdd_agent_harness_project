@@ -234,6 +234,7 @@ export class SessionHub {
           signal: controller.signal,
           onEvent: (e: AgentEvent) => {
             if (e.kind === "skill") void this.emit(id, { type: "skill", skill: e.skill, action: e.action });
+            else if (e.kind === "browser") void this.emit(id, { type: "browser", browser: e.state });
             else if (e.kind !== "ok") void this.emit(id, { type: e.kind, text: e.text });
           },
           authorize: (tool, args) => this.waitFor(meta, this.requestApproval(id, tool.name, tool.source, args)),

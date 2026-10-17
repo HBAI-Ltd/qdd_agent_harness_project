@@ -1,6 +1,7 @@
 import type { BrowserSessionState } from "@qdd/shared";
 import type { LoadedConfig } from "../config.js";
 import { createBrowserRuntime, type ToolResult } from "./host.js";
+import { z } from "zod";
 import { browserActionSchema } from "./protocol.js";
 
 /** 会改变网页状态、需要店长授权的动作（confirm 模式下每个会话授权一次）。 */
@@ -48,7 +49,10 @@ export class BrowserService {
     this.granted.add(sessionId);
   }
 
-  execute(sessionId: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<ToolResult> {
+  async execute(sessionId: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<ToolResult> {
+    // 参数错误给出可读提示，而不是原始的 zod 问题列表
+    const parsed = browserActionSchema.safeParse(args);
+    if (!parsed.success) throw new Error(`browser 参数错误：${z.prettifyError(parsed.error).replace(/\n/g, "；")}。各动作只接受自己的参数，例如 pressKey 只要 key，click 只要 ref。`);
     return this.runtime.execute(this.cwd, sessionId, args, { executablePath: this.loaded.config.browser.executablePath }, signal);
   }
 

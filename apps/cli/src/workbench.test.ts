@@ -159,6 +159,12 @@ describe("workbench gateway", () => {
     assert.doesNotMatch(String(view.config.webhookUrl), /signed$/);
     assert.match(feishu.messages.at(-1)!.text, /验证成功/);
 
+    // 店长填写官方地址时，按 FEISHU_BASE_URL（此处为模拟服务）转发
+    const official = await post("/api/connectors", { type: "feishu", mode: "webhook", name: "官方地址", webhookUrl: "https://open.feishu.cn/open-apis/bot/v2/hook/plain" });
+    assert.equal(official.status, 201);
+    assert.equal(feishu.messages.at(-1)!.via, "webhook");
+    await api(`/api/connectors/${((await official.json()) as ConnectorView).id}`, { method: "DELETE" });
+
     const disk = await readFile(loaded.paths.connectors, "utf8");
     assert.doesNotMatch(disk, new RegExp(SIGN_SECRET));
     assert.doesNotMatch(disk, /hook\/signed/);

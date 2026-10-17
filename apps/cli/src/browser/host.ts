@@ -47,6 +47,9 @@ function withResolvers<T>() {
   return { promise, resolve, reject };
 }
 
+/** 单个元素操作（点击/悬停/填写）的等待上限 */
+const ELEMENT_TIMEOUT_MS = 8000;
+
 function isWebUrl(value: string) {
   if (value === "about:blank") return true;
   try {
@@ -482,9 +485,31 @@ export function createBrowserRuntime() {
       const href = await handle.evaluate(element => element.closest("a[href]")?.getAttribute("href"));
       if (href && !isWebUrl(new URL(href, tab.page.url()).href)) throw new Error("不能打开非 HTTP/HTTPS 链接");
       signal.throwIfAborted();
-      if (action.action === "click") await handle.asLocator().click({ signal });
-      else if (action.action === "hover") await handle.asLocator().hover({ signal });
-      else await handle.asLocator().fill(action.text, { signal });
+      // 本项目改动：下拉框的 option 无法被指针点击，直接选中它所属的 select；
+      // 单个元素操作限时 ELEMENT_TIMEOUT_MS，超时只报错不关闭会话，避免整段浏览被 30 秒总超时关闭后反复重来。
+      const option = action.action === "click" && await handle.evaluate(element => {
+        if (element.tagName !== "OPTION") return false;
+        const select = element.closest("select");
+        const item = element as unknown as { value: string; disabled: boolean };
+        if (!select || item.disabled) return false;
+        select.value = item.value;
+        select.dispatchEvent(new Event("input", { bubbles: true }));
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+        return true;
+      });
+      if (!option) {
+        const locator = handle.asLocator().setTimeout(ELEMENT_TIMEOUT_MS);
+        try {
+          if (action.action === "click") await locator.click({ signal });
+          else if (action.action === "hover") await locator.hover({ signal });
+          else await locator.fill(action.text, { signal });
+        } catch (error) {
+          if (error instanceof Error && error.name === "TimeoutError" && !signal.aborted) {
+            throw new Error(`元素 ${action.ref} 在 ${ELEMENT_TIMEOUT_MS / 1000} 秒内不可${action.action === "type" ? "输入" : "点击"}（可能被遮挡、不可见或不是可交互元素）。请重新 snapshot 换一个元素；下拉框请对 combobox 用 type 填入选项文字，或 pressKey 方向键选择。不要重复同样的操作。`);
+          }
+          throw error;
+        }
+      }
     } else if (action.action === "pressKey") {
       await pressKey(tab.page, action.key, signal);
     } else if (action.action === "scroll") {

@@ -482,6 +482,22 @@ describe("gateway", () => {
     assert.match(outputs[2]!, /^重复调用：你已连续 3 次修改参数调用 store__aggregate（order_items），结果完全相同/);
   });
 
+  test("回归：等待店长回答时停止执行，会话立即结束", async () => {
+    const asking: ChatFn = async (messages) => {
+      if (messages.at(-1)!.role === "tool") return call("reply", { text: "不该执行到这里", gaps: [] });
+      return call("clarify", { questions: [{ id: "q", header: "范围", question: "看哪个范围？", options: [{ label: "30 天（推荐）" }, { label: "7 天" }] }] });
+    };
+    const hub = new (gateway.hub.constructor as new (...a: unknown[]) => typeof gateway.hub)(base, sources, () => asking);
+    const meta = await hub.create("看看");
+    for (let i = 0; i < 100 && (await hub.meta(meta.id)).status !== "waiting"; i++) await new Promise((r) => setTimeout(r, 20));
+    assert.equal((await hub.meta(meta.id)).status, "waiting");
+    hub.cancel(meta.id);
+    const end = await Promise.race([hub.wait(meta.id), new Promise<never>((_, reject) => setTimeout(() => reject(new Error("取消后会话仍未结束")), 3000))]);
+    assert.equal(end.status, "error");
+    const detail = await hub.detail(meta.id);
+    assert.equal(detail.events.filter((e) => e.type === "error").at(-1)?.type === "error" && (detail.events.filter((e) => e.type === "error").at(-1) as { message: string }).message, "已取消");
+  });
+
   test("风格提示词接口", async () => {
     assert.equal((await api("/api/style", { method: "PUT", body: "# 新风格" })).status, 200);
     assert.equal(await (await api("/api/style")).text(), "# 新风格");

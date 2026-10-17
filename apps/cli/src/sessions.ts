@@ -193,7 +193,12 @@ export class SessionHub {
   }
 
   cancel(id: string): void {
-    this.running.get(id)?.abort();
+    const controller = this.running.get(id);
+    if (!controller) return;
+    controller.abort();
+    // 正在等店长回答或授权时，agent 阻塞在等待上收不到中止信号：立即结束这些等待（问题视为未回答、授权视为拒绝）
+    for (const q of this.questions.values()) if (q.detail.sessionId === id) q.resolve(null);
+    for (const a of this.approvals.values()) if (a.detail.sessionId === id) a.resolve(false);
   }
 
   /** 等待会话本轮结束（CLI 用）。 */

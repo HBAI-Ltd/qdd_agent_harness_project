@@ -1,0 +1,2 @@
+*.sh text eol=lf
+assets/fonts/qdd_cjk_*.c text eol=lf

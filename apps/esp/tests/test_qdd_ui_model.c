@@ -12,7 +12,118 @@ static bool report(uint8_t id, const uint8_t *data, size_t size, void *context) 
     return true;
 }
 
+static void test_pairing_settings_feedback(void) {
+    qdd_ui_pairing_view_t pair = qdd_ui_pairing_model(false, false, false, true, false, 0, 1000, "PAIRING", 1000);
+    assert(strcmp(pair.detail, "配对已开启，等待手机") == 0);
+    assert(strcmp(pair.action, "重新开启配对") == 0 && strcmp(pair.notice, "配对已重新开启") == 0);
+    assert(pair.flash_feedback && !pair.show_passkey);
+    pair = qdd_ui_pairing_model(false, false, false, true, false, 0, 4000, "PAIRING", 1000);
+    assert(strcmp(pair.notice, "手机蓝牙中选择本设备") == 0 && !pair.flash_feedback);
+    pair = qdd_ui_pairing_model(false, false, false, true, false, 0, 4000, "PAIRING", 4000);
+    assert(pair.flash_feedback && strcmp(pair.notice, "配对已重新开启") == 0);
+    pair = qdd_ui_pairing_model(true, false, false, true, true, 123, 4000, "", 0);
+    assert(pair.show_passkey && strcmp(pair.detail, "请在手机输入配对码") == 0);
+    pair = qdd_ui_pairing_model(true, true, false, true, true, 123, 4000, "", 0);
+    assert(!pair.show_passkey && !pair.flash_feedback && strcmp(pair.detail, "手机已连接") == 0);
+    assert(strcmp(pair.notice, "正在准备键盘鼠标") == 0);
+    pair = qdd_ui_pairing_model(true, true, true, true, true, 123, 4000, "", 0);
+    assert(!pair.show_passkey && strcmp(pair.notice, "可以返回继续连接电脑") == 0);
+    pair = qdd_ui_pairing_model(true, true, true, true, true, 123, 4000, "PAIRING", 4000);
+    assert(!pair.show_passkey && pair.flash_feedback && strcmp(pair.detail, "手机已连接") == 0);
+    assert(strcmp(pair.notice, "配对已重新开启") == 0); // Secure phones still get a visible click acknowledgement.
+    pair = qdd_ui_pairing_model(false, false, false, false, true, 123, 4000, "PAIRING", 4000);
+    assert(!pair.show_passkey && !pair.flash_feedback && strcmp(pair.detail, "配对窗口已关闭") == 0);
+    assert(strcmp(pair.action, "开启手机配对") == 0); // Feedback cannot fake an open window.
+    pair = qdd_ui_pairing_model(false, false, false, true, true, 1000000, 4000, "", 0);
+    assert(!pair.show_passkey);
+    pair = qdd_ui_pairing_model(false, false, false, true, false, 0, 4000, "PAIRING", 4001);
+    assert(!pair.flash_feedback && strcmp(pair.notice, "手机蓝牙中选择本设备") == 0);
+}
+
+static void test_guide_actions_and_skip_safety(void) {
+    for (unsigned step = 1; step <= 5; step++) {
+        for (unsigned selected = 0; selected < 2; selected++) {
+            for (unsigned locked = 0; locked < 2; locked++) {
+                const qdd_ui_home_action_t action = qdd_ui_home_action(step, selected, locked != 0);
+                assert(action != QDD_UI_HOME_STOP && action != QDD_UI_HOME_UNLOCK);
+            }
+        }
+        assert(qdd_ui_home_choices(step) == (step >= 2 && step <= 4 ? 2u : 1u));
+    }
+    assert(qdd_ui_home_action(2, 0, false) == QDD_UI_HOME_SKIP_APP);
+    assert(qdd_ui_home_action(3, 0, false) == QDD_UI_HOME_SKIP_APP);
+    assert(qdd_ui_home_action(4, 0, false) == QDD_UI_HOME_SKIP_BLUETOOTH);
+    assert(qdd_ui_home_action(0, 0, false) == QDD_UI_HOME_STOP);
+    assert(qdd_ui_home_action(0, 0, true) == QDD_UI_HOME_UNLOCK);
+    assert(qdd_ui_home_action(0, 1, true) == QDD_UI_HOME_SETTINGS);
+    qdd_hid_state_t state = {0};
+    qdd_ui_onboarding_t progress = {.require_full = true, .wifi_connected = true};
+    qdd_ui_view_t guide = qdd_ui_onboarding_model(&state, false, false, false, 0, 2000, "", 0, &progress);
+    assert(guide.onboarding_step == 2 && guide.can_skip && guide.show_qr);
+    progress.skip_app = true;
+    guide = qdd_ui_onboarding_model(&state, false, false, false, 0, 2000, "", 0, &progress);
+    assert(guide.onboarding_step == 4 && guide.can_skip && !guide.show_qr);
+    progress.skip_bluetooth = true;
+    guide = qdd_ui_onboarding_model(&state, false, false, false, 0, 2000, "", 0, &progress);
+    assert(guide.onboarding_step == 5 && !guide.can_skip && !guide.wait_projection && !guide.show_qr);
+    state.heartbeat_seen = true;
+    state.last_ping_ms = 1900;
+    const qdd_hid_state_t before = state;
+    guide = qdd_ui_onboarding_model(&state, true, false, false, 0, 2000, "", 0, &progress);
+    assert(guide.onboarding_step == 6 && guide.stage == QDD_UI_PHONE && !guide.phone_secure);
+    assert(memcmp(&state, &before, sizeof(state)) == 0 && !state.connected && !state.ready && !state.armed);
+    const qdd_command_t move = {.id = 1, .op = QDD_MOVE, .args = {1, 0, 0, 0}};
+    assert(strcmp(qdd_hid_execute(&state, &move, 2000, report, NULL), "NOT_CONNECTED") == 0);
+    assert(!state.armed); // UI skips cannot authorize a real HID report.
+    state.locked = true;
+    guide = qdd_ui_onboarding_model(&state, true, false, false, 0, 2000, "", 0, &progress);
+    assert(guide.stage == QDD_UI_LOCKED && !guide.can_skip && !guide.onboarding_step);
+    state.locked = false;
+    progress.skip_app = progress.skip_bluetooth = false; // RAM reset/configuration restores normal setup.
+    guide = qdd_ui_onboarding_model(&state, true, false, false, 0, 2000, "", 0, &progress);
+    assert(guide.onboarding_step == 2 && guide.can_skip && guide.show_qr);
+    progress.phone_seen = progress.phone_fresh = progress.projecting = true;
+    progress.skip_bluetooth = true;
+    guide = qdd_ui_onboarding_model(&state, true, false, false, 0, 2000, "", 0, &progress);
+    assert(guide.onboarding_step == 6 && guide.stage == QDD_UI_PHONE);
+}
+
+static void test_completed_guide_preserves_real_status(void) {
+    qdd_hid_state_t state = {.connected = true, .encrypted = true, .authenticated = true, .bonded = true,
+        .ready = true, .heartbeat_seen = true, .last_ping_ms = 1900};
+    qdd_ui_onboarding_t progress = {.require_full = true, .wifi_connected = true, .phone_seen = true,
+        .phone_fresh = true, .projecting = true, .completed = true};
+    qdd_ui_view_t guide = qdd_ui_onboarding_model(&state, true, false, false, 0, 2000, "", 0, &progress);
+    assert(guide.onboarding_step == 6 && guide.stage == QDD_UI_ENABLED && guide.computer_online);
+    state.last_ping_ms = 0;
+    const qdd_hid_state_t expired = state;
+    guide = qdd_ui_onboarding_model(&state, true, false, false, 0, 2000, "", 0, &progress);
+    assert(guide.onboarding_step == 6 && guide.stage == QDD_UI_COMPUTER && !guide.computer_online);
+    assert(strcmp(guide.computer, "电脑未连接") == 0 && !guide.show_qr && !guide.can_skip);
+    assert(memcmp(&state, &expired, sizeof(state)) == 0); // No fake lease extension.
+    const qdd_command_t move = {.id = 1, .op = QDD_MOVE, .args = {1, 0, 0, 0}};
+    assert(strcmp(qdd_hid_execute(&state, &move, 2000, report, NULL), "HEARTBEAT_EXPIRED") == 0);
+    assert(!state.armed);
+    progress.wifi_connected = progress.phone_fresh = progress.projecting = false;
+    guide = qdd_ui_onboarding_model(&state, false, false, false, 0, 2000, "", 0, &progress);
+    assert(guide.onboarding_step == 6 && guide.stage == QDD_UI_COMPUTER && !guide.computer_online);
+    state.last_ping_ms = 1900;
+    state.connected = false;
+    guide = qdd_ui_onboarding_model(&state, true, false, false, 0, 2000, "", 0, &progress);
+    assert(guide.onboarding_step == 6 && guide.stage == QDD_UI_PHONE && !guide.phone_secure);
+    state.locked = true;
+    guide = qdd_ui_onboarding_model(&state, true, false, false, 0, 2000, "", 0, &progress);
+    assert(guide.stage == QDD_UI_LOCKED && !guide.onboarding_step);
+    state.locked = false;
+    progress.completed = false; // An explicit reset or actual new LAN reopens setup.
+    guide = qdd_ui_onboarding_model(&state, false, false, false, 0, 2000, "", 0, &progress);
+    assert(guide.onboarding_step == 1 && guide.stage == QDD_UI_WIFI);
+}
+
 int main(void) {
+    test_pairing_settings_feedback();
+    test_guide_actions_and_skip_safety();
+    test_completed_guide_preserves_real_status();
     qdd_hid_state_t state = {0};
     assert(view(&state, false).stage == QDD_UI_COMPUTER);
     assert(strcmp(view(&state, true).computer, "电脑未连接") == 0);
@@ -82,10 +193,17 @@ int main(void) {
     onboarding.phone_seen = onboarding.phone_fresh = true;
     guide = qdd_ui_onboarding_model(&state, false, false, false, 0, 2000, "", 0, &onboarding);
     assert(guide.onboarding_step == 4 && guide.stage == QDD_UI_PHONE && !guide.show_qr);
+    onboarding.phone_fresh = false; // App heartbeat expires while system Bluetooth settings are open.
+    guide = qdd_ui_onboarding_model(&state, false, true, true, 123456, 2000, "", 0, &onboarding);
+    assert(guide.onboarding_step == 4 && guide.stage == QDD_UI_PHONE && !guide.show_qr && guide.show_passkey);
     state.connected = state.encrypted = state.authenticated = state.bonded = true;
     guide = qdd_ui_onboarding_model(&state, false, false, false, 0, 2000, "", 0, &onboarding);
     assert(guide.onboarding_step == 4 && guide.stage == QDD_UI_HID);
     state.ready = true;
+    guide = qdd_ui_onboarding_model(&state, true, false, false, 0, 2000, "", 0, &onboarding);
+    assert(guide.onboarding_step == 5 && guide.wait_projection && !guide.show_qr);
+    assert(strcmp(guide.title, "打开手机投屏") == 0 && strcmp(guide.detail, "返回App恢复连接") == 0);
+    onboarding.phone_fresh = true;
     guide = qdd_ui_onboarding_model(&state, true, false, false, 0, 2000, "", 0, &onboarding);
     assert(guide.onboarding_step == 5 && strcmp(guide.title, "分享手机画面") == 0);
     onboarding.projecting = true;
@@ -97,7 +215,26 @@ int main(void) {
     assert(!state.armed); // The guide never needs a separate enable state.
     onboarding.phone_fresh = false;
     guide = qdd_ui_onboarding_model(&state, true, false, false, 0, 2000, "", 0, &onboarding);
-    assert(guide.onboarding_step == 3); // Lost App registration cannot revive legacy bypass.
+    assert(guide.onboarding_step == 5 && guide.wait_projection && !guide.show_qr);
+    // Stale projecting=true must never let the guide claim remote control is ready.
+    assert(strcmp(guide.title, "打开手机投屏") == 0);
+    onboarding.wifi_connected = false;
+    guide = qdd_ui_onboarding_model(&state, true, false, false, 0, 2000, "", 0, &onboarding);
+    assert(guide.onboarding_step == 1 && !guide.show_qr);
+    onboarding.wifi_connected = true;
+    guide = qdd_ui_onboarding_model(&state, true, false, false, 0, 2000, "", 0, &onboarding);
+    assert(guide.onboarding_step == 5 && !guide.show_qr);
+    state.connected = state.ready = false; // Re-pairing never restarts installation.
+    guide = qdd_ui_onboarding_model(&state, true, false, false, 0, 2000, "", 0, &onboarding);
+    assert(guide.onboarding_step == 4 && !guide.show_qr);
+    state.connected = state.ready = true;
+    onboarding.phone_fresh = true;
+    onboarding.projecting = false; // The user stopped projection.
+    guide = qdd_ui_onboarding_model(&state, true, false, false, 0, 2000, "", 0, &onboarding);
+    assert(guide.onboarding_step == 5 && guide.wait_projection && !guide.show_qr);
+    onboarding.projecting = true;
+    guide = qdd_ui_onboarding_model(&state, true, false, false, 0, 2000, "", 0, &onboarding);
+    assert(guide.onboarding_step == 6 && guide.stage == QDD_UI_ENABLED);
     onboarding = (qdd_ui_onboarding_t){0};
     guide = qdd_ui_onboarding_model(&state, true, false, false, 0, 2000, "", 0, &onboarding);
     assert(guide.onboarding_step == 6); // Existing installations skip the wizard.

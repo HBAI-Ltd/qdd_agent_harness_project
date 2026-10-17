@@ -104,6 +104,11 @@ void qdd_setup_help(qdd_setup_model_t *model) {
     qdd_setup_menu(model); model->page = QDD_SETUP_HELP;
 }
 
+void qdd_setup_intro(qdd_setup_model_t *model) {
+    qdd_setup_help(model);
+    model->intro_to_onboarding = true;
+}
+
 qdd_setup_action_t qdd_setup_pair(qdd_setup_model_t *model) {
     qdd_setup_menu(model); model->page = QDD_SETUP_PAIR;
     return QDD_SETUP_PAIR_PHONE;
@@ -227,6 +232,10 @@ qdd_setup_action_t qdd_setup_key(qdd_setup_model_t *model, qdd_setup_key_t key,
         }
         break;
     case QDD_SETUP_HELP:
+        if (model->intro_to_onboarding) {
+            if (key == QDD_SETUP_OK) { qdd_setup_exit(model); return QDD_SETUP_EXIT; }
+            break;
+        }
         if (key == QDD_SETUP_OK || key == QDD_SETUP_LONG_OK) { qdd_setup_menu(model); model->selection = 2; }
         break;
     case QDD_SETUP_PAIR:
@@ -236,6 +245,14 @@ qdd_setup_action_t qdd_setup_key(qdd_setup_model_t *model, qdd_setup_key_t key,
         } else if (key == QDD_SETUP_OK) return QDD_SETUP_PAIR_PHONE;
         break;
     case QDD_SETUP_LIST:
+        if (scanning) {
+            // The busy view has one action: leave without cancelling or
+            // restarting the background scan. Never select an old SSID.
+            model->selection = 0;
+            model->error = NULL;
+            if (key == QDD_SETUP_OK || key == QDD_SETUP_LONG_OK) qdd_setup_menu(model);
+            break;
+        }
         if (key == QDD_SETUP_LONG_OK ||
             (key == QDD_SETUP_OK && model->selection == model->network_count + 1)) {
             qdd_setup_menu(model);
@@ -245,9 +262,7 @@ qdd_setup_action_t qdd_setup_key(qdd_setup_model_t *model, qdd_setup_key_t key,
             model->selection = step(model->selection, model->network_count + 2, backwards);
             model->error = NULL;
         } else if (key == QDD_SETUP_OK) {
-            if (scanning) {
-                model->error = "正在搜索，请稍候";
-            } else if (model->selection < model->network_count) {
+            if (model->selection < model->network_count) {
                 return QDD_SETUP_SELECT;
             } else {
                 model->selection = 0;
@@ -299,6 +314,11 @@ qdd_setup_action_t qdd_setup_key(qdd_setup_model_t *model, qdd_setup_key_t key,
                 (void)qdd_setup_delete(model);
                 model->page = QDD_SETUP_PASSWORD;
                 model->choosing_column = false;
+            } else if (model->action_index == 3) {
+                clear_password(model);
+                model->page = QDD_SETUP_PASSWORD;
+                model->choosing_column = false;
+                model->error = NULL;
             } else return_to_list(model);
         }
         break;

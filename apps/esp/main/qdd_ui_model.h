@@ -28,6 +28,7 @@ typedef struct {
     unsigned onboarding_step;
     bool show_qr;
     bool wait_projection;
+    bool can_skip;
 } qdd_ui_view_t;
 
 typedef struct {
@@ -37,7 +38,30 @@ typedef struct {
     bool phone_seen;
     bool phone_fresh;
     bool projecting;
+    bool skip_app;
+    bool skip_bluetooth;
+    bool completed;
 } qdd_ui_onboarding_t;
+
+typedef enum {
+    QDD_UI_HOME_STOP, QDD_UI_HOME_UNLOCK, QDD_UI_HOME_SETTINGS,
+    QDD_UI_HOME_SKIP_APP, QDD_UI_HOME_SKIP_BLUETOOTH
+} qdd_ui_home_action_t;
+
+unsigned qdd_ui_home_choices(unsigned guide_step);
+qdd_ui_home_action_t qdd_ui_home_action(unsigned guide_step, unsigned selection, bool locked);
+
+typedef struct {
+    const char *detail;
+    const char *notice;
+    const char *action;
+    bool show_passkey;
+    bool flash_feedback;
+} qdd_ui_pairing_view_t;
+
+qdd_ui_pairing_view_t qdd_ui_pairing_model(bool connected, bool secure, bool ready,
+    bool pairing_open, bool passkey_visible, uint32_t passkey,
+    uint64_t now_ms, const char *feedback, uint64_t feedback_ms);
 
 // Presentation only: never changes the HID state or authorizes input.
 qdd_ui_view_t qdd_ui_model(const qdd_hid_state_t *state, bool usb_connected,

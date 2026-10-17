@@ -2,6 +2,300 @@
 
 # Android LAN screen and input acceptance
 
+## User device feedback and current validation boundary
+
+2026-10-17: The user explicitly reports that downloads work on the real device and requests that
+download investigation and speculative changes stop. This record follows that actual-use feedback.
+Earlier PC curl/Node and ADB-launched phone curl probes timed out or truncated; those results only
+describe the specific probes and do not establish a failure in the user's browser/App download flow.
+Their original logs remain for traceability. No further download changes or tests will follow from these probes.
+
+## v25 Cold-start diagnostic guard — flashed, cold-state observation passed
+
+The v24 startup diagnostic fault was located in a Wi-Fi SDK query before initialization.
+This change only gates the four SDK getters on `s_initialized && s_started`; inactive states
+return `NOT_INIT/NOT_STARTED` without calling them. UI, startup guide and fonts remain at v24,
+with no configuration reset or erase. Cold/stopped continuous-diagnostic regressions failed before
+the guard and now PASS. The final firmware gate and matching archive verification PASS; log
+`apps/esp/build/guide-pair-v25-build.log`. COM5 App-only flashing wrote 1,659,920 bytes at
+`0x10000`, hash verified, preserving NVS/PHY.
+
+Device tests: PASS only for the 20s startup/diagnostic observation. All 11 read-only requests
+replied (9 DIAG and 2 `WIFI_STATUS`), with `faults=[]`, normal cold-state `NOT_INIT` responses
+and stable `heap=75060/min=74988`. No panic or reboot was observed in that window; the queries
+did not start the Wi-Fi SDK, write NVS or send HID input. Evidence:
+`apps/esp/build/guide-pair-v25-startup.json` and its serial log. Physical buttons, pairing visuals
+and complete onboarding remain unaccepted. The reason for current `configured=false` is unknown;
+neither restored Wi-Fi nor retained configuration is claimed, and the v22 persistent-link failure
+remains valid. The PC service restarted with health `status=ok`, buildId `7c769d5e10e2f43fa749`.
+Its sidecar still explicitly selects LAN `192.168.100.167:3333`; the unconfigured board is not
+claimed reachable.
+
+Merged SHA-256: `0fb2551229515213e33788fab6b6ecbe4bdeab72f1e9bad4df437c862f51c4e0`.
+App SHA-256: `4d69872dea1a7f637e59a9f3f1c684f7d9f6cf2e9a5d88bda3078ab6d16055f7` (1,659,920 bytes).
+ELF SHA-256: `b4107fe50f3e77fa7433bfd35b3efb3bddd55a13e3d1f00f52e03a1a41ab5453`.
+Archive: `apps/esp/build/firmware/0fb2551229515213e33788fab6b6ecbe4bdeab72f1e9bad4df437c862f51c4e0/manifest.json`.
+
+## v24 Bluetooth settings feedback and initial key guide — flashed, startup diagnostics failed
+
+2026-10-17: Bluetooth settings now distinguish an open pairing window, waiting for the phone,
+secure connection and HID readiness in real time, hiding expired pairing codes. Confirmation
+shows a 600ms button outline and 3s acknowledgement; opening a window does not imply successful
+pairing or change BLE security requirements. With no saved Wi-Fi, including after reset, the
+physical-key illustration appears before step 1. Short OK enters the original first step without
+scanning. The key guide opened through normal Settings retains its existing Back behavior.
+
+- Host checks: UI-model/setup C, actual-LVGL `--pair` / `--intro` and three font checks PASS. Fonts contain 222 non-ASCII and 95 printable ASCII characters. These are focused host checks.
+- Build: PASS; final firmware compilation and matching artifact verification succeeded.
+- Flash: PASS; COM5 App-only write of 1,659,840 bytes at `0x10000`, hash verified.
+- Device tests: FAIL (startup diagnostics). `WIFI_STATUS` reported unconfigured; `WIFI_DIAG` at 4s and 10s each triggered a `Load access fault`. Evidence: `apps/esp/build/guide-pair-v24-startup.json` and its matching log. The matching ELF decodes to `current_task_is_wifi_task → wifi_api_unlock → esp_wifi_sta_get_rssi → qdd_wifi_diagnostics:92`, supporting the uninitialized-SDK query finding. The reason Wi-Fi is unconfigured remains unknown; no NVS reset or erase followed from that observation.
+- Unverified: physical pairing feedback and complete first configuration remain unaccepted. The earlier Wi-Fi stability issue is not claimed fixed; v22 FAIL remains below.
+
+Merged SHA-256: `ed18797d76644671e2a7f6ce515eda55e526473047946a9f9822a3630ca72194`.
+App SHA-256: `afe83d2b8b1da0f46e7c3f76a08f79704da0c0870f5e85c10c5c7263ffd9b11a` (1,659,840 bytes).
+ELF SHA-256: `52eec88be5037b2a8c2bda1ade46674c21f6dec259f401a9cfe4747b88d8e488`.
+
+## v22 LAN-first setup and device discovery — flashed, continuous control still fails
+
+2026-10-17: First setup defaults to LAN, leaving the board IP empty for the actual address and
+defaulting the control port to `3333`. The QR/App-download guide uses `3334`. Packaging no longer
+clears `ESP_HOST`; `wx` initialization only creates an absent sidecar when a real LAN address is
+available, preserving existing local choices. Complete UDP status is accepted directly after private
+source/IP/board-URL-host/schema checks; HTTP supplements known hints only. The same socket/address
+set sends three neutral discovery requests within the original 1,400ms window, deduplicates results
+and cancels resend timers on completion/abort. No control-action retry, automatic USB fallback or
+longer HID timeout was added.
+
+| Check | Result and boundary |
+| --- | --- |
+| Focused PC checks | 27 PASS covering LAN defaults, sidecar preservation, direct UDP status and first-packet loss/cancellation cleanup |
+| Final EXE | 12 offline scenarios PASS, including official MCP SDK, stdio, first configuration and reload. Log `apps/android-mcp/build/exe-v22-final-tests.log` explicitly records `realDeviceInput=false`; this is not real-device input acceptance |
+| ESP Build / Flash | Firmware build/archive and COM5 App-only flashing PASS: 1,658,080 bytes at `0x10000`, written-data hash verified, preserving NVS |
+| Current local configuration / discovery | Sidecar selects `ESP_HOST=192.168.100.167`, TCP `3333`; the final service runs over LAN with `/health` reporting `ok`. Another actual `/desktop/discover` call finds the board with `phone:null` and disconnected Bluetooth; the previous temporary USB configuration is no longer selected |
+| Raw TCP heartbeats | 60/60 PING replies succeeded, maximum 1,117ms. Evidence: `apps/android-mcp/build/tcp-v22-raw.json`. This does not replace MCP persistent-link acceptance |
+| Additional TCP bridge trace | 15/15 `STATUS` calls succeeded, maximum 1,123ms excluding the 1,611ms cold handshake, with 81 replies. During close cleanup, PING 82 / RELEASE 83 / PAUSE 84 received no ACK before socket close. Evidence: `apps/android-mcp/build/tcp-v22-bridge-trace2.json`. This does not establish stability |
+| Actual official-MCP queries | FAIL: sample 1 still reports `ESP32 PING acknowledgement timed out`. Evidence: `apps/android-mcp/build/mcp-v22-lan-diagnostics-status.json`. Continuous-control stability has not passed |
+| 90s diagnostics | No observed panic, zero OOM/transmit-failure counts and `up=1`. Evidence: `apps/esp/build/lan-v22-diagnostics.json`. The first 3001 reply shares a line with a boot fragment but was received, so UART reply loss is not established |
+| Phone and Bluetooth | Final health at `192.168.101.46` reaches the 3s timeout, ICMP is 0/20, ADB lists no devices, and Bluetooth is disconnected. Complete real-device control cannot be accepted; these observations do not establish a router fault |
+| Device tests | PARTIAL: discovery and some neutral transfers pass, while MCP continuous-link stability is FAIL. Phone-screen/BLE-input end-to-end acceptance remains incomplete; a finished-product PASS is not claimed |
+
+PC EXE buildId: `7c769d5e10e2f43fa749`.
+EXE SHA-256: `51d390cc57ffc8e33285e7014a4f403414d168d9daa26d794a0da0683a26e11d` (93,346,816 bytes).
+ESP merged SHA-256: `ea35050804fcdf29c69d5f2ab94646d8a1fb8d4ccab7d1df2c23f1df96ca5ddd` (1,723,616 bytes).
+App SHA-256: `4f52e2d90da9e8af7af4d2cadea4e39b138b7d7f7c740026668de70ce37b6c14` (1,658,080 bytes).
+ELF SHA-256: `7c532c87099486e20f3baf911a2a39948f93728aadb9626ea2b00af1857d8c63`.
+Archive: `apps/esp/build/firmware/ea35050804fcdf29c69d5f2ab94646d8a1fb8d4ccab7d1df2c23f1df96ca5ddd/manifest.json`.
+
+## v21 Heartbeat acknowledgements and completed-guide state — flashed, COM5 neutral link passes, Wi-Fi repeat fails
+
+2026-10-17: The PC bridge reproduced a single lost timer-PING reply suppressing later heartbeats.
+It now sends up to four outstanding neutral heartbeats at the original interval; a newer successful
+reply supersedes only older timer heartbeats. Missing all replies still releases input at the original
+deadline, without increasing HID timeouts or replaying actions. New rounds, reconnection and close
+retire old heartbeats, including delayed replies after high-rate input. Completed-guide state also
+has a focused actual-LVGL object-stability check across 20 iterations.
+
+| Check | Result and boundary |
+| --- | --- |
+| PC checks | typecheck/build PASS; serial/TCP/connection focused regressions 50/50 PASS, with the single-lost-reply scenarios failing before the fix and passing after it |
+| EXE checks | self-test PASS; 12 offline scenarios PASS, including official MCP SDK and stdio. These are offline checks, not current real-device input acceptance |
+| UI checks | Actual-LVGL completed-guide state/object stability across 20 iterations PASS; this does not establish a complete physical-button flow |
+| ESP Build | Firmware gate and independent archive recheck PASS |
+| Flash | PASS: COM5 App-only write and hash verification, preserving NVS/PHY |
+| Device connectivity before flashing | The running sidecar selects TCP `192.168.100.167:3333`. A raw TCP connection failed within 5s, and UDP/ICMP/ARP were unreachable. USB PING passed 20/20 with a 32ms maximum, but Bluetooth reported disconnected |
+| Startup observation after flashing | Eleven `NETSTATUS` replies were normal during 35s, with 21 replies to 23 UDP requests and no observed panic; this only describes that window |
+| Continuous Wi-Fi control link | FAIL: the new EXE connected through the official SDK to the actual MCP server, then reproduced a PING acknowledgement timeout at status sample 6 (the seventh request). Evidence: `apps/android-mcp/build/mcp-v21-live-status.json`. A short startup observation does not replace continuous-control acceptance; Wi-Fi is not claimed fixed |
+| Subsequent COM5 validation | PASS: the new EXE's actual MCP server handled 15/15 official-SDK `android_hid_status` calls without timeout, maximum 59ms. Evidence: `apps/android-mcp/build/mcp-v21-usb-status.json`. This validates neutral connectivity, not phone input |
+| Current PC service | The EXE is running; health reports `status=ok`, buildId `f5636ed8fec2fa799e01`. Local configuration has empty `ESP_HOST` and `ESP_PORT=COM5`. Phone LAN screen-sharing configuration remains intact; no automatic failover or longer timeout was added |
+| Device tests | PARTIAL: COM5 neutral connectivity passes while continuous Wi-Fi control remains FAIL. Final Bluetooth `connected/encrypted/ready` are all false; the phone needs to reconnect to its existing paired device. No actual nonzero phone input was sent, so complete real-device remote control is not a PASS |
+| Unverified | Actual input after Bluetooth reconnects, complete physical onboarding and longer-term stability remain unverified |
+
+PC EXE buildId: `f5636ed8fec2fa799e01`.
+EXE SHA-256: `7c4f40229d7ef8d73a2699b3c842c8188184d4414a1a0c421cd5826999e85b93` (93,345,280 bytes).
+ESP merged SHA-256: `cc0e496af53b0c633fcf9c72618b30cda4d80c7ed723003cb4a1a94ce2bb2ea8` (1,721,680 bytes).
+App SHA-256: `dc714d2225c93610379a99c590378db432f0bca5d56ded449a256a9c06c97adb` (1,656,144 bytes).
+ELF SHA-256: `1ed6fd5185dfcbf5da9f2bd9ba509bf94a635d6d0d8cc89fe86504087d66475a`.
+Archive: `apps/esp/build/firmware/cc0e496af53b0c633fcf9c72618b30cda4d80c7ed723003cb4a1a94ce2bb2ea8/manifest.json`.
+The previous local Wi-Fi configuration is retained in ignored `qdd-android.v21-wifi.json`; nothing was published.
+
+## v20 Reboot fix and skippable onboarding — built and flashed, 35s observation passed
+
+2026-10-17: The user reports repeated reboots. Serial captured a `Stack protection fault` without
+a complete backtrace; evidence: `apps/esp/build/onboarding-v19-reboot-serial.log`. The fixed call
+chain in the matching v19 ELF already requires at least 2,976 of 3,072 stack bytes, supporting
+insufficient stack space as the cause. A new matching ELF and device stability observation are
+still needed to establish the fix. v20 moves the 1,024-byte `poll_udp` response buffer from the
+local stack to worker-owned BSS without increasing the task stack or changing downloads.
+The new matching ELF confirms a reduction of the static `poll_udp` stack frame from 1,152 to
+128 bytes and of the fixed main call-chain lower bound from 2,976 to 1,952 bytes. The task
+stack remains 3,072 bytes, leaving a nominal 1,120 bytes, not a measured high-water mark.
+BSS increases by 1,032 bytes, including the 1,024-byte response buffer.
+
+QR/App-installation and Bluetooth-pairing instructions add Skip choices valid for the current
+boot only. The guide removes Emergency stop and retains Skip/Settings; the normal control page
+retains emergency stop. Skipping changes instructions only, never actual download progress,
+secure BLE connection, readiness or input capabilities.
+
+| Check | Result and boundary |
+| --- | --- |
+| Focused host tests | Actual-handler, pure onboarding UI-model and 220-glyph checks PASS; the dedicated actual-LVGL `--guide` run PASS (exit 0). These are focused checks, not a complete host gate |
+| Guide previews | Four PNGs covering QR with Skip, Bluetooth, computer and normal unpaired states were visually checked without occlusion or missing glyphs; these are host renders, not physical-LCD acceptance |
+| Default full UI run | Did not pass: an older Wi-Fi-name assertion expects complete `1. Updated network`, while the existing 108px name region truncates it. The assertion was not changed in this iteration and is separate from the new guide checks; full Host tests must not be marked PASS |
+| Build | PASS: ESP-IDF firmware gate, layout, merged image and matching archive verification; this does not cover the failed default full-UI case above |
+| Flash | PASS: COM5 App-only write of 1,656,016 bytes at `0x10000`, `Hash of data verified`, preserving NVS/PHY |
+| Device tests | PARTIAL: the 35.1s serial/UDP startup observation PASS. Twelve `WIFI_STATUS` replies were normal, remaining connected at `192.168.100.167`; 26 discovery requests received 23 replies, with empty `faults`/`serialErrors`/`bootMarkers`. No reboot or stack fault was observed within this window. Evidence: `apps/esp/build/onboarding-v20-startup.json` |
+| PC service | The device console EXE is running again; `GET /health` returned `status=ok` at `http://192.168.100.160:8790/` |
+| Unverified | Physical-button skip actions, complete onboarding and longer-term stability remain unverified. The 35s window does not establish long-term stability; download investigation is not resumed |
+
+Merged SHA-256: `676cff3e8e29dc390893caa77a4e43ff7600047909e134a288f0abc17fec2f93` (1,721,552 bytes).
+App SHA-256: `6224adf5eb185e422b77480598bcdd7465c0a39cad27c20352cd62894745c67e` (1,656,016 bytes).
+ELF SHA-256: `a1a83ae5ef4fa1243101ec3c577ae4a6f17e113d8e85a90219a1eeffc5b6aa91`.
+Archive: `apps/esp/build/firmware/676cff3e8e29dc390893caa77a4e43ff7600047909e134a288f0abc17fec2f93/manifest.json`.
+
+## v19 Radio and memory diagnostics — built and flashed
+
+This version only adds diagnostic fields for RSSI, channel, Wi-Fi power-saving mode, free internal
+heap and the largest free block. Actual radio diagnostics were not obtained; neither completed
+diagnosis nor a download speedup is claimed. This version includes the v17 scan activity indication
+and the fix that retains onboarding progress when moving to Bluetooth pairing instead of returning to the QR step.
+
+| Check | Result and boundary |
+| --- | --- |
+| Host tests | Focused diagnostic-field checks PASS; this is not a complete host gate |
+| Build | PASS: compilation, layout and matching archive verification |
+| Flash | PASS: COM5 App-only write of 1,654,416 bytes at `0x10000`, hash verified, preserving NVS |
+| PC service | The device operator desktop EXE is running again |
+| Device tests | The user reports working downloads on the real device. The maintainer has not personally completed physical-LCD onboarding, scan-animation or pairing-return acceptance; radio diagnostics were not obtained |
+
+Merged SHA-256: `1a61a0193562b1e7eb28e0ecee103115e5115926365e8c2d13cdab45c5fbb5aa` (1,719,952 bytes).
+App SHA-256: `82a1282c3df1080f451407c0d40c8f610fd4314f2db4b224353095680e5aa108` (1,654,416 bytes).
+ELF SHA-256: `8fdc8efaf26989be076648df96815d3773c7a957e99e9f4e097ae12ba56695bc`.
+Archive: `apps/esp/build/firmware/1a61a0193562b1e7eb28e0ecee103115e5115926365e8c2d13cdab45c5fbb5aa/manifest.json`.
+
+## v18 Bounded socket writes and HTTP diagnostics — historical automated probes
+
+2026-10-17: Following the premature close during repeated v17 downloads below, an HTTP
+`send_override` now limits each native socket write to 2,048 bytes. Zero-byte returns fail,
+and negative returns record errno. Responses still use the SDK fixed-length path with
+`send_wait_timeout=2`; the timeout has not been increased. The status endpoint adds non-sensitive
+HTTP diagnostics to distinguish native write failures from other transport problems.
+
+| Check | Result and boundary |
+| --- | --- |
+| Host tests | Focused handler checks PASS for partial writes, zero returns, write errors and bounded JSON output; this is not a complete host gate |
+| Build | PASS: compilation, layout and matching archive verification; log `apps/esp/build/onboarding-v18-build.log` |
+| Flash | PASS: COM5 App-only write of 1,654,112 bytes at `0x10000`, hash verified, preserving NVS |
+| Sequential PC downloads | All three curl runs failed: runs 1/3 received HTTP 200 but zero body bytes and reached the 20s deadline (exit 28); run 2 received HTTP 200 but only 5,513/49,634 bytes before closing early (exit 18). Evidence: `apps/esp/build/onboarding-v18-curl-downloads.json` |
+| Phone curl probe | An ADB-launched curl request over the phone's own Wi-Fi with a 20s deadline received HTTP 200 but only 7,079/49,634 bytes before timing out; this probe is not equivalent to the user's browser download |
+| Serial observation after failure | Read-only serial status still reported `connected=true`; this does not establish working HTTP delivery or exclude other radio/runtime problems |
+
+Merged SHA-256: `62f68963b8f27f874ab6b5f894dac178112dc95b4293320bbc238a3f803a52c0` (1,719,648 bytes).
+App SHA-256: `779b0439a6412f615aac3ada8d59b4de0616cb8cd7e2059209bf2ee2a997ce4f` (1,654,112 bytes).
+ELF SHA-256: `c4de01fd3d87074acf93af110dbb3776d9db533a2b68d0cc83945f0cb27d2b4d`.
+Archive: `apps/esp/build/firmware/62f68963b8f27f874ab6b5f894dac178112dc95b4293320bbc238a3f803a52c0/manifest.json`.
+The automated probes above are FAIL, not a conclusion that the user's download feature fails;
+the user subsequently reported working downloads. The difference between these probes and actual
+use has not been established, and no speedup or unique cause is claimed.
+
+## v17 Onboarding progress, fixed-length responses and Wi-Fi policy — repeated transfer still closes early
+
+2026-10-17: The landing page is assembled with an explicit length and sent once through
+`httpd_resp_send`; the APK uses its embedded pointer and exact length through the same SDK API.
+Application chunk/retry loops are removed, and `downloaded=true` is set only after send success.
+The SDK `send_wait_timeout=2` remains unchanged. Wi-Fi initialization uses `WIFI_PS_NONE`, and closing
+a TCP controller no longer restores modem power saving, including USB and first-download use.
+
+App registration progress now remains separate from the 15-second registration TTL. A phone moving
+to Bluetooth settings no longer returns to the QR/download step when its heartbeat expires.
+Expiration still removes live endpoints and projection state. Wi-Fi loss invalidates live phone/PC
+registrations while retaining download/App-seen milestones for the current boot. After secure BLE
+is ready, step 5 asks the user to return to the App; fresh registration, active projection and a live
+controller remain required to complete initial onboarding. These milestones are not persisted across restart/reset.
+
+The scan list immediately displays a 40 x 40 LVGL spinner and messages that scanning usually takes
+3–5 seconds. The animation continues independently of cached status refreshes. While busy, only
+Back is selectable: short OK returns to Settings while scanning continues, and UP/DOWN cannot
+select stale SSIDs. Completion, failure and leaving the page destroy the spinner/animations.
+The 14/20 px font subsets now contain 217 non-ASCII and all 95 printable ASCII characters.
+
+| Check | Result and boundary |
+| --- | --- |
+| Host tests | Focused onboarding-response, Wi-Fi, registration-expiry/network-invalidation and onboarding UI-model checks PASS; this is not a complete host gate |
+| Scan UI checks | Focused actual-LVGL `--scan` glyph/layout, animation-angle changes with cached status and completion/failure/Back cleanup PASS after relinking; setup-model checks PASS. This is host validation, not physical-panel acceptance |
+| Build | PASS: final ESP-IDF compilation, layout and matching archive verification; log `apps/esp/build/onboarding-v17-build-final.log`. The earlier build stopped to include new fixes retains its partial log `apps/esp/build/onboarding-v17-build.log` |
+| Flash | PASS: COM5 App-only write of 1,653,520 bytes at `0x10000`, hash verified; erase range `0x10000..0x1a3fff`, preserving NVS. Log: `apps/esp/build/onboarding-v17-flash.log` |
+| First actual LAN probe | Node 5s requests all returned 200: page 1,063ms, status 850ms, APK 1,869ms/49,634 bytes with expected SHA-256 `7cff0c5e1f3d00fdb645d1dad64a08cd9b692c7bdbb2eef203c136db06931812`. Evidence: `apps/esp/build/onboarding-v17-lan-after.json` |
+| Repeated downloads | The first two curl runs with a 20s deadline received complete APKs with correct hashes; run 3 exited 18, received 200 headers but 0/49,634 body bytes, and closed early. Evidence: `apps/esp/build/onboarding-v17-curl-failure.json`. Stable download is not a pass |
+| Serial observation after failure | After roughly 0.8s, read-only `NETSTATUS` still replied configured/connected with IP `192.168.100.167`. No panic was observed during this bounded check; this does not exclude every restart or RF issue |
+
+Merged SHA-256: `c406fda1b03bb44c714a7f79901d237a28f11685b73ce9897ac364f5156d5884` (1,719,056 bytes).
+App SHA-256: `b48433843b2fef27cdff175019a40d0366eae098ba3da491b25fcad709f580ed` (1,653,520 bytes).
+ELF SHA-256: `31d015819ac3160bc1d67f9fd73969bf46214b182889c838e388961136ab0e67`.
+Archive: `apps/esp/build/firmware/c406fda1b03bb44c714a7f79901d237a28f11685b73ce9897ac364f5156d5884/manifest.json`.
+The initial complete transfer and later failure are both retained; neither stable delivery nor a unique cause is established.
+New onboarding progress, scan waiting animation, timing text and Back behavior are flashed but still require physical-interaction acceptance.
+
+## v16 Private HTTP socket latency — mixed device results
+
+2026-10-17: The only subsequent transport change sets `TCP_NODELAY` on accepted private-LAN HTTP
+sockets. Focused HTTP/socket host checks pass. This targets the v15 delayed/header-splitting symptoms;
+Actual runs below had mixed outcomes; stable delivery and a unique underlying cause are not established.
+
+| Check | Result and boundary |
+| --- | --- |
+| Host tests | PASS for focused HTTP/socket checks only; no complete host gate result is claimed |
+| Build | PASS: compile, layout and matching archive verification; log `apps/esp/build/onboarding-v16-build.log` |
+| Initial flash attempt | Failed before any write: opening COM5 raised `FileNotFoundError(2)`; enumeration found no serial ports and UDP found no board. Original log retained: `apps/esp/build/onboarding-v16-flash.log` |
+| Flash after reconnection | PASS: the same verified efbb bundle wrote 1,653,008 App bytes at `0x10000`, hash verified; erase range `0x10000..0x1a3fff`, NVS preserved. Log: `apps/esp/build/onboarding-v16-flash-reconnected.log` |
+| Serial startup response | PARTIAL: read-only `WIFI_STATUS` replied `configured=false`, `connected=false`, empty IP, confirming running firmware but no configured Wi-Fi. Evidence: `apps/esp/build/onboarding-v16-serial-status.json` |
+| First LAN probe after manual connection | Node 5s requests all returned 200: page 679ms, status 656ms, APK 4,969ms/49,634 bytes with expected SHA-256 `7cff0c5e1f3d00fdb645d1dad64a08cd9b692c7bdbb2eef203c136db06931812`. Evidence: `apps/esp/build/onboarding-v16-lan-after.json` |
+| Independent repeat | A following curl request with a 20s deadline returned code 200 but only 27,648/49,634 bytes; TTFB 0.858120s, total 20.015450s. Retained evidence: `apps/esp/build/onboarding-v16-apk-curl-failure.json`, `apps/esp/build/onboarding-v16-apk-headers.txt`, partial `apps/esp/build/onboarding-v16-real.apk`. Stable download is not a pass |
+
+Merged SHA-256: `efbb291922f47e9dae6e942ba755b07a92110a5f1895b5c308e2037fcf6299fa` (1,718,544 bytes).
+App SHA-256: `4ebe846851bec4a5390414ebb9473c5453fb58aa0aa245d260dc9225be53c4bd` (1,653,008 bytes).
+ELF SHA-256: `c815854717cde475b2da6d8be6abe2000fb75683c6f0a780741d709ad79f7956`.
+Archive: `apps/esp/build/firmware/efbb291922f47e9dae6e942ba755b07a92110a5f1895b5c308e2037fcf6299fa/manifest.json`.
+The initial missing-port failure remains part of the record; the same verified bundle was subsequently installed.
+Summary evidence: `apps/android-mcp/build/device-tests/firmware-final-v16.json`.
+Physical menus/password clearing remain unverified. Both the complete first transfer and truncated repeat are retained; no stable-download or unique-root-cause conclusion is claimed.
+
+## v15 Password clearing, Wi-Fi retries and dual-stack LAN onboarding
+
+2026-10-17: The password completion menu adds **Clear password**, retaining Delete one.
+Clearing wipes the complete password buffer, including bytes beyond the current string, and returns
+to row selection while retaining the SSID and keyboard position. The vertical menu now has five items.
+An unconfigured board now remains on onboarding step 1 at startup instead of automatically entering Wi-Fi setup. The user selects Settings and then Wi-Fi to start scanning; this adds no control state.
+
+The ESP-IDF HTTP listener was confirmed to use `PF_INET6` dual-stack sockets. Private IPv4 peers
+can therefore arrive as IPv4-mapped IPv6 addresses. Onboarding now normalizes those peers before
+applying the existing private-LAN rule, while retaining ordinary IPv4 support.
+Before the fix, actual LAN requests to the installed firmware at `http://192.168.100.167:3334/`
+returned HTTP 403 for both `/` and `/api/status`; evidence: `apps/esp/build/onboarding-v15-lan-before.json`.
+
+Initial Wi-Fi association now permits four attempts with 500/1000/2000 ms backoff, keeping
+`connecting=true` and `failed=false` during retries and reporting failure only after exhaustion.
+Immediate connection-API errors are retried; transient `WIFI_STATE` configuration errors retry after
+250 ms. Stale, wrong-interface and wrong-SSID GOT_IP events are rejected. Reconnection for previously
+connected networks retains bounded backoff; `ALL_CHANNEL_SCAN` selects by RSSI without pinning a BSSID.
+
+| Check | Result and boundary |
+| --- | --- |
+| Onboarding handlers | PASS for focused landing/scan page, APK download, status and registration regressions, including IPv4-mapped peers; this is host validation, not a phone-browser acceptance |
+| Wi-Fi backend | PASS for focused retry/configuration-state/stale-IP regressions; the complete host gate was not run |
+| Password/setup model | PASS for the focused pure-model program, including complete-buffer clearing, retained SSID/position, empty-password clearing and existing single-character deletion |
+| UI compilation | PASS: UI/model/fonts and mock getter compiled and linked; UI test cases were not executed |
+| Build | PASS: final ESP-IDF compilation, layout and matching archive verification; log `apps/esp/build/onboarding-v15-build-final.log` |
+| Flash | PASS: COM5 App-only write of 1,652,976 bytes at `0x10000`, hash verified; erase range `0x10000..0x1a3fff`, preserving NVS; log `apps/esp/build/onboarding-v15-flash.log` |
+| Actual LAN responses | The board automatically rejoined `192.168.100.167`; `/api/status` returned 200/512 bytes. Node 5s requests for the page/APK timed out; a 12s curl page attempt produced no complete response, and one status sample took 3.19s with separately arriving headers. Evidence: `apps/esp/build/onboarding-v15-lan-after.json` |
+| APK integrity under a longer deadline | A separate 20s curl request completed: HTTP 200, 49,634 bytes, TTFB 4.342146s, total 10.688854s; SHA-256 `7cff0c5e1f3d00fdb645d1dad64a08cd9b692c7bdbb2eef203c136db06931812` matched the expected APK. Evidence: `apps/esp/build/onboarding-v15-apk-curl.json`. Earlier short-deadline failures remain valid; responsiveness is still poor |
+| Device tests | Actual LAN status/APK transfer was observed as above; physical password-menu, retry/radio behavior and phone-browser flow remain UNVERIFIED |
+
+Merged SHA-256: `1dfb61496156a047546609cd8737fcc8178f10012a1732ba2ee4ae022fa6f579` (1,718,512 bytes).
+App SHA-256: `93fbed860a0edd14926f497ecf0e64adf2e11b4b7fc3f48992363f69f6da1090` (1,652,976 bytes).
+ELF SHA-256: `437cbf4de1dd7eddf7f98563d4a1272023e5620320e140d343902be59148e6fa`.
+Archive: `apps/esp/build/firmware/1dfb61496156a047546609cd8737fcc8178f10012a1732ba2ee4ae022fa6f579/manifest.json`.
+The successful long-deadline APK transfer does not establish acceptable page/download latency or a unique cause.
+
 ## v14 ESP Wi-Fi scan completeness and pagination
 
 2026-10-17: The scan limit increased from 8 raw records to the strongest **64 distinct SSIDs**.

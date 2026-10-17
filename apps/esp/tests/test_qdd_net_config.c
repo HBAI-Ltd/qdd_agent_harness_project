@@ -9,11 +9,14 @@ int main(void) {
     assert(command.id == 1 && command.operation == QDD_NET_SSID && command.length == 4);
     assert(strcmp((char *)command.data, "WiFi") == 0);
     assert(qdd_net_parse("QDDNET/1 2147483647 WIFI_PASS -", &command) && !command.length);
+    assert(qdd_net_parse("QDDNET/1 2147483647 WIFI_DIAG", &command));
+    assert(command.id == 2147483647u && command.operation == QDD_NET_DIAGNOSTICS && !command.length);
     const char *bad[] = {"QDDNET/1 0 WIFI_STATUS", "QDDNET/1 2147483648 WIFI_STATUS",
         "QDDNET/1 1  WIFI_STATUS", "QDDNET/1 1 WIFI_STATUS ", "QDDNET/1 1 WIFI_SSID -",
         "QDDNET/1 1 WIFI_SSID AA==", "QDDNET/1 1 WIFI_PASS Zh==", "QDDNET/1 1 WIFI_PASS Zm9=",
         "QDDNET/1 1 WIFI_PASS Zg==Zg==", "QDDNET/1 1 WIFI_PASS =g==", "QDDNET/1 1 WIFI_PASS Zg=",
-        "QDDNET/1 1 WIFI_PASS Zg== ", "QDDNET/1 1 WIFI_PASS Zg-_", "QDDNET/1 1 WIFI_OTHER"};
+        "QDDNET/1 1 WIFI_PASS Zg== ", "QDDNET/1 1 WIFI_PASS Zg-_", "QDDNET/1 1 WIFI_OTHER",
+        "QDDNET/1 1 WIFI_DIAG ", "QDDNET/1 1 WIFI_DIAG -", "QDDNET/1 1 WIFI_DIAG extra"};
     for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) assert(!qdd_net_parse(bad[i], &command));
     char oversized[180];
     memset(oversized, 'A', sizeof(oversized)); oversized[179] = 0;

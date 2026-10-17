@@ -489,13 +489,66 @@ test("an old connection's neutral heartbeat cannot stop the reconnected and rear
   await bridge.close();
 });
 
-test("a current-round neutral heartbeat timeout still releases and pauses input", { timeout: 2500 }, async () => {
+test("one lost neutral heartbeat ACK does not suppress later heartbeats or pause the current round", { timeout: 2500 }, async (context) => {
+  const port = new HeldNeutralPort();
+  const bridge = new SerialHidBridge({ path: "FAKE", portFactory: () => port, timeoutMs: 60, heartbeatMs: 10 });
+  context.after(() => bridge.close());
+  await bridge.request("ARM");
+  port.holdNextPing = true; await waitForHeldPing(port);
+  const afterHeld = port.writes.length;
+  await delay(120);
+  assert.equal(port.status.armed, true, "A later neutral ACK must supersede the single lost ACK without stopping input.");
+  const subsequent = port.writes.slice(afterHeld);
+  assert.ok(subsequent.filter((line) => line.endsWith(" PING\n")).length >= 2);
+  assert.equal(subsequent.some((line) => / (?:RELEASE|PAUSE)\n$/u.test(line)), false);
+  port.emit("data", Buffer.from(`QDDHID/1 ${port.heldPing} OK ${JSON.stringify({ ...port.status, armed: false })}\n`));
+  await delay(0);
+  assert.equal(bridge.lastStatus?.armed, true, "The retired neutral ACK cannot replace a newer acknowledged status.");
+  assert.equal(port.opens, 1);
+});
+
+test("missing all current-round neutral heartbeat ACKs still releases and pauses input", { timeout: 2500 }, async () => {
   const port = new HeldNeutralPort();
   const bridge = new SerialHidBridge({ path: "FAKE", portFactory: () => port, timeoutMs: 60, heartbeatMs: 10 });
   await bridge.request("ARM");
-  port.holdNextPing = true; await waitForHeldPing(port);
+  const afterArm = port.writes.length;
+  port.hold = "PING";
   await delay(100);
   assert.equal(port.status.armed, false);
+  const heartbeatCount = port.writes.slice(afterArm).filter((line) => line.endsWith(" PING\n")).length;
+  assert.ok(heartbeatCount >= 2 && heartbeatCount <= 4, "Neutral requests stay bounded while retaining the first original timeout.");
   assert.deepEqual(port.writes.slice(-2).map((line) => line.trim().split(" ")[2]), ["RELEASE", "PAUSE"]);
   await bridge.close();
+});
+
+test("a delayed superseded neutral ACK stays retired after high-rate report acknowledgements", { timeout: 2500 }, async (context) => {
+  class DelayedNeutralPort extends RealtimePort {
+    holdNextPing = false;
+    heldPing: string | undefined;
+    override write(data: string, callback: (error?: Error | null) => void): void {
+      if (data.endsWith(" PING\n") && this.holdNextPing) {
+        this.holdNextPing = false; this.heldPing = data.split(" ")[1];
+        this.writes.push(data); callback(); return;
+      }
+      super.write(data, callback);
+    }
+  }
+  const port = new DelayedNeutralPort();
+  const bridge = new SerialHidBridge({ path: "FAKE", portFactory: () => port, timeoutMs: 300, heartbeatMs: 10 });
+  context.after(() => bridge.close());
+  await bridge.request("ARM");
+  port.holdNextPing = true; await waitForHeldPing(port);
+  await delay(30); // A later neutral acknowledgement supersedes the held ID.
+  for (let i = 0; i < 70; i++) {
+    const report = bridge.requestRealtime("MOVE", [1, 0, 0, 0]);
+    await delay(0); port.ack(port.reportLines().at(-1)!); await report;
+  }
+  const report = bridge.requestRealtime("MOVE", [0, 0, 0, 0]);
+  const result = report.then(() => true, () => false);
+  await delay(0);
+  port.emit("data", Buffer.from(`QDDHID/1 ${port.heldPing} OK ${JSON.stringify({ ...port.status, armed: false })}\n`));
+  await delay(0);
+  assert.equal(port.status.armed, true, "An old neutral ACK must not become an unknown ACK after report churn.");
+  port.ack(port.reportLines().at(-1)!);
+  assert.equal(await result, true);
 });

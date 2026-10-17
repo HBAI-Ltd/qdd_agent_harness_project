@@ -7,7 +7,7 @@
 #define QDD_SETUP_KEYBOARD_COLUMNS 6u
 #define QDD_SETUP_KEYBOARD_ROWS 16u
 #define QDD_SETUP_VISIBLE_ROWS 4u
-#define QDD_SETUP_ACTION_COUNT 4u
+#define QDD_SETUP_ACTION_COUNT 5u
 #define QDD_SETUP_MENU_ITEMS 5u
 
 typedef enum {
@@ -34,6 +34,7 @@ typedef struct {
     uint8_t action_index;
     bool choosing_column;
     bool open;
+    bool intro_to_onboarding;
     qdd_wifi_credentials_t credentials;
     // Only static, non-secret messages may be supplied to qdd_setup_error().
     const char *error;
@@ -43,6 +44,7 @@ typedef struct {
 qdd_setup_action_t qdd_setup_enter(qdd_setup_model_t *model);
 void qdd_setup_menu(qdd_setup_model_t *model);
 void qdd_setup_help(qdd_setup_model_t *model);
+void qdd_setup_intro(qdd_setup_model_t *model);
 qdd_setup_action_t qdd_setup_pair(qdd_setup_model_t *model);
 qdd_setup_action_t qdd_setup_key(qdd_setup_model_t *model, qdd_setup_key_t key,
                                uint8_t network_count, bool scanning);

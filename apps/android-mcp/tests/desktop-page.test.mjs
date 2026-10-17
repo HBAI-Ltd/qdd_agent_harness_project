@@ -47,6 +47,19 @@ test("first desktop setup automatically finds one board and only fills the form 
   assert.equal(saved.ESP_HOST, board().ip); assert.equal(saved.ANDROID_MCP_PORT, "8790");
 });
 
+test("first setup without a saved board host defaults to LAN even when a USB port exists", async () => {
+  const app = fixture({ ANDROID_SCREEN_URL: "http://192.168.1.20:8791", ESP_PORT: "COM5" }, []);
+  await flush();
+  assert.equal(app.element("mode").value, "wifi");
+  assert.equal(app.element("wifi").hidden, false);
+  assert.equal(app.element("host").value, "", "Never invent a board IP.");
+  assert.equal(app.element("tcp").value, "3333");
+  assert.equal(app.element("host").required, true);
+  await app.element("form").onsubmit({ preventDefault() {} });
+  assert.equal(app.calls.some((call) => call.method === "POST"), false, "An empty LAN host must not silently save USB.");
+  assert.match(app.element("message").textContent, /设备控制器.*IP/u);
+});
+
 test("configured USB setup discovers changed phone address while preserving USB and the local MCP port", async () => {
   const app = fixture({ ANDROID_SCREEN_URL: "http://192.168.1.99:8791", ESP_HOST: "", ESP_PORT: "COM6", ANDROID_MCP_PORT: "9410" });
   await flush(); assert.equal(app.calls.length, 0);

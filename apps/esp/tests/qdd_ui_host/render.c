@@ -88,6 +88,33 @@ static bool has_label(lv_obj_t *object, const char *expected) {
     return false;
 }
 
+static bool has_visible_label(lv_obj_t *object, const char *expected) {
+    if (lv_obj_has_flag(object, LV_OBJ_FLAG_HIDDEN)) return false;
+    if (lv_obj_check_type(object, &lv_label_class) && strcmp(lv_label_get_text(object), expected) == 0) return true;
+    for (uint32_t i = 0; i < lv_obj_get_child_count(object); i++) {
+        if (has_visible_label(lv_obj_get_child(object, (int32_t)i), expected)) return true;
+    }
+    return false;
+}
+
+static lv_obj_t *find_label(lv_obj_t *object, const char *expected) {
+    if (lv_obj_check_type(object, &lv_label_class) && strcmp(lv_label_get_text(object), expected) == 0) return object;
+    for (uint32_t i = 0; i < lv_obj_get_child_count(object); i++) {
+        lv_obj_t *found = find_label(lv_obj_get_child(object, (int32_t)i), expected);
+        if (found) return found;
+    }
+    return NULL;
+}
+
+static lv_obj_t *scan_spinner(lv_obj_t *object) {
+    if (lv_obj_check_type(object, &lv_spinner_class)) return object;
+    for (uint32_t i = 0; i < lv_obj_get_child_count(object); i++) {
+        lv_obj_t *found = scan_spinner(lv_obj_get_child(object, (int32_t)i));
+        if (found) return found;
+    }
+    return NULL;
+}
+
 static void check_sidebar(void) {
     // Three fixed theme indicators meet the actual LCD right edge without gaps.
     const int ys[] = {4, 130, 256};
@@ -122,8 +149,191 @@ static void write_frame(const char *name) {
     fclose(file);
 }
 
+static void check_intro(lv_display_t *display) {
+    qdd_ui_require_onboarding(true);
+    qdd_setup_model_t setup = {0}; qdd_setup_intro(&setup);
+    qdd_wifi_view_t wifi = {0};
+    qdd_hid_state_t state = {0};
+    qdd_ui_wifi(&setup, wifi);
+    qdd_ui_refresh(&state, (qdd_ble_status_t){0}, false, 87, 2000, "", 0);
+    lv_refr_now(display); check_labels(lv_screen_active());
+    assert(has_visible_label(lv_screen_active(), "按键指南") && has_visible_label(lv_screen_active(), "开始连接"));
+    assert(has_visible_label(lv_screen_active(), "确认开始连接") && has_visible_label(lv_screen_active(), "实体按键位于机身右侧"));
+    assert(!has_label(lv_screen_active(), "紧急停止") && !scan_spinner(lv_screen_active()));
+    assert(pixels[130 * 240 + 46] == 0x39E7 && pixels[110 * 240 + 60] == 0x0882); // Same actual-device illustration.
+    write_frame("first_connection_button_intro");
+    assert(qdd_setup_key(&setup, QDD_SETUP_OK, 0, false) == QDD_SETUP_EXIT);
+    qdd_ui_wifi(&setup, wifi);
+    qdd_ui_refresh(&state, (qdd_ble_status_t){0}, false, 87, 2000, "", 0);
+    lv_refr_now(display); check_labels(lv_screen_active());
+    assert(setup.page == QDD_SETUP_HOME && qdd_ui_guide_step() == 1);
+    assert(has_visible_label(lv_screen_active(), "连接无线网络") && !has_label(lv_screen_active(), "紧急停止"));
+    assert(!has_visible_label(lv_screen_active(), "正在扫描 Wi-Fi") && !scan_spinner(lv_screen_active()) && !wifi.scanning);
+    write_frame("first_connection_step_one");
+    qdd_setup_help(&setup); qdd_ui_wifi(&setup, wifi);
+    qdd_ui_refresh(&state, (qdd_ble_status_t){0}, false, 87, 2000, "", 0);
+    lv_refr_now(display); check_labels(lv_screen_active());
+    assert(has_visible_label(lv_screen_active(), "返回上一级") && has_visible_label(lv_screen_active(), "确认返回"));
+    assert(!has_label(lv_screen_active(), "开始连接"));
+    assert(qdd_setup_key(&setup, QDD_SETUP_OK, 0, false) == QDD_SETUP_NONE && setup.page == QDD_SETUP_MENU && setup.selection == 2);
+    puts("First-connection intro PASS: real-device key guide, short confirm to Wi-Fi step one, no scan or emergency action, settings help unchanged");
+}
+
+static void check_pairing_settings(lv_display_t *display) {
+    qdd_setup_model_t setup = {0};
+    assert(qdd_setup_pair(&setup) == QDD_SETUP_PAIR_PHONE);
+    qdd_wifi_view_t wifi = {0};
+    qdd_hid_state_t state = {0};
+    qdd_ble_status_t ble = {.pairing_open = true};
+    qdd_ui_wifi(&setup, wifi);
+    qdd_ui_refresh(&state, ble, false, 87, 1000, "PAIRING", 1000);
+    lv_refr_now(display); check_labels(lv_screen_active());
+    assert(has_visible_label(lv_screen_active(), "配对已开启，等待手机"));
+    assert(has_visible_label(lv_screen_active(), "配对已重新开启"));
+    lv_obj_t *button = find_label(lv_screen_active(), "重新开启配对");
+    assert(button && lv_obj_get_style_outline_width(button, 0) == 2);
+    assert(has_visible_label(lv_screen_active(), qdd_ble_name()) && has_visible_label(lv_screen_active(), "返回上一级"));
+    write_frame("pairing_opened");
+    qdd_ui_wifi(&setup, wifi); // No setup change: the existing cache is hit.
+    qdd_ui_refresh(&state, ble, false, 87, 5000, "PAIRING", 1000);
+    lv_refr_now(display); check_labels(lv_screen_active());
+    assert(has_visible_label(lv_screen_active(), "手机蓝牙中选择本设备"));
+    assert(lv_obj_get_style_outline_width(button, 0) == 0);
+    assert(qdd_setup_key(&setup, QDD_SETUP_OK, 0, false) == QDD_SETUP_PAIR_PHONE);
+    qdd_ui_wifi(&setup, wifi); // Reopen does not change the setup model or BLE flags.
+    qdd_ui_refresh(&state, ble, false, 87, 5000, "PAIRING", 5000);
+    lv_refr_now(display); check_labels(lv_screen_active());
+    assert(has_visible_label(lv_screen_active(), "配对已重新开启") && lv_obj_get_style_outline_width(button, 0) == 2);
+    write_frame("pairing_reopened");
+    ble.connected = ble.passkey_visible = true; ble.passkey = 123;
+    qdd_ui_refresh(&state, ble, false, 87, 6000, "", 0);
+    lv_refr_now(display); check_labels(lv_screen_active());
+    assert(has_visible_label(lv_screen_active(), "000123"));
+    assert(lv_obj_get_style_text_font(find_label(lv_screen_active(), "000123"), 0) == &qdd_cjk_20);
+    write_frame("pairing_passkey");
+    ble.passkey = 456;
+    qdd_ui_refresh(&state, ble, false, 87, 6001, "", 0);
+    lv_refr_now(display); check_labels(lv_screen_active());
+    assert(has_visible_label(lv_screen_active(), "000456") && !has_label(lv_screen_active(), "000123"));
+    ble.encrypted = ble.authenticated = ble.bonded = true;
+    qdd_ui_refresh(&state, ble, false, 87, 6002, "", 0);
+    lv_refr_now(display); check_labels(lv_screen_active());
+    assert(has_visible_label(lv_screen_active(), "手机已连接") && has_visible_label(lv_screen_active(), "正在准备键盘鼠标"));
+    assert(!has_label(lv_screen_active(), "000456"));
+    assert(lv_obj_get_style_text_font(find_label(lv_screen_active(), qdd_ble_name()), 0) == &qdd_cjk_14);
+    ble.ready = true;
+    qdd_ui_refresh(&state, ble, false, 87, 6003, "", 0);
+    lv_refr_now(display); check_labels(lv_screen_active());
+    assert(has_visible_label(lv_screen_active(), "可以返回继续连接电脑"));
+    assert(!has_label(lv_screen_active(), "配对已重新开启"));
+    write_frame("pairing_connected");
+    assert(qdd_setup_key(&setup, QDD_SETUP_OK, 0, false) == QDD_SETUP_PAIR_PHONE);
+    qdd_ui_wifi(&setup, wifi);
+    qdd_ui_refresh(&state, ble, false, 87, 6100, "PAIRING", 6100);
+    lv_refr_now(display); check_labels(lv_screen_active());
+    assert(has_visible_label(lv_screen_active(), "手机已连接") && has_visible_label(lv_screen_active(), "配对已重新开启"));
+    assert(lv_obj_get_style_outline_width(button, 0) == 2 && !has_label(lv_screen_active(), "000456"));
+    write_frame("pairing_connected_reopened");
+    ble = (qdd_ble_status_t){.passkey_visible = true, .passkey = 123}; // Stale code without an open window.
+    qdd_ui_wifi(&setup, (qdd_wifi_view_t){.port = 3333}); // Unrelated Wi-Fi update redraws static setup fields.
+    qdd_ui_refresh(&state, ble, false, 87, 7000, "PAIRING", 7000);
+    lv_refr_now(display); check_labels(lv_screen_active());
+    assert(has_visible_label(lv_screen_active(), "配对窗口已关闭") && has_visible_label(lv_screen_active(), "开启手机配对"));
+    assert(!has_label(lv_screen_active(), "000123") && has_visible_label(lv_screen_active(), qdd_ble_name()));
+    write_frame("pairing_expired");
+    assert(qdd_setup_key(&setup, QDD_SETUP_DOWN, 0, false) == QDD_SETUP_NONE);
+    qdd_ui_wifi(&setup, wifi); qdd_ui_refresh(&state, ble, false, 87, 7001, "", 0);
+    lv_refr_now(display); check_labels(lv_screen_active());
+    assert(setup.page == QDD_SETUP_PAIR && has_visible_label(lv_screen_active(), "返回上一级"));
+    assert(qdd_setup_key(&setup, QDD_SETUP_OK, 0, false) == QDD_SETUP_NONE && setup.page == QDD_SETUP_MENU);
+    puts("Pairing settings PASS: real open/ready/code state, cached reopen feedback, old-code clearing, return navigation, actual LVGL fonts/layout");
+}
+
+static void check_completed_guide(lv_display_t *display) {
+    qdd_ui_require_onboarding(true);
+    qdd_ui_onboarding_skips(false, false);
+    qdd_setup_model_t setup = {0};
+    qdd_wifi_view_t wifi = {.connected = true, .port = 3333};
+    strcpy(wifi.ip, "192.168.1.147");
+    qdd_ui_wifi(&setup, wifi);
+    s_onboarding = (qdd_onboarding_view_t){.phone_seen = true, .phone_fresh = true, .phone_projecting = true};
+    qdd_hid_state_t state = {.connected = true, .encrypted = true, .authenticated = true, .bonded = true,
+        .ready = true, .heartbeat_seen = true, .last_ping_ms = 1900};
+    qdd_ui_refresh(&state, (qdd_ble_status_t){0}, true, 87, 2000, "", 0);
+    lv_refr_now(display); check_labels(lv_screen_active());
+    assert(qdd_ui_guide_step() == 0 && has_visible_label(lv_screen_active(), "可以远程操作"));
+    lv_obj_t *completed_screen = lv_screen_active();
+    state.last_ping_ms = 0; // A genuine expired lease is displayed immediately.
+    qdd_ui_refresh(&state, (qdd_ble_status_t){0}, true, 87, 2000, "", 0);
+    lv_refr_now(display); check_labels(lv_screen_active());
+    assert(lv_screen_active() == completed_screen && qdd_ui_guide_step() == 0);
+    assert(has_visible_label(lv_screen_active(), "电脑未连接") && has_visible_label(lv_screen_active(), "等待电脑连接"));
+    for (unsigned i = 0; i < 20; i++) {
+        state.last_ping_ms = i % 2 ? 0 : 1900;
+        qdd_ui_refresh(&state, (qdd_ble_status_t){0}, true, 87, 2000, "", 0);
+        lv_refr_now(display);
+        assert(lv_screen_active() == completed_screen && qdd_ui_guide_step() == 0);
+    }
+    wifi.connected = false; wifi.ip[0] = 0;
+    qdd_ui_wifi(&setup, wifi);
+    qdd_ui_refresh(&state, (qdd_ble_status_t){0}, false, 87, 2000, "", 0);
+    assert(lv_screen_active() == completed_screen && qdd_ui_guide_step() == 0);
+    wifi.connected = true; strcpy(wifi.ip, "192.168.1.147");
+    qdd_ui_wifi(&setup, wifi);
+    qdd_ui_refresh(&state, (qdd_ble_status_t){0}, false, 87, 2000, "", 0);
+    assert(lv_screen_active() == completed_screen && qdd_ui_guide_step() == 0);
+    strcpy(wifi.ip, "192.168.2.147"); // An actual new LAN starts fresh guidance.
+    qdd_ui_wifi(&setup, wifi);
+    qdd_ui_refresh(&state, (qdd_ble_status_t){0}, false, 87, 2000, "", 0);
+    assert(qdd_ui_guide_step() == 5);
+    qdd_ui_require_onboarding(true);
+    s_onboarding = (qdd_onboarding_view_t){0};
+    qdd_ui_refresh(&state, (qdd_ble_status_t){0}, true, 87, 2000, "", 0);
+    assert(qdd_ui_guide_step() == 2 && has_visible_label(lv_screen_active(), "跳过此步"));
+    qdd_ui_require_onboarding(false);
+}
+
+static void check_scan_activity(lv_display_t *display) {
+    qdd_setup_model_t setup = {0}; (void)qdd_setup_enter(&setup);
+    qdd_wifi_view_t wifi = {.count = 3, .scan_revision = 12}; s_scan_revision = wifi.scan_revision;
+    strcpy(s_networks[0].ssid, "Old network");
+    qdd_ui_wifi(&setup, wifi); lv_refr_now(display);
+    assert(has_visible_label(lv_screen_active(), "1. Old network"));
+    wifi.scanning = true;
+    qdd_ui_wifi(&setup, wifi); lv_refr_now(display); check_labels(lv_screen_active());
+    assert(has_visible_label(lv_screen_active(), "正在扫描 Wi-Fi"));
+    assert(has_visible_label(lv_screen_active(), "通常需要 3-5 秒"));
+    assert(has_visible_label(lv_screen_active(), "返回上一级"));
+    assert(!has_visible_label(lv_screen_active(), "1. Old network"));
+    lv_obj_t *spinner = scan_spinner(lv_screen_active());
+    assert(spinner && lv_anim_count_running() == 2);
+    const lv_value_precise_t initial_angle = lv_arc_get_angle_end(spinner);
+    // An identical data view hits the production cache. LVGL must still move
+    // the small spinner region without recreating the screen or the widget.
+    qdd_ui_wifi(&setup, wifi);
+    assert(spinner == scan_spinner(lv_screen_active()));
+    lv_tick_inc(250); lv_timer_handler(); lv_refr_now(display);
+    assert(lv_arc_get_angle_end(spinner) != initial_angle);
+    write_frame("wifi_scanning");
+    wifi.scanning = false; qdd_ui_wifi(&setup, wifi); lv_refr_now(display);
+    assert(!scan_spinner(lv_screen_active()) && lv_anim_count_running() == 0);
+    assert(has_visible_label(lv_screen_active(), "1. Old network"));
+    wifi.scanning = true; qdd_ui_wifi(&setup, wifi);
+    qdd_setup_error(&setup, "连接失败，请重试"); qdd_ui_wifi(&setup, wifi);
+    assert(!scan_spinner(lv_screen_active()) && lv_anim_count_running() == 0);
+    (void)qdd_setup_enter(&setup); qdd_ui_wifi(&setup, wifi);
+    assert(qdd_setup_key(&setup, QDD_SETUP_OK, wifi.count, true) == QDD_SETUP_NONE);
+    assert(setup.page == QDD_SETUP_MENU);
+    qdd_ui_wifi(&setup, wifi);
+    assert(wifi.scanning && !scan_spinner(lv_screen_active()) && lv_anim_count_running() == 0);
+    (void)qdd_setup_enter(&setup); qdd_ui_wifi(&setup, wifi);
+    qdd_setup_exit(&setup); qdd_ui_wifi(&setup, wifi);
+    assert(!scan_spinner(lv_screen_active()) && lv_anim_count_running() == 0);
+    printf("Scan activity PASS: cached animation, old-list hiding, completion/failure/return cleanup\n");
+}
+
 int main(int argc, char **argv) {
-    assert(argc == 2);
+    assert(argc == 2 || (argc == 3 && (strcmp(argv[2], "--scan") == 0 || strcmp(argv[2], "--guide") == 0 || strcmp(argv[2], "--pair") == 0 || strcmp(argv[2], "--intro") == 0)));
     FILE *inventory = fopen(argv[1], "rb");
     assert(inventory);
     char glyphs[2048] = {0};
@@ -144,6 +354,9 @@ int main(int argc, char **argv) {
     lv_display_set_buffers(display, draw_buffer, NULL, sizeof(draw_buffer), LV_DISPLAY_RENDER_MODE_PARTIAL);
     lv_display_set_flush_cb(display, flush);
     qdd_ui_create();
+    if (argc == 3 && strcmp(argv[2], "--intro") == 0) { check_intro(display); return 0; }
+    if (argc == 3 && strcmp(argv[2], "--pair") == 0) { check_pairing_settings(display); return 0; }
+    if (argc == 3 && strcmp(argv[2], "--scan") == 0) { check_scan_activity(display); return 0; }
     qdd_hid_state_t state = {0};
     qdd_ble_status_t ble = {0};
     qdd_setup_model_t help = {0}; qdd_setup_help(&help);
@@ -234,6 +447,7 @@ int main(int argc, char **argv) {
     assert(before.free_size == after.free_size && before.used_cnt == after.used_cnt);
     qdd_wifi_view_t guide_wifi = {.connected = true, .port = 3333};
     strcpy(guide_wifi.ip, "192.168.101.147");
+    qdd_ui_require_onboarding(true);
     qdd_setup_model_t guide_setup = {0};
     qdd_ui_wifi(&guide_setup, guide_wifi);
     state = (qdd_hid_state_t){0};
@@ -253,8 +467,10 @@ int main(int argc, char **argv) {
         if (i < 2) {
             assert(has_label(lv_screen_active(), "扫码或浏览器打开地址下载"));
             assert(has_label(lv_screen_active(), "手机/电脑/ESP同一局域网"));
-            assert(has_label(lv_screen_active(), "紧急停止") && has_label(lv_screen_active(), "设置"));
+            assert(has_visible_label(lv_screen_active(), "跳过此步") && has_visible_label(lv_screen_active(), "设置"));
         }
+        if (i < 5) assert(!has_label(lv_screen_active(), "紧急停止") && !has_label(lv_screen_active(), "取消急停"));
+        if (i == 2 || i == 3) assert(has_visible_label(lv_screen_active(), "跳过此步") && qdd_ui_guide_step() == 4);
         write_frame(guide_names[i]);
         if (i == 4) {
             s_onboarding.phone_projecting = false;
@@ -264,6 +480,41 @@ int main(int argc, char **argv) {
             write_frame("onboarding_projection");
             s_onboarding.phone_projecting = true;
         }
+    }
+    // Skip changes guide routing only; the normal screen still reports the
+    // actual missing Bluetooth link, with its regular emergency stop action.
+    state = (qdd_hid_state_t){0};
+    s_onboarding = (qdd_onboarding_view_t){0};
+    qdd_ui_require_onboarding(true);
+    qdd_ui_refresh(&state, (qdd_ble_status_t){0}, false, 87, 2000, "", 0);
+    lv_refr_now(display); check_labels(lv_screen_active());
+    assert(qdd_ui_guide_step() == 2 && has_visible_label(lv_screen_active(), "跳过此步"));
+    qdd_ui_onboarding_skips(true, false);
+    qdd_ui_refresh(&state, (qdd_ble_status_t){0}, false, 87, 2000, "", 0);
+    lv_refr_now(display); check_labels(lv_screen_active());
+    assert(qdd_ui_guide_step() == 4 && !has_label(lv_screen_active(), "紧急停止"));
+    write_frame("onboarding_skip_app");
+    qdd_ui_onboarding_skips(true, true);
+    qdd_ui_refresh(&state, (qdd_ble_status_t){0}, false, 87, 2000, "", 0);
+    lv_refr_now(display); check_labels(lv_screen_active());
+    assert(qdd_ui_guide_step() == 5 && !has_visible_label(lv_screen_active(), "跳过此步"));
+    assert(has_visible_label(lv_screen_active(), "设置") && !has_label(lv_screen_active(), "紧急停止"));
+    write_frame("onboarding_skip_bluetooth");
+    state.heartbeat_seen = true; state.last_ping_ms = 1900;
+    qdd_ui_refresh(&state, (qdd_ble_status_t){0}, true, 87, 2000, "", 0);
+    lv_refr_now(display); check_labels(lv_screen_active());
+    assert(qdd_ui_guide_step() == 0 && has_visible_label(lv_screen_active(), "请先配对手机"));
+    assert(has_visible_label(lv_screen_active(), "紧急停止"));
+    write_frame("onboarding_skip_complete_unconnected");
+    qdd_ui_require_onboarding(true); // Configuration/reset clears skip markers.
+    qdd_ui_refresh(&state, (qdd_ble_status_t){0}, true, 87, 2000, "", 0);
+    lv_refr_now(display); check_labels(lv_screen_active());
+    assert(qdd_ui_guide_step() == 2 && has_visible_label(lv_screen_active(), "跳过此步"));
+    qdd_ui_require_onboarding(false);
+    if (argc == 3 && strcmp(argv[2], "--guide") == 0) {
+        check_completed_guide(display);
+        puts("Onboarding guide PASS: scan/install/Bluetooth skips, truthful readiness, no guide emergency actions, RAM reset, actual LVGL fonts/layout");
+        return 0;
     }
     s_onboarding = (qdd_onboarding_view_t){0};
     qdd_wifi_view_t wifi = {.port = 3333, .count = 7};
@@ -289,6 +540,11 @@ int main(int argc, char **argv) {
         lv_refr_now(display);
         check_labels(lv_screen_active());
         write_frame(setup_names[i]);
+        if (i == 4) {
+            assert(has_label(lv_screen_active(), "删除一位") && has_label(lv_screen_active(), "清空密码"));
+            setup.action_index = 3; qdd_ui_wifi(&setup, wifi); lv_refr_now(display); check_labels(lv_screen_active());
+            write_frame("wifi_clear_password"); setup.action_index = 0;
+        }
     }
     qdd_setup_enter(&setup);
     setup.selection = wifi.count + 1;

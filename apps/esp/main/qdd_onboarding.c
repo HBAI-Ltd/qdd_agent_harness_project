@@ -4,14 +4,18 @@
 #include "qdd_onboarding_apk.h"
 #include "qdd_wifi.h"
 #include "esp_http_server.h"
+#include "esp_heap_caps.h"
 #include "esp_timer.h"
+#include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "lwip/sockets.h"
+#include "lwip/tcp.h"
 
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
+#include <stdatomic.h>
 #include <string.h>
 
 extern const uint8_t qdd_apk_start[] asm("_binary_qdd_remote_apk_start");
@@ -25,6 +29,24 @@ static bool s_http_ready;
 static int s_udp = -1;
 static char s_ip[16];
 static uint64_t s_retry_at;
+static atomic_int s_last_send_errno, s_last_send_error, s_last_download_result;
+static atomic_uint s_last_download_ms, s_download_successes, s_download_failures;
+static wifi_ap_record_t s_status_ap;
+static atomic_flag s_status_ap_busy = ATOMIC_FLAG_INIT;
+
+static int bounded_send(httpd_handle_t server, int descriptor, const char *body, size_t length, int flags) {
+    (void)server;
+    // HTTPD's send_all advances by the returned partial count. Bound each
+    // native socket operation so its 2 s deadline covers progress, not an APK.
+    const size_t portion = length < 2048u ? length : 2048u;
+    const int result = send(descriptor, body, portion, flags);
+    if (result <= 0) {
+        atomic_store(&s_last_send_errno, result < 0 ? errno : 0);
+        atomic_store(&s_last_send_error, result < 0 ? result : HTTPD_SOCK_ERR_FAIL);
+        return result < 0 ? result : HTTPD_SOCK_ERR_FAIL;
+    }
+    return result;
+}
 
 static uint64_t now_ms(void) { return (uint64_t)esp_timer_get_time() / 1000u; }
 static const char *json_bool(bool value) { return value ? "true" : "false"; }
@@ -42,6 +64,18 @@ static size_t status_json(char *buffer, size_t capacity) {
     const qdd_ble_status_t bluetooth = qdd_ble_status();
     const qdd_onboarding_view_t view = qdd_onboarding_view();
     if (!wifi.connected || !qdd_onboarding_private_ipv4(wifi.ip)) return 0;
+    int rssi = -127, channel = 0;
+    // HTTP and UDP may both request status. Avoid a large AP record on either
+    // task's stack, and never wait for the other diagnostic reader.
+    if (!atomic_flag_test_and_set(&s_status_ap_busy)) {
+        if (esp_wifi_sta_get_ap_info(&s_status_ap) == ESP_OK) {
+            rssi = s_status_ap.rssi;
+            channel = s_status_ap.primary;
+        }
+        atomic_flag_clear(&s_status_ap_busy);
+    }
+    wifi_ps_type_t power_save;
+    const int ps = esp_wifi_get_ps(&power_save) == ESP_OK ? (int)power_save : -1;
     const int length = snprintf(buffer, capacity,
         "{\"service\":\"qdd-esp-onboarding\",\"version\":1,"
         "\"boardUrl\":\"http://%s:3334\",\"deviceName\":\"%s\","
@@ -49,23 +83,49 @@ static size_t status_json(char *buffer, size_t capacity) {
         "\"apkSha256\":\"%s\",\"apkSize\":%u,\"downloaded\":%s,"
         "\"phone\":{\"seen\":%s,\"fresh\":%s,\"ip\":\"%s\",\"deviceId\":\"%s\",\"port\":%u,\"projecting\":%s},"
         "\"pc\":{\"fresh\":%s,\"ip\":\"%s\",\"port\":%u},"
-        "\"bluetooth\":{\"connected\":%s,\"encrypted\":%s,\"authenticated\":%s,\"bonded\":%s,\"ready\":%s}}",
+        "\"bluetooth\":{\"connected\":%s,\"encrypted\":%s,\"authenticated\":%s,\"bonded\":%s,\"ready\":%s},"
+        "\"http\":{\"lastSendErrno\":%d,\"lastSendError\":%d,\"lastDownloadResult\":%d,\"lastDownloadMs\":%u,"
+        "\"downloadSuccesses\":%u,\"downloadFailures\":%u,\"rssi\":%d,\"channel\":%d,\"ps\":%d,"
+        "\"heap\":%u,\"largest\":%u}}",
         wifi.ip, qdd_ble_name(), wifi.ip, (unsigned)wifi.port,
         QDD_ONBOARDING_APK_SHA256, (unsigned)QDD_ONBOARDING_APK_SIZE,
         json_bool(view.downloaded), json_bool(view.phone_seen), json_bool(view.phone_fresh),
         view.phone_ip, view.phone_device_id, (unsigned)view.phone_port, json_bool(view.phone_projecting),
         json_bool(view.pc_fresh), view.pc_ip, (unsigned)view.pc_port,
         json_bool(bluetooth.connected), json_bool(bluetooth.encrypted),
-        json_bool(bluetooth.authenticated), json_bool(bluetooth.bonded), json_bool(bluetooth.ready));
+        json_bool(bluetooth.authenticated), json_bool(bluetooth.bonded), json_bool(bluetooth.ready),
+        atomic_load(&s_last_send_errno), atomic_load(&s_last_send_error), atomic_load(&s_last_download_result),
+        atomic_load(&s_last_download_ms), atomic_load(&s_download_successes), atomic_load(&s_download_failures),
+        rssi, channel, ps,
+        (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+        (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
     return length > 0 && (size_t)length < capacity ? (size_t)length : 0;
 }
 
 static bool private_peer(httpd_req_t *request, char *ip) {
-    struct sockaddr_in address;
+    struct sockaddr_storage address = {0};
     socklen_t size = sizeof(address);
-    if (getpeername(httpd_req_to_sockfd(request), (struct sockaddr *)&address, &size) != 0 ||
-        address.sin_family != AF_INET || !inet_ntop(AF_INET, &address.sin_addr, ip, 16)) return false;
-    return qdd_onboarding_private_ipv4(ip);
+    if (getpeername(httpd_req_to_sockfd(request), (struct sockaddr *)&address, &size) != 0) return false;
+    const void *ipv4 = NULL;
+    if (address.ss_family == AF_INET && size >= sizeof(struct sockaddr_in)) {
+        ipv4 = &((const struct sockaddr_in *)&address)->sin_addr;
+    }
+#ifdef AF_INET6
+    else if (address.ss_family == AF_INET6 && size >= sizeof(struct sockaddr_in6)) {
+        // ESP-IDF's dual-stack HTTP listener reports IPv4 clients as ::ffff:a.b.c.d.
+        // Decode the mapped address before applying the existing private-LAN rule.
+        static const uint8_t mapped_prefix[12] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff};
+        const uint8_t *bytes = (const uint8_t *)&((const struct sockaddr_in6 *)&address)->sin6_addr;
+        if (memcmp(bytes, mapped_prefix, sizeof(mapped_prefix)) == 0) ipv4 = bytes + 12;
+    }
+#endif
+    if (!ipv4 || !inet_ntop(AF_INET, ipv4, ip, 16) || !qdd_onboarding_private_ipv4(ip)) return false;
+    // HTTPD emits headers/chunk framing as many small writes. Do not wait for
+    // delayed ACKs between them, especially while downloading the local APK.
+    const int one = 1;
+    const int descriptor = httpd_req_to_sockfd(request);
+    (void)setsockopt(descriptor, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+    return httpd_sess_set_send_override(request->handle, descriptor, bounded_send) == ESP_OK;
 }
 
 static esp_err_t json_response(httpd_req_t *request, const char *status, const char *body) {
@@ -118,20 +178,26 @@ static esp_err_t page_handler(httpd_req_t *request) {
         "<p>可扫描控制板二维码，或在手机浏览器输入屏幕上的 IP 和端口（<code>IP:3334</code>），打开本页下载 App。</p>"
         "<h2>1. 在手机安装设备投屏</h2>"
         "<a href=\"/qdd-remote.apk\" download=\"设备投屏.apk\">下载设备投屏</a>"
-        "<small>下载后打开 APK，按手机提示允许安装。已安装则直接打开。</small>"
+        "<small>下载后打开 APK，按手机提示允许安装。扫码软件无法下载时，请用手机浏览器打开本页再下载。已安装则直接打开。</small>"
         "<h2>2. 打开 App，开始共享屏幕</h2><a href=\"qddscreen://setup?esp=http%3A%2F%2F";
     static const char suffix[] =
         "%3A3334\">打开设备投屏</a><p>在 App 点“开始投屏”，同意系统共享屏幕。"
         "首次连接蓝牙时，在手机设置中选择板上显示的蓝牙名称，并核对配对数字。</p>"
         "<h2>3. 在电脑打开设备操作台</h2><p>运行电脑上的设备操作台；"
         "电脑浏览器打开 <code>http://127.0.0.1:8790</code>。这个地址只在电脑上打开。</p>"
-        "<p>看到手机画面后，点击画面即可控制，按 Esc 退出。需要立即停止时，按 ESP 下键。</p>"
+        "<p>看到手机画面后，点击画面即可控制，按 Esc 退出。需要停止时，在控制板选择“紧急停止”并按确认键。</p>"
         "<small>本连接页不需要令牌，也不会因为打开页面而控制手机。</small></main></html>";
-    esp_err_t result = httpd_resp_send_chunk(request, prefix, sizeof(prefix) - 1);
-    if (result == ESP_OK) result = httpd_resp_send_chunk(request, wifi.ip, strlen(wifi.ip));
-    if (result == ESP_OK) result = httpd_resp_send_chunk(request, suffix, sizeof(suffix) - 1);
-    if (result == ESP_OK) result = httpd_resp_send_chunk(request, NULL, 0);
-    return result;
+    // HTTPD runs these synchronous handlers on one worker. Keep the complete
+    // small page off its 4 KiB stack and send one response with Content-Length.
+    static char page[sizeof(prefix) + 16 + sizeof(suffix)];
+    const size_t prefix_length = sizeof(prefix) - 1;
+    const size_t ip_length = strlen(wifi.ip);
+    const size_t suffix_length = sizeof(suffix) - 1;
+    memcpy(page, prefix, prefix_length);
+    memcpy(page + prefix_length, wifi.ip, ip_length);
+    memcpy(page + prefix_length + ip_length, suffix, suffix_length);
+    const size_t length = prefix_length + ip_length + suffix_length;
+    return httpd_resp_send(request, page, (ssize_t)length);
 }
 
 static esp_err_t apk_handler(httpd_req_t *request) {
@@ -145,17 +211,16 @@ static esp_err_t apk_handler(httpd_req_t *request) {
     httpd_resp_set_hdr(request, "Cache-Control", "no-store");
     httpd_resp_set_hdr(request, "X-Content-Type-Options", "nosniff");
     httpd_resp_set_hdr(request, "X-QDD-APK-SHA256", QDD_ONBOARDING_APK_SHA256);
+    // Stream from the embedded image through HTTPD's bounded socket writes;
+    // avoid per-KiB chunk framing, a second body copy and an app-level deadline.
     const uint64_t started = now_ms();
-    for (size_t position = 0; position < length;) {
-        if (now_ms() - started >= 15000u) return ESP_FAIL;
-        const size_t remaining = length - position;
-        const size_t chunk = remaining < 1024 ? remaining : 1024;
-        const esp_err_t result = httpd_resp_send_chunk(request, (const char *)qdd_apk_start + position, chunk);
-        if (result != ESP_OK) return result;
-        position += chunk;
-        taskYIELD();
-    }
-    const esp_err_t result = httpd_resp_send_chunk(request, NULL, 0);
+    atomic_store(&s_last_send_errno, 0);
+    atomic_store(&s_last_send_error, 0);
+    const esp_err_t result = httpd_resp_send(request, (const char *)qdd_apk_start, (ssize_t)length);
+    atomic_store(&s_last_download_result, result);
+    atomic_store(&s_last_download_ms, (unsigned)(now_ms() - started));
+    if (result == ESP_OK) atomic_fetch_add(&s_download_successes, 1u);
+    else atomic_fetch_add(&s_download_failures, 1u);
     if (result == ESP_OK) {
         portENTER_CRITICAL(&s_lock);
         s_model.view.downloaded = true;
@@ -270,6 +335,10 @@ static int start_udp(void) {
 }
 
 static void poll_udp(void) {
+    // Only qdd_onboard calls this function. Keep its response off the 3 KiB
+    // task stack: snprintf's newlib formatting chain needs over 1 KiB itself.
+    // HTTP handlers retain their own buffer; they must not share this storage.
+    static char response[1024];
     // Bound work per tick so discovery floods cannot monopolize the CPU.
     for (unsigned packet = 0; packet < 2; packet++) {
         char request[64], ip[16];
@@ -283,7 +352,6 @@ static void poll_udp(void) {
         while (size > 0 && (request[size - 1] == '\r' || request[size - 1] == '\n')) size--;
         if (size != 14 || memcmp(request, "QDD-DISCOVER/1", 14) != 0 || peer.sin_family != AF_INET ||
             !inet_ntop(AF_INET, &peer.sin_addr, ip, sizeof(ip)) || !qdd_onboarding_private_ipv4(ip)) continue;
-        char response[1024];
         const size_t length = status_json(response, sizeof(response));
         if (length) (void)sendto(s_udp, response, length, 0, (const struct sockaddr *)&peer, peer_size);
     }
@@ -296,10 +364,10 @@ static bool stop_network(void) {
         s_http = NULL;
     }
     s_http_ready = false;
-    // httpd_stop joins handlers before clearing; a final old-IP POST cannot
+    // httpd_stop joins handlers before invalidating; a final old-IP POST cannot
     // repopulate the next Wi-Fi epoch with an obsolete registration.
     portENTER_CRITICAL(&s_lock);
-    qdd_onboarding_model_clear(&s_model);
+    qdd_onboarding_model_invalidate_network(&s_model);
     portEXIT_CRITICAL(&s_lock);
     s_ip[0] = 0;
     return true;

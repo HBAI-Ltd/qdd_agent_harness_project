@@ -2,6 +2,279 @@
 
 # 安卓内网投屏与控制验收
 
+## 用户真机反馈与当前边界
+
+2026-10-17：用户明确反馈真机下载正常，并要求停止下载排查和推测性修改。
+本记录以该实际使用反馈为准。此前电脑 curl、Node 及经 ADB 启动的手机 curl 探测出现超时或截断，
+仅说明这些特定探测未通过，不能等同于用户浏览器/App 下载功能故障；原始日志仍保留供追溯。
+不再基于这些探测继续下载修改或测试。
+
+## v25 冷启动诊断保护——已刷入，冷态诊断观察通过
+
+v24 启动诊断异常已定位到 Wi-Fi SDK 尚未初始化时调用查询接口。
+本次仅为 `s_initialized && s_started` 增加查询门禁：未激活时返回 `NOT_INIT/NOT_STARTED`，
+不调用四个 SDK getter。UI、启动指南及字体保持 v24 版本，没有重置或擦除配置。
+冷态/停止态连续诊断局部回归先红后绿 PASS；最终固件门禁及匹配归档校验 PASS，日志
+`apps/esp/build/guide-pair-v25-build.log`。COM5 App-only 向 `0x10000` 写入 1,659,920 字节，
+哈希校验通过，保留 NVS/PHY。
+
+Device tests：仅 20 秒启动/诊断观察 PASS。11/11 只读请求得到回复（9 次 DIAG、2 次
+`WIFI_STATUS`），`faults=[]`，冷态诊断正常返回 `NOT_INIT`；`heap=75060/min=74988` 稳定。
+窗口内未见 panic 或重启，查询未启动 Wi-Fi SDK、写入 NVS 或发送 HID 输入。
+证据 `apps/esp/build/guide-pair-v25-startup.json` 及对应串口日志。
+实体按键、配对视觉及完整引导流程仍未验收；当前 `configured=false` 的原因未知，
+不声称 Wi-Fi 已恢复或保存配置仍在，v22 连续链路失败记录保持有效。
+电脑服务已重启，health 为 `status=ok`、buildId `7c769d5e10e2f43fa749`；
+sidecar 仍明确选择 LAN `192.168.100.167:3333`，设备当前未配网，不代表已连通。
+
+合并镜像 SHA-256：`0fb2551229515213e33788fab6b6ecbe4bdeab72f1e9bad4df437c862f51c4e0`。
+App SHA-256：`4d69872dea1a7f637e59a9f3f1c684f7d9f6cf2e9a5d88bda3078ab6d16055f7`（1,659,920 字节）。
+ELF SHA-256：`b4107fe50f3e77fa7433bfd35b3efb3bddd55a13e3d1f00f52e03a1a41ab5453`。
+归档：`apps/esp/build/firmware/0fb2551229515213e33788fab6b6ecbe4bdeab72f1e9bad4df437c862f51c4e0/manifest.json`。
+
+## v24 蓝牙设置反馈与首次按键指南——已刷入，启动诊断失败
+
+2026-10-17：蓝牙设置页实时区分配对窗口已开启、等待手机、安全连接及键鼠就绪，
+配对码过期后及时隐藏。确认操作显示 600ms 按钮描边及 3 秒确认反馈，
+不把打开配对窗口当作配对成功，也不修改 BLE 安全条件。
+首次无保存 Wi-Fi 或重置后，先显示实体按键图示；短按确认进入原步骤一，不自动扫描。
+从正常设置打开按键指南时，返回上一级的行为不变。
+
+- Host checks：UI 模型/setup C、实际 LVGL `--pair` / `--intro` 及三项字体检查 PASS；字体含 222 个非 ASCII 和 95 个可打印 ASCII。均为定向宿主检查。
+- Build：PASS，最终固件构建、匹配产物校验通过。
+- 烧录：PASS，COM5 App-only 向 `0x10000` 写入 1,659,840 字节，哈希校验通过。
+- Device tests：FAIL（启动诊断）。`WIFI_STATUS` 返回未配置，4 秒及 10 秒的 `WIFI_DIAG` 各触发一次 `Load access fault`；证据 `apps/esp/build/guide-pair-v24-startup.json` 及同名日志。匹配 ELF 回溯为 `current_task_is_wifi_task → wifi_api_unlock → esp_wifi_sta_get_rssi → qdd_wifi_diagnostics:92`，支持未初始化 SDK 查询的定位。Wi-Fi 未配置的原因尚未知，未据此重置或擦除 NVS。
+- Unverified：实体配对反馈及首次配置完整流程未验收；不宣称原 Wi-Fi 稳定性已修复，下方 v22 FAIL 保留。
+
+合并镜像 SHA-256：`ed18797d76644671e2a7f6ce515eda55e526473047946a9f9822a3630ca72194`。
+App SHA-256：`afe83d2b8b1da0f46e7c3f76a08f79704da0c0870f5e85c10c5c7263ffd9b11a`（1,659,840 字节）。
+ELF SHA-256：`52eec88be5037b2a8c2bda1ade46674c21f6dec259f401a9cfe4747b88d8e488`。
+
+## v22 恢复局域网优先与设备发现——已刷入，连续控制仍未通过
+
+2026-10-17：首次设置默认局域网，设备 IP 留空供用户填写真实地址，控制端口默认 `3333`。
+二维码/App 下载引导页使用 `3334`。打包不再强制清空 `ESP_HOST`；sidecar 只在不存在且
+有真实局域网地址时以 `wx` 初始化，保留已有本地选择。有效 UDP 状态经过私网、来源 IP、
+board URL 主机及状态格式校验后直接采纳，HTTP 只补充已知地址。
+同一 socket 和地址集在原 1,400ms 窗口内发送三次中立发现请求，结果去重，取消/完成时清理重发定时器。
+没有增加控制动作重试、自动 USB fallback 或 HID 超时。
+
+| 检查 | 结果与边界 |
+| --- | --- |
+| 电脑端定向检查 | LAN 默认、sidecar 保留、UDP 直收及首轮丢包/取消清理等 27 项 PASS |
+| 最终 EXE | 12 个离线场景 PASS，包含官方 MCP SDK、stdio、首次配置与重载；日志 `apps/android-mcp/build/exe-v22-final-tests.log` 明确 `realDeviceInput=false`，不代表真机输入验收 |
+| ESP Build / 烧录 | 固件构建归档及 COM5 App-only 烧录 PASS：向 `0x10000` 写入 1,658,080 字节，写入哈希通过，保留 NVS |
+| 当前本机配置 / 发现 | sidecar 为 `ESP_HOST=192.168.100.167`、TCP `3333`，最终服务按 LAN 运行且 `/health` 为 `ok`；再次真实 `/desktop/discover` 可找到控制板，返回 `phone:null`、蓝牙未连接，未继续采用上轮 USB 临时方案 |
+| 裸 TCP 心跳 | 60/60 PING 回包成功，最大 1,117ms；证据 `apps/android-mcp/build/tcp-v22-raw.json`。这不能替代 MCP 长连接验收 |
+| TCP bridge 补充追踪 | 15/15 `STATUS` 请求成功，最大 1,123ms（不含冷握手 1,611ms），共 81 条回复；关闭清理时 PING 82 / RELEASE 83 / PAUSE 84 未获 ACK 后 socket 关闭。证据 `apps/android-mcp/build/tcp-v22-bridge-trace2.json`；不能据此宣称稳定 |
+| 官方 MCP 实机查询 | FAIL：sample 1 仍出现 `ESP32 PING acknowledgement timed out`，证据 `apps/android-mcp/build/mcp-v22-lan-diagnostics-status.json`。连续控制稳定性尚未通过 |
+| 90 秒诊断 | 未见 panic，OOM/发送失败计数为 0，`up=1`；证据 `apps/esp/build/lan-v22-diagnostics.json`。首条 3001 回复与启动残片连行，但确有回包，不能称 UART 丢答 |
+| 手机与蓝牙 | 最终 `192.168.101.46` 的 health 请求在 3 秒时限超时，ICMP 0/20，ADB 设备枚举为空，蓝牙未连接；无法进行完整真实操控验收，未由此断定路由器故障 |
+| Device tests | PARTIAL：发现与部分中立传输通过，MCP 连续链路稳定性 FAIL；手机画面/蓝牙输入端到端仍未验收，不能标为成品 PASS |
+
+电脑 EXE buildId：`7c769d5e10e2f43fa749`。
+EXE SHA-256：`51d390cc57ffc8e33285e7014a4f403414d168d9daa26d794a0da0683a26e11d`（93,346,816 字节）。
+ESP 合并镜像 SHA-256：`ea35050804fcdf29c69d5f2ab94646d8a1fb8d4ccab7d1df2c23f1df96ca5ddd`（1,723,616 字节）。
+App SHA-256：`4f52e2d90da9e8af7af4d2cadea4e39b138b7d7f7c740026668de70ce37b6c14`（1,658,080 字节）。
+ELF SHA-256：`7c532c87099486e20f3baf911a2a39948f93728aadb9626ea2b00af1857d8c63`。
+归档：`apps/esp/build/firmware/ea35050804fcdf29c69d5f2ab94646d8a1fb8d4ccab7d1df2c23f1df96ca5ddd/manifest.json`。
+
+## v21 心跳确认与引导完成记忆——已刷入，COM5 中立连接通过，Wi-Fi 复测未通过
+
+2026-10-17：电脑端已复现单条定时 PING 回包丢失会阻塞后续心跳的路径。
+现在按原间隔继续发送最多四个在途中立心跳，较新的成功回包只淘汰较旧的定时心跳；
+全部无回包时仍按原截止时间释放输入，不增加 HID 超时，也不重放操作。
+新轮次、重连及关闭仍作废旧心跳；高频输入后迟到的已作废心跳不会误伤当前轮次。
+引导完成后的界面记忆另有实际 LVGL 20 轮对象稳定专项检查。
+
+| 检查 | 结果与边界 |
+| --- | --- |
+| 电脑端检查 | typecheck/build PASS；串口、TCP及连接定向回归 50/50 PASS，单回包丢失场景先红后绿 |
+| EXE 检查 | self-test PASS；12 个离线场景 PASS，包含官方 MCP SDK 与 stdio。属于离线验证，不是当前实机输入验收 |
+| UI 专项 | 实际 LVGL 引导完成记忆 20 轮对象稳定检查 PASS；不是完整实体按键流程验收 |
+| ESP Build | 固件门禁及独立归档复核 PASS |
+| 烧录 | PASS：COM5 App-only 写入及哈希校验通过，保留 NVS/PHY |
+| 刷入前实机连接 | 运行 sidecar 实际选择 TCP `192.168.100.167:3333`；裸 TCP 5 秒连接失败，UDP/ICMP/ARP 不可达。USB PING 20/20 成功、最大 32ms，但蓝牙状态未连接 |
+| 刷入后启动观察 | 35 秒内 11 条 `NETSTATUS` 正常，23 次 UDP 请求收到 21 次回复，未见 panic；仅代表此观察窗口 |
+| Wi-Fi 连续控制链路 | FAIL：随后新版 EXE 通过官方 SDK 实际连接 MCP，状态查询在 sample 6（第 7 次）复现 PING acknowledgement timeout。证据 `apps/android-mcp/build/mcp-v21-live-status.json`。短启动观察不能替代连续控制验收，不能宣称 Wi-Fi 已修好 |
+| COM5 后续验证 | PASS：新版 EXE 通过官方 SDK 实际调用 `android_hid_status` 15/15 成功，无超时，最大 59ms。证据 `apps/android-mcp/build/mcp-v21-usb-status.json`；仅验证中立连接，不代表手机操作已通过 |
+| 当前电脑服务 | EXE 正在运行，health 返回 `status=ok`、buildId `f5636ed8fec2fa799e01`；本机配置 `ESP_HOST` 为空、`ESP_PORT=COM5`。手机局域网投屏配置完全保留，未增加自动 failover 或放宽超时 |
+| Device tests | PARTIAL：COM5 中立连接通过，Wi-Fi 连续控制仍 FAIL；最终蓝牙 `connected/encrypted/ready` 均为 false，需要手机连回既有配对设备。未发送真实手机非零输入，不能宣称完整真机远控 PASS |
+| Unverified | 蓝牙重连后的真实输入、完整实体引导及更长时间稳定性仍未验收 |
+
+电脑 EXE buildId：`f5636ed8fec2fa799e01`。
+EXE SHA-256：`7c4f40229d7ef8d73a2699b3c842c8188184d4414a1a0c421cd5826999e85b93`（93,345,280 字节）。
+ESP 合并镜像 SHA-256：`cc0e496af53b0c633fcf9c72618b30cda4d80c7ed723003cb4a1a94ce2bb2ea8`（1,721,680 字节）。
+App SHA-256：`dc714d2225c93610379a99c590378db432f0bca5d56ded449a256a9c06c97adb`（1,656,144 字节）。
+ELF SHA-256：`1ed6fd5185dfcbf5da9f2bd9ba509bf94a635d6d0d8cc89fe86504087d66475a`。
+归档：`apps/esp/build/firmware/cc0e496af53b0c633fcf9c72618b30cda4d80c7ed723003cb4a1a94ce2bb2ea8/manifest.json`。
+此前 Wi-Fi 本机配置保留于 ignored 的 `qdd-android.v21-wifi.json`，没有发布。
+
+## v20 重启与可跳过引导——已构建烧录，35 秒观察通过
+
+2026-10-17：用户报告设备反复重启。串口捕获 `Stack protection fault`，但没有完整回溯；
+证据 `apps/esp/build/onboarding-v19-reboot-serial.log`。匹配 v19 ELF 的固定调用链静态栈下界
+已达 2,976/3,072 字节，支持栈空间不足的判断，仍需新 ELF 及真机稳定观察确认修复效果。
+v20 将 `poll_udp` 的 1,024 字节响应缓冲从局部栈移到 worker 独占 BSS，
+不扩大任务栈，也不修改下载路径。
+新匹配 ELF 确认 `poll_udp` 静态栈帧由 1,152 降至 128 字节，固定主调用链下界由
+2,976 降至 1,952 字节；任务栈保持 3,072 字节，名义余量为 1,120 字节，
+这不是实测 high-water mark。BSS 增加 1,032 字节，其中响应缓冲为 1,024 字节。
+
+扫码/安装及蓝牙配对说明新增本次开机有效的“跳过”。引导页移除紧急停止，保留跳过/设置；
+正常控制页急停仍保留。跳过仅影响说明进度，不伪造实际下载、蓝牙安全连接、ready 或输入能力。
+
+| 检查 | 结果与边界 |
+| --- | --- |
+| 定向 Host tests | 实际 handler、纯引导界面模型及 220 个字体字形检查 PASS；真实 LVGL `--guide` 专用运行 PASS（exit 0）。这些是定向检查，不代表完整宿主门禁 |
+| 引导预览 | 二维码带跳过、蓝牙、电脑及正常未配对四张 PNG 已人工检查，无遮挡或缺字；这是宿主渲染预览，不是实体 LCD 验收 |
+| 默认全 UI 运行 | 未通过：旧 Wi-Fi 名称断言期望完整 `1. Updated network`，实际按现有 108px 名称宽度截断；该断言本轮未修改，独立于新增引导专项。不得据此标记整套 Host tests PASS |
+| Build | PASS：ESP-IDF 固件门禁、布局、合并镜像及匹配归档校验通过；不覆盖上方失败的默认全 UI 用例 |
+| 烧录 | PASS：COM5 仅向 `0x10000` 写入 1,656,016 字节 App，`Hash of data verified`，保留 NVS/PHY |
+| Device tests | PARTIAL：35.1 秒串口+UDP 启动观察 PASS，12 条 `WIFI_STATUS` 正常，保持已连接 `192.168.100.167`；26 次发现请求收到 23 次回复，`faults`/`serialErrors`/`bootMarkers` 均为空。本窗口未见重启或栈异常；证据 `apps/esp/build/onboarding-v20-startup.json` |
+| 电脑服务 | 设备操作台 EXE 已恢复，`GET /health` 返回 `status=ok`；地址 `http://192.168.100.160:8790/` |
+| Unverified | 实体按键跳过、完整引导流程及更长时间稳定性仍未验收；35 秒观察不代表长期稳定，不延伸下载排查 |
+
+合并镜像 SHA-256：`676cff3e8e29dc390893caa77a4e43ff7600047909e134a288f0abc17fec2f93`（1,721,552 字节）。
+App SHA-256：`6224adf5eb185e422b77480598bcdd7465c0a39cad27c20352cd62894745c67e`（1,656,016 字节）。
+ELF SHA-256：`a1a83ae5ef4fa1243101ec3c577ae4a6f17e113d8e85a90219a1eeffc5b6aa91`。
+归档：`apps/esp/build/firmware/676cff3e8e29dc390893caa77a4e43ff7600047909e134a288f0abc17fec2f93/manifest.json`。
+
+## v19 无线与内存诊断——已构建并刷入
+
+本版本仅新增 RSSI、信道、Wi-Fi 省电模式、内部可用堆及最大连续空闲块诊断字段。
+没有取得实机无线诊断结果，不宣称诊断完成或下载提速。
+v17 的扫描等待动画及配对时不回退二维码步骤的修复已包含在此版本。
+
+| 检查 | 结果与边界 |
+| --- | --- |
+| Host tests | 诊断字段局部检查 PASS；不代表完整宿主门禁 |
+| Build | PASS：编译、布局及匹配归档校验通过 |
+| 烧录 | PASS：COM5 仅向 `0x10000` 写入 1,654,416 字节 App，哈希校验通过，保留 NVS |
+| 电脑服务 | 设备操作台 EXE 已恢复运行 |
+| Device tests | 用户报告真机下载正常；维护者尚未亲自完整核验实体 LCD 引导、扫描动画及配对返回流程；无线诊断未取得 |
+
+合并镜像 SHA-256：`1a61a0193562b1e7eb28e0ecee103115e5115926365e8c2d13cdab45c5fbb5aa`（1,719,952 字节）。
+App SHA-256：`82a1282c3df1080f451407c0d40c8f610fd4314f2db4b224353095680e5aa108`（1,654,416 字节）。
+ELF SHA-256：`8fdc8efaf26989be076648df96815d3773c7a957e99e9f4e097ae12ba56695bc`。
+归档：`apps/esp/build/firmware/1a61a0193562b1e7eb28e0ecee103115e5115926365e8c2d13cdab45c5fbb5aa/manifest.json`。
+
+## v18 有界 Socket 写入与 HTTP 诊断——历史自动探测结果
+
+2026-10-17：针对下方 v17 重复下载中提前关闭的现象，新增 HTTP `send_override`，
+将每次原生 Socket 写入限制为最多 2,048 字节；零字节返回按失败处理，负返回值记录 errno。
+继续使用 SDK 定长响应，保留 `send_wait_timeout=2`，没有放宽超时。
+状态接口补充非敏感 HTTP 诊断，便于区分原生写入失败与其他传输问题。
+
+| 检查 | 结果与边界 |
+| --- | --- |
+| Host tests | 局部 handler 检查 PASS：部分写入、零返回、写入错误及有界 JSON 输出；不代表完整宿主门禁 |
+| Build | PASS：编译、布局及匹配归档校验通过；日志 `apps/esp/build/onboarding-v18-build.log` |
+| 烧录 | PASS：COM5 仅向 `0x10000` 写入 1,654,112 字节 App，哈希校验通过，保留 NVS |
+| 电脑连续下载 | 三轮顺序 curl 均失败：第 1/3 轮 HTTP 200 后正文 0 字节并在 20 秒时限超时（exit 28）；第 2 轮 HTTP 200，仅 5,513/49,634 字节便提前关闭（exit 18）。证据 `apps/esp/build/onboarding-v18-curl-downloads.json` |
+| 手机 curl 探测 | 经 ADB 启动的手机 curl 通过自身 Wi-Fi 发起 20 秒时限请求，HTTP 200，但仅收到 7,079/49,634 字节后超时；此探测不等同于用户实际浏览器下载 |
+| 失败后串口观察 | 只读串口状态仍显示 `connected=true`；这不能证明 HTTP 传输正常，也未排除其他射频/运行时问题 |
+
+合并镜像 SHA-256：`62f68963b8f27f874ab6b5f894dac178112dc95b4293320bbc238a3f803a52c0`（1,719,648 字节）。
+App SHA-256：`779b0439a6412f615aac3ada8d59b4de0616cb8cd7e2059209bf2ee2a997ce4f`（1,654,112 字节）。
+ELF SHA-256：`c4de01fd3d87074acf93af110dbb3776d9db533a2b68d0cc83945f0cb27d2b4d`。
+归档：`apps/esp/build/firmware/62f68963b8f27f874ab6b5f894dac178112dc95b4293320bbc238a3f803a52c0/manifest.json`。
+上述自动探测为 FAIL，不作为用户下载功能失败的结论；用户随后报告实际下载正常。
+未证明这些探测与实际使用之间差异的原因，也不宣称提速或唯一根因。
+
+## v17 引导进度、定长响应与 Wi-Fi 策略——复测仍有提前关闭
+
+2026-10-17：首页明确计算长度后一次调用 `httpd_resp_send`，APK 直接以内嵌指针和准确长度
+调用同一 SDK API，不再使用应用层分块/重试循环；仅发送成功才设置 `downloaded=true`。
+SDK `send_wait_timeout=2` 保留。Wi-Fi 初始化设为 `WIFI_PS_NONE`，关闭 TCP 控制连接后
+也不回到 modem 省电，覆盖 USB 使用及首次下载场景。
+
+App 曾登记的引导进度与 15 秒在线有效期分开；手机切到蓝牙设置后，即使心跳过期也不再退回
+二维码/下载步骤。过期仍隐藏实时地址和投屏状态；Wi-Fi 断开会作废手机/电脑实时登记，
+但本次开机期间的下载完成与“曾打开 App”标记保留。安全蓝牙就绪后，第五步提示返回 App；
+完成首次引导仍要求登记新鲜、正在投屏和电脑控制心跳在线。这些进度不跨重启/重置持久保存。
+
+扫描列表立即显示 40 × 40 LVGL 转动动画及“正在扫描 Wi-Fi”“通常需要 3-5 秒”“请稍候”；
+状态缓存不变时动画仍独立运行。扫描期间仅可选“返回上一级”，短按确认回到设置且后台继续扫描，
+上下键不能选中旧 SSID。完成、失败和离开页面均销毁转动控件及动画。
+14/20 px 字体子集现覆盖 217 个非 ASCII 字符及全部 95 个可打印 ASCII 字符。
+
+| 检查 | 结果与边界 |
+| --- | --- |
+| Host tests | 引导响应、Wi-Fi、登记过期/网络失效及引导界面模型的局部检查 PASS，不代表完整宿主门禁 |
+| 扫描界面专项 | 重新链接后，真实 LVGL `--scan` 字形/布局、缓存状态下动画角度变化及完成/失败/返回的销毁检查 PASS；配网模型专项 PASS。属于宿主验证，不是实体屏幕验收 |
+| Build | PASS：最终 ESP-IDF 编译、布局与匹配归档校验通过，日志 `apps/esp/build/onboarding-v17-build-final.log`；此前为合入新增修复停止的构建仍保留部分日志 `apps/esp/build/onboarding-v17-build.log` |
+| 烧录 | PASS：COM5 仅向 `0x10000` 写入 1,653,520 字节 App，哈希校验通过；擦除范围 `0x10000..0x1a3fff`，保留 NVS。日志 `apps/esp/build/onboarding-v17-flash.log` |
+| 首轮真实 LAN 请求 | Node 5 秒时限下全部 200：首页 1,063ms、状态 850ms、APK 1,869ms/49,634 字节，SHA-256 `7cff0c5e1f3d00fdb645d1dad64a08cd9b692c7bdbb2eef203c136db06931812` 正确。证据 `apps/esp/build/onboarding-v17-lan-after.json` |
+| 连续下载复测 | 20 秒时限 curl 前两轮收到完整且哈希正确的 APK；第三轮 exit 18，headers 为 200，正文 0/49,634 字节，连接提前关闭。证据 `apps/esp/build/onboarding-v17-curl-failure.json`。稳定下载不能标记 PASS |
+| 失败后串口观察 | 等待约 0.8 秒后，只读 `NETSTATUS` 仍回复已配置、已连接、IP `192.168.100.167`；本次有限观察未见 panic，不代表已排除所有重启或射频问题 |
+
+合并镜像 SHA-256：`c406fda1b03bb44c714a7f79901d237a28f11685b73ce9897ac364f5156d5884`（1,719,056 字节）。
+App SHA-256：`b48433843b2fef27cdff175019a40d0366eae098ba3da491b25fcad709f580ed`（1,653,520 字节）。
+ELF SHA-256：`31d015819ac3160bc1d67f9fd73969bf46214b182889c838e388961136ab0e67`。
+归档：`apps/esp/build/firmware/c406fda1b03bb44c714a7f79901d237a28f11685b73ce9897ac364f5156d5884/manifest.json`。
+首次完整传输及后续失败均保留，尚未证明稳定下载或唯一根因。
+新增引导进度、扫描等待动画、耗时文案和返回操作已刷入，但仍待实体交互验收。
+
+## v16 私网 HTTP Socket 延迟——实测结果不一致
+
+2026-10-17：唯一后续传输改动是在已接受的私网 HTTP Socket 上设置 `TCP_NODELAY`。
+局部 HTTP/Socket 宿主检查通过。该改动针对 v15 延迟、header分次到达的症状，
+下方真实请求结果不一致，尚未证明稳定传输或唯一根因。
+
+| 检查 | 结果与边界 |
+| --- | --- |
+| Host tests | 仅 HTTP/Socket 局部检查 PASS，不代表完整宿主门禁 |
+| Build | PASS：编译、布局及匹配归档校验通过；日志 `apps/esp/build/onboarding-v16-build.log` |
+| 首轮烧录尝试 | 写入前失败：打开 COM5 时 `FileNotFoundError(2)`，枚举无串口，UDP 也未发现控制板。原日志保留：`apps/esp/build/onboarding-v16-flash.log` |
+| 重连后烧录 | PASS：同一已验证 efbb 产物已向 `0x10000` 写入 1,653,008 字节 App，哈希校验通过；擦除范围 `0x10000..0x1a3fff`，保留 NVS。日志 `apps/esp/build/onboarding-v16-flash-reconnected.log` |
+| 串口启动响应 | PARTIAL：只读 `WIFI_STATUS` 返回 `configured=false`、`connected=false`、空 IP，证明固件运行但尚未配置 Wi-Fi。证据 `apps/esp/build/onboarding-v16-serial-status.json` |
+| 手动联网后的首轮 LAN 请求 | Node 5秒时限下全部200：首页679ms、状态656ms、APK 4,969ms/49,634字节，SHA-256 `7cff0c5e1f3d00fdb645d1dad64a08cd9b692c7bdbb2eef203c136db06931812` 正确。证据 `apps/esp/build/onboarding-v16-lan-after.json` |
+| 独立复测 | 紧接着20秒时限curl返回code200，但仅收到27,648/49,634字节；首字节0.858120秒、总耗时20.015450秒。保留 `apps/esp/build/onboarding-v16-apk-curl-failure.json`、`apps/esp/build/onboarding-v16-apk-headers.txt` 及截断文件 `apps/esp/build/onboarding-v16-real.apk`。不能标记稳定下载通过 |
+
+合并镜像 SHA-256：`efbb291922f47e9dae6e942ba755b07a92110a5f1895b5c308e2037fcf6299fa`（1,718,544 字节）。
+App SHA-256：`4ebe846851bec4a5390414ebb9473c5453fb58aa0aa245d260dc9225be53c4bd`（1,653,008 字节）。
+ELF SHA-256：`c815854717cde475b2da6d8be6abe2000fb75683c6f0a780741d709ad79f7956`。
+归档：`apps/esp/build/firmware/efbb291922f47e9dae6e942ba755b07a92110a5f1895b5c308e2037fcf6299fa/manifest.json`。
+首轮缺串口失败保留在记录中，之后已安装同一已验证产物。
+汇总证据：`apps/android-mcp/build/device-tests/firmware-final-v16.json`。
+实体菜单/清空密码仍未验证；完整首轮与截断复测均保留，没有宣称稳定下载通过或唯一根因。
+
+## v15 清空密码、Wi-Fi 重试与双栈局域网引导
+
+2026-10-17：密码完成菜单新增“清空密码”，保留“删除一位”。清空会擦除整个密码缓冲区，
+包括当前字符串结束位置之后的残留字节，并返回键盘选行状态，保留 SSID 和键盘位置。
+纵向菜单现有五项。
+未配置网络时，启动停留在引导步骤一，不再自动进入无线网络；用户主动选择“设置”再进入“无线网络”才开始扫描，没有新增控制状态。
+
+已确认 ESP-IDF HTTP 监听采用 `PF_INET6` 双栈 Socket，私网 IPv4 客户端可能表现为
+IPv4-mapped IPv6 地址。引导服务现先归一化这类地址，再执行既有私网判断，同时保留普通 IPv4 支持。
+修复前，对已安装旧固件 `http://192.168.100.167:3334/` 的真实局域网请求中，
+`/` 和 `/api/status` 均返回 HTTP 403，证据为 `apps/esp/build/onboarding-v15-lan-before.json`。
+
+首次 Wi-Fi 连接现最多尝试四次，按 500/1000/2000 ms 退避；重试期间保持
+`connecting=true`、`failed=false`，耗尽后才报错。连接 API 立即错误也会重试，
+配置暂报 `WIFI_STATE` 时在 250 ms 后重试。旧配置、错误接口或错误 SSID 的 GOT_IP 事件被拒绝。
+曾连通网络继续有界退避重连，`ALL_CHANNEL_SCAN` 按 RSSI 选点，不锁定 BSSID。
+
+| 检查 | 结果与边界 |
+| --- | --- |
+| 引导接口 | 扫码/连接首页、APK 下载、状态及登记的局部 handler 回归 PASS，覆盖 IPv4-mapped 对端；属于宿主验证，不是手机浏览器验收 |
+| Wi-Fi 后端 | 重试、配置状态冲突及过期 IP 事件的局部回归 PASS；未运行完整宿主门禁 |
+| 密码/设置模型 | 专项纯模型程序 PASS，覆盖整缓冲区清空、保留 SSID/位置、空密码幂等及既有单字符删除 |
+| UI 编译 | PASS：UI/模型/字体及 mock getter 编译链接通过，未执行 UI 用例 |
+| Build | PASS：最终 ESP-IDF 编译、布局与匹配归档校验；日志 `apps/esp/build/onboarding-v15-build-final.log` |
+| 烧录 | PASS：COM5 仅写入 `0x10000` 的 1,652,976 字节 App，哈希校验通过；擦除范围 `0x10000..0x1a3fff`，保留 NVS；日志 `apps/esp/build/onboarding-v15-flash.log` |
+| 真实局域网响应 | 板子自动连回 `192.168.100.167`，`/api/status` 返回 200/512 字节。Node 5秒首页/APK请求超时；12秒 curl 首页仍无完整响应，单次状态请求耗时3.19秒且header分次到达。证据 `apps/esp/build/onboarding-v15-lan-after.json` |
+| 长时限 APK 完整性 | 另一次20秒时限的curl下载完成：HTTP 200、49,634字节，首字节4.342146秒、总耗时10.688854秒；SHA-256 `7cff0c5e1f3d00fdb645d1dad64a08cd9b692c7bdbb2eef203c136db06931812` 与预期APK一致。证据 `apps/esp/build/onboarding-v15-apk-curl.json`；此前短时限失败仍保留，响应性能仍差 |
+| Device tests | 真实LAN状态/APK传输结果见上；实体密码菜单、重试/射频行为及手机浏览器完整流程仍为 UNVERIFIED |
+
+合并镜像 SHA-256：`1dfb61496156a047546609cd8737fcc8178f10012a1732ba2ee4ae022fa6f579`（1,718,512 字节）。
+App SHA-256：`93fbed860a0edd14926f497ecf0e64adf2e11b4b7fc3f48992363f69f6da1090`（1,652,976 字节）。
+ELF SHA-256：`437cbf4de1dd7eddf7f98563d4a1272023e5620320e140d343902be59148e6fa`。
+归档：`apps/esp/build/firmware/1dfb61496156a047546609cd8737fcc8178f10012a1732ba2ee4ae022fa6f579/manifest.json`。
+长时限APK下载成功不能证明首页/下载延迟已达可用水平，也不能据此认定唯一根因。
+
 ## v14 ESP Wi-Fi 完整扫描与分页
 
 2026-10-17：扫描由只取 8 条原始记录改为保留信号最强的 **64 个独立 SSID**。

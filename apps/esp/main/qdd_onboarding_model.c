@@ -146,6 +146,15 @@ void qdd_onboarding_model_clear(qdd_onboarding_model_t *model) {
     if (model) memset(model, 0, sizeof(*model));
 }
 
+void qdd_onboarding_model_invalidate_network(qdd_onboarding_model_t *model) {
+    if (!model) return;
+    const bool downloaded = model->view.downloaded;
+    const bool phone_seen = model->view.phone_seen;
+    memset(model, 0, sizeof(*model));
+    model->view.downloaded = downloaded;
+    model->view.phone_seen = phone_seen;
+}
+
 bool qdd_onboarding_model_phone(qdd_onboarding_model_t *model, const char *peer_ip,
     const qdd_onboarding_phone_t *phone, uint64_t now_ms) {
     if (!model || !phone || !phone->port || !device_id(phone->device_id) ||
@@ -180,6 +189,14 @@ qdd_onboarding_view_t qdd_onboarding_model_view(const qdd_onboarding_model_t *mo
     qdd_onboarding_view_t view = model->view;
     view.phone_fresh = fresh(model->phone_registered, model->phone_seen_ms, now_ms);
     view.pc_fresh = fresh(model->pc_registered, model->pc_seen_ms, now_ms);
-    if (!view.phone_fresh) view.phone_projecting = false;
+    if (!view.phone_fresh) {
+        view.phone_projecting = false;
+        view.phone_ip[0] = view.phone_device_id[0] = 0;
+        view.phone_port = 0;
+    }
+    if (!view.pc_fresh) {
+        view.pc_ip[0] = 0;
+        view.pc_port = 0;
+    }
     return view;
 }

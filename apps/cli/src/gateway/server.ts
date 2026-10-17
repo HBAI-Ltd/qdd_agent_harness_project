@@ -2,11 +2,12 @@ import { watch } from "node:fs";
 import { mkdir, readFile, stat } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import path from "node:path";
-import type { AnswerBody, AskBody, BrowserStreamEvent, CreateWishBody, GatewayEvent, JsonObject, Overview, PageView, SendMessageBody, ToolInfo } from "@qdd/shared";
+import type { AnswerBody, AskBody, BrowserStreamEvent, CreateWishBody, GatewayEvent, JsonObject, Overview, PageView, RecordInput, SendMessageBody, ToolInfo } from "@qdd/shared";
 import { runAsk } from "../agent/ask.js";
 import type { ChatFn } from "../agent/llm.js";
 import type { LoadedConfig } from "../config.js";
 import type { DataSources } from "../datasource/registry.js";
+import { addRecords, defineRecord, listRecordSets, parseRecordDefinition, queryRecords, RECORD_PREFIX, updateRecord, voidRecord } from "../datasets/records.js";
 import { refreshDatasets } from "../datasets/refresh.js";
 import { pageCsp } from "../guard.js";
 import { BadRequest, Conflict, NotFound, SessionHub } from "../sessions.js";
@@ -67,6 +68,7 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
   const workbench = options.workbench ?? (await openWorkbench(loaded));
   const hub = new SessionHub(loaded, sources, options.chat, workbench);
   const scheduler = new Scheduler(loaded, hub, workbench);
+  workbench.scheduler = scheduler;
   const csp = pageCsp(config.cdnAllowlist, config.gateway.corsOrigins);
   const globalClients = new Set<ServerResponse>();
   const computeJs = await buildComputeScript();
@@ -237,6 +239,47 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
         await writeAtomic(file, JSON.stringify(state));
         return json(res, 200, { state });
       }
+    }
+
+    // 记录数据集：页面只能读写自己声明的记录；结构定义仅前端或 agent（经店长授权）
+    const recordRoute = /^\/api\/records(?:\/([^/]+)(?:\/([^/]+))?)?$/.exec(p);
+    if (recordRoute) {
+      const name = recordRoute[1] ? decodeURIComponent(recordRoute[1]) : undefined;
+      const id = recordRoute[2] ? decodeURIComponent(recordRoute[2]) : undefined;
+      let actor = "@admin";
+      if (!auth.isAdmin(req, url)) {
+        const slug = auth.pageOf(req);
+        const page = slug ? (await readPages(paths)).find((x) => x.slug === slug) : undefined;
+        if (!page) throw new HttpError(401, "缺少或错误的页面 token");
+        if (!name || !(page.records ?? []).includes(name)) throw new HttpError(403, `页面 ${slug} 未声明记录 ${name ?? ""}`);
+        actor = page.slug;
+      }
+      const store = sources.datasets;
+      if (!name) {
+        if (m === "GET") {
+          return json(res, 200, (await listRecordSets(store)).map((x) => ({ name: x.name.slice(RECORD_PREFIX.length), description: x.description, schema: x.record, rowCount: x.rowCount, watermark: x.watermark, updatedAt: x.updatedAt })));
+        }
+        if (m === "POST") {
+          const manifest = await defineRecord(store, parseRecordDefinition(await readJson(req)));
+          return json(res, 201, { name: manifest.name.slice(RECORD_PREFIX.length), schema: manifest.record });
+        }
+      } else if (!id) {
+        if (m === "GET") {
+          const limit = url.searchParams.get("limit");
+          return json(res, 200, await queryRecords(store, name, { from: url.searchParams.get("from") ?? undefined, to: url.searchParams.get("to") ?? undefined, limit: limit ? Number(limit) : undefined }));
+        }
+        if (m === "POST") {
+          const body = (await readJson(req)) as RecordInput | RecordInput[];
+          return json(res, 201, { rows: await addRecords(store, name, Array.isArray(body) ? body : [body], actor) });
+        }
+      } else {
+        if (m === "PUT") return json(res, 200, { row: await updateRecord(store, name, id, ((await readJson(req)) ?? {}) as RecordInput, actor) });
+        if (m === "DELETE") {
+          await voidRecord(store, name, id, actor);
+          return json(res, 200, { ok: true });
+        }
+      }
+      throw new HttpError(405, "不支持的方法");
     }
 
     // ---------------------------------------------------------------- 以下仅前端（网关 token）

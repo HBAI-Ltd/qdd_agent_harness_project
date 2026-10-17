@@ -14,6 +14,7 @@ import {
   resolveApproval,
   saveStyle,
   sendMessage,
+  setPagePinned,
   sessionEvents,
 } from "../src/api/workspace.ts";
 
@@ -74,6 +75,21 @@ test("wish creation sends the documented wish and optional page slug", async () 
     assert.equal(call.url, base + "/api/wishes");
     assert.equal(call.init.method, "POST");
     assert.equal(new Headers(call.init.headers).get("Content-Type"), "application/json");
+  }
+});
+
+test("page pinning uses authenticated PUT/DELETE and preserves server metadata", async () => {
+  const result = { slug: "sales/中文", pinnedAt: "2026-10-17T02:00:00Z" };
+  const calls = stubResponse(result);
+  const signal = new AbortController().signal;
+  assert.deepEqual(await setPagePinned(base, token, result.slug, true, signal), result);
+  await setPagePinned(base, token, result.slug, false, signal);
+  assert.deepEqual(calls.map((call) => call.init.method), ["PUT", "DELETE"]);
+  for (const call of calls) {
+    assert.equal(call.url, base + "/api/pages/sales%2F%E4%B8%AD%E6%96%87/pin");
+    assert.equal(call.init.body, undefined);
+    assert.equal(call.init.signal, signal);
+    assert.equal(new Headers(call.init.headers).get("Authorization"), "Bearer " + token);
   }
 });
 
@@ -154,6 +170,7 @@ test("session SSE handles fragmented UTF-8, CRLF, multiline data and the since c
   await sessionEvents(base, token, "session/1", 7, (event) => events.push(event), requestSignal, () => { opened += 1; });
   assert.equal(capturedUrl, base + "/api/sessions/session%2F1/events?since=7");
   assert.equal(capturedInit?.signal, requestSignal);
+  assert.equal(capturedInit?.cache, "no-store");
   assert.equal(new Headers(capturedInit?.headers).get("Accept"), "text/event-stream");
   assert.equal(new Headers(capturedInit?.headers).get("Authorization"), "Bearer " + token);
   assert.equal(opened, 1);
@@ -183,6 +200,20 @@ test("aborting a live gateway stream cancels its reader and releases the lock", 
   }, controller.signal);
   assert.equal(capturedUrl, base + "/api/events");
   assert.deepEqual(events, [{ type: "pages_changed" }]);
+  assert.equal(cancelled, true);
+  assert.equal(body.locked, false);
+});
+
+test("aborting a silent stream promptly cancels an outstanding read", async () => {
+  const controller = new AbortController();
+  let cancelled = false;
+  const body = new ReadableStream<Uint8Array>({ cancel() { cancelled = true; } });
+  globalThis.fetch = async () => new Response(body, { headers: { "Content-Type": "text/event-stream" } });
+  const reading = gatewayEvents(base, token, () => assert.fail("An aborted stream must not deliver events"), controller.signal);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(body.locked, true);
+  controller.abort();
+  await reading;
   assert.equal(cancelled, true);
   assert.equal(body.locked, false);
 });

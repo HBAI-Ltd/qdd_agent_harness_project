@@ -13,7 +13,8 @@
 :where(.harness-app button, .harness-app input, .harness-app textarea) { font: inherit; }
 :where(.harness-app button:not(.el-button)) { border: 0; cursor: pointer; }
 .harness-app button:disabled { cursor: not-allowed; }
-.harness-app :focus-visible { outline: 2px solid var(--qdd-primary); outline-offset: 3px; }
+/* Fields keep their native/component focus styles, including hidden choice inputs. */
+.harness-app :focus-visible:not(:where(input, textarea)) { outline: 2px solid var(--qdd-primary); outline-offset: 3px; }
 .harness-app svg { flex-shrink: 0; }
 .harness-app .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .harness-app .el-button > span { gap: 6px; }

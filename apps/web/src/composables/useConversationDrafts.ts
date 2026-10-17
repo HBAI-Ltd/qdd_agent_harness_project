@@ -6,6 +6,7 @@ interface Submission {
   sessionId: string | null;
   intent: number;
   epoch: number;
+  revision: number;
   text: string;
 }
 
@@ -16,11 +17,13 @@ export function useConversationDrafts(
 ) {
   const draft = ref("");
   const saved = new Map<string, string>();
+  const revisions = new Map<string, number>();
   const draftGenerations = new Map<string, number>();
   const submissions = new Set<Submission>();
   let generation = 0;
   let intent = 0;
   let epoch = 0;
+  let updatingDraft = false;
 
   function keyFor(gateway: string, id: string | null): string {
     return JSON.stringify(id === null
@@ -29,6 +32,16 @@ export function useConversationDrafts(
   }
 
   let currentKey = keyFor(gatewayUrl.value, activeSessionId.value);
+
+  function setDraft(text: string) {
+    updatingDraft = true;
+    draft.value = text;
+    updatingDraft = false;
+  }
+
+  watch(draft, () => {
+    if (!updatingDraft) revisions.set(currentKey, (revisions.get(currentKey) ?? 0) + 1);
+  }, { flush: "sync" });
 
   watch([gatewayUrl, activeSessionId], ([gateway, id], [previousGateway, previousId]) => {
     const nextKey = keyFor(gateway, id);
@@ -46,11 +59,17 @@ export function useConversationDrafts(
       : undefined;
     currentKey = nextKey;
     if (creation) {
-      draft.value = previousText === creation.text ? "" : previousText;
+      // The composer was cleared on submission. Carry only subsequent edits,
+      // and keep failure recovery attached to the newly created conversation.
+      revisions.set(nextKey, revisions.get(previousKey) ?? 0);
+      revisions.delete(previousKey);
+      creation.key = nextKey;
+      creation.sessionId = id;
+      setDraft(previousText);
       saved.set(nextKey, draft.value);
       saved.delete(previousKey);
     } else {
-      draft.value = saved.get(nextKey) ?? "";
+      setDraft(saved.get(nextKey) ?? "");
     }
   }, { flush: "sync" });
 
@@ -63,7 +82,7 @@ export function useConversationDrafts(
     intent++;
     draftGenerations.set(gatewayUrl.value, ++generation);
     currentKey = keyFor(gatewayUrl.value, null);
-    draft.value = "";
+    setDraft("");
     saved.delete(currentKey);
   }
 
@@ -71,33 +90,49 @@ export function useConversationDrafts(
     intent++;
     epoch++;
     saved.clear();
+    revisions.clear();
     submissions.clear();
     draftGenerations.clear();
     draftGenerations.set(gatewayUrl.value, ++generation);
     currentKey = keyFor(gatewayUrl.value, activeSessionId.value);
-    draft.value = "";
+    setDraft("");
   }
 
   async function submitMessage(): Promise<boolean> {
+    if (!draft.value.trim() || [...submissions].some((submission) => submission.key === currentKey && submission.epoch === epoch)) {
+      return false;
+    }
     const submission: Submission = {
       key: currentKey,
       gateway: gatewayUrl.value,
       sessionId: activeSessionId.value,
       intent,
       epoch,
+      revision: revisions.get(currentKey) ?? 0,
       text: draft.value,
     };
     submissions.add(submission);
+    setDraft("");
+    saved.set(submission.key, "");
+
+    function restoreDraft() {
+      // A failed request must not replace anything typed after sending, even
+      // when the user types and then deletes it or re-enters the same text.
+      if (submission.epoch !== epoch || (revisions.get(submission.key) ?? 0) !== submission.revision) return;
+      if (currentKey === submission.key) {
+        if (draft.value === "") setDraft(submission.text);
+      } else if (saved.get(submission.key) === "") {
+        saved.set(submission.key, submission.text);
+      }
+    }
+
     try {
       const sent = await send(submission.text);
-      if (sent && submission.epoch === epoch) {
-        if (currentKey === submission.key) {
-          if (draft.value === submission.text) draft.value = "";
-        } else if (saved.get(submission.key) === submission.text) {
-          saved.delete(submission.key);
-        }
-      }
+      if (!sent) restoreDraft();
       return sent;
+    } catch (cause) {
+      restoreDraft();
+      throw cause;
     } finally {
       submissions.delete(submission);
     }

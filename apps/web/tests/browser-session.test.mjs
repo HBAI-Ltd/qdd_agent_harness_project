@@ -305,3 +305,106 @@ test("browser endpoints preserve bearer authentication, latest tab identity, and
   assert.equal(new Headers(calls.at(-1).init.headers).get("Authorization"), "Bearer secret-token");
   assert.deepEqual(events, [frameFor()]);
 });
+
+test("pointer input stays read-only until manual control is enabled", async () => {
+  const f = fixture();
+  await f.start();
+  assert.equal(await f.viewer.queuePointer({ type: "mouse", event: "move", x: 10, y: 20 }), false);
+  assert.equal(await f.viewer.queuePointer({ type: "mouse", event: "down", x: 10, y: 20, button: "left" }), false);
+  assert.equal(f.calls.length, 0);
+});
+
+test("drag input is ordered with keys and coalesces a burst of moves without losing the release", async () => {
+  const f = fixture();
+  await f.start();
+  f.viewer.setManual(true);
+  const held = f.hold();
+  const down = f.viewer.queuePointer({ type: "mouse", event: "down", x: 10, y: 20, button: "left", clickCount: 1 });
+  const moves = Array.from({ length: 1000 }, (_, x) => f.viewer.queuePointer({ type: "mouse", event: "move", x, y: 30 }));
+  const up = f.viewer.queuePointer({ type: "mouse", event: "up", x: 999, y: 30, button: "left", clickCount: 1 });
+  const key = f.viewer.queueKeyboard({ type: "key", key: "Enter", event: "press" });
+  assert.equal(f.calls.length, 1);
+  held.resolve(stateFor());
+  assert.deepEqual(await Promise.all([down, up, key]), [true, true, true]);
+  const moveResults = await Promise.all(moves);
+  assert.equal(moveResults.filter(Boolean).length, 1);
+  assert.equal(moveResults.at(-1), true);
+  assert.deepEqual(f.calls.map((call) => call.input), [
+    { type: "mouse", event: "down", x: 10, y: 20, button: "left", clickCount: 1 },
+    { type: "mouse", event: "move", x: 999, y: 30 },
+    { type: "mouse", event: "up", x: 999, y: 30, button: "left", clickCount: 1 },
+    { type: "key", key: "Enter", event: "press" },
+  ]);
+});
+
+test("move coalescing never crosses a key or mouse press boundary", async () => {
+  const f = fixture();
+  await f.start();
+  f.viewer.setManual(true);
+  const held = f.hold();
+  const first = f.viewer.queuePointer({ type: "mouse", event: "move", x: 1, y: 1 });
+  const before = f.viewer.queuePointer({ type: "mouse", event: "move", x: 2, y: 2 });
+  const key = f.viewer.queueKeyboard({ type: "key", key: "Shift", event: "down" });
+  const after = f.viewer.queuePointer({ type: "mouse", event: "move", x: 3, y: 3 });
+  held.resolve(stateFor());
+  assert.deepEqual(await Promise.all([first, before, key, after]), [true, true, true, true]);
+  assert.deepEqual(f.calls.map((call) => call.input.type === "mouse" ? call.input.x : call.input.key), [1, 2, "Shift", 3]);
+});
+
+test("pointer release aborts the active drag and discards all unsent input", async () => {
+  const f = fixture();
+  await f.start();
+  f.viewer.setManual(true);
+  const held = f.hold();
+  const down = f.viewer.queuePointer({ type: "mouse", event: "down", x: 10, y: 20, button: "left" });
+  const move = f.viewer.queuePointer({ type: "mouse", event: "move", x: 100, y: 200 });
+  const up = f.viewer.queuePointer({ type: "mouse", event: "up", x: 100, y: 200, button: "left" });
+  f.viewer.releaseInput();
+  assert.deepEqual(await Promise.all([down, move, up]), [false, false, false]);
+  assert.equal(f.calls[0].signal.aborted, true);
+  assert.equal(f.calls.at(-1).input.type, "release");
+  assert.equal(await f.viewer.queuePointer({ type: "mouse", event: "move", x: 5, y: 6 }), true);
+  held.resolve(stateFor());
+  await setImmediate();
+  assert.deepEqual(f.calls.map((call) => call.input.type === "mouse" ? call.input.event : call.input.type), ["down", "release", "move"]);
+});
+
+test("a drag conflict releases input and never replays queued movement or mouse-up", async () => {
+  const f = fixture();
+  await f.start();
+  f.viewer.setManual(true);
+  const held = f.hold();
+  const down = f.viewer.queuePointer({ type: "mouse", event: "down", x: 10, y: 20, button: "left" });
+  const move = f.viewer.queuePointer({ type: "mouse", event: "move", x: 100, y: 200 });
+  const up = f.viewer.queuePointer({ type: "mouse", event: "up", x: 100, y: 200, button: "left" });
+  held.reject(Object.assign(new Error("页面已变化"), { status: 409 }));
+  assert.deepEqual(await Promise.all([down, move, up]), [false, false, false]);
+  assert.equal(f.state.manual, false);
+  assert.equal(f.state.frame, undefined);
+  assert.equal(f.calls.at(-1).input.type, "release");
+  f.emit(frameFor());
+  f.viewer.setManual(true);
+  assert.equal(await f.viewer.queuePointer({ type: "mouse", event: "move", x: 5, y: 6 }), true);
+  assert.deepEqual(f.calls.map((call) => call.input.type === "mouse" ? call.input.event : call.input.type), ["down", "release", "move"]);
+});
+
+test("switching tabs isolates active and buffered pointer input from the new tab", async () => {
+  const f = fixture();
+  await f.start();
+  f.viewer.setManual(true);
+  const held = f.hold();
+  const down = f.viewer.queuePointer({ type: "mouse", event: "down", x: 10, y: 20, button: "left" });
+  const up = f.viewer.queuePointer({ type: "mouse", event: "up", x: 10, y: 20, button: "left" });
+  const next = stateFor("browser-1", "tab-2");
+  f.emit({ type: "state", session: next });
+  assert.deepEqual(await Promise.all([down, up]), [false, false]);
+  assert.equal(f.calls[0].signal.aborted, true);
+  assert.equal(f.calls.at(-1).tabId, "tab-1");
+  assert.equal(f.calls.at(-1).input.type, "release");
+  f.emit(frameFor(next));
+  f.viewer.setManual(true);
+  assert.equal(await f.viewer.queuePointer({ type: "mouse", event: "move", x: 5, y: 6 }), true);
+  held.resolve(stateFor());
+  await setImmediate();
+  assert.deepEqual(f.calls.filter((call) => call.input.type === "mouse").map((call) => [call.tabId, call.input.event]), [["tab-1", "down"], ["tab-2", "move"]]);
+});

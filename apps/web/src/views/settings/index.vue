@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onBeforeUnmount, ref, watch } from "vue";
 import WorkspaceSettings from "@/components/WorkspaceSettings.vue";
+import WorkspaceData from "@/components/WorkspaceData.vue";
 import { useWorkspaceContext } from "@/composables/workspaceContext";
 import * as gatewayApi from "@/api/workspace";
 
@@ -89,5 +90,7 @@ onBeforeUnmount(stopStyleRequests);
     :style-saving="styleSaving"
     :style-notice="styleNotice"
     @save-style="saveStyle()"
-    @reset-style="saveStyle(true)" />
+    @reset-style="saveStyle(true)">
+    <WorkspaceData :connected="connected" :gateway-url="gatewayUrl" :token="token" />
+  </WorkspaceSettings>
 </template>

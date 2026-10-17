@@ -21,6 +21,7 @@ const { useWorkspace } = await import("../src/composables/useWorkspace.ts");
 const originalFetch = globalThis.fetch;
 const originalLocalStorage = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
 const originalSessionStorage = Object.getOwnPropertyDescriptor(globalThis, "sessionStorage");
+const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
 const mounted = [];
 const gateway = "http://127.0.0.1:3000";
 
@@ -74,6 +75,14 @@ function backend(initial = [], pages = []) {
     }
     if (url.pathname === "/api/sessions") return json([...sessions.values()].map(metadata));
     if (url.pathname === "/api/pages") return json(pages);
+    const pin = /^\/api\/pages\/([^/]+)\/pin$/.exec(url.pathname);
+    if (pin) {
+      const page = pages.find((entry) => entry.slug === decodeURIComponent(pin[1]));
+      if (!page) return json({ error: "页面不存在" }, 404);
+      page.pinnedAt = init.method === "PUT" ? new Date().toISOString() : null;
+      pages.sort((a, b) => Number(!!b.pinnedAt) - Number(!!a.pinnedAt));
+      return json({ slug: page.slug, pinnedAt: page.pinnedAt });
+    }
     if (url.pathname === "/api/wishes") {
       const value = session(`created-${++nextId}`);
       sessions.set(value.id, value);
@@ -179,6 +188,122 @@ afterEach(() => {
   else Reflect.deleteProperty(globalThis, "localStorage");
   if (originalSessionStorage) Object.defineProperty(globalThis, "sessionStorage", originalSessionStorage);
   else Reflect.deleteProperty(globalThis, "sessionStorage");
+  if (originalWindow) Object.defineProperty(globalThis, "window", originalWindow);
+  else Reflect.deleteProperty(globalThis, "window");
+});
+
+test("document navigation closes SSE before unmount and restoring the document reconnects once", async () => {
+  const browserWindow = new EventTarget();
+  Object.defineProperty(globalThis, "window", { configurable: true, value: browserWindow });
+  const service = backend([session("selected")]);
+  const { workspace, app } = mountWorkspace();
+  await ready(workspace);
+  await until(() => service.streamCount("selected") === 1, "The selected conversation must have one stream");
+  const oldStreams = service.calls.filter((call) => call.path.endsWith("/events"));
+  assert.equal(oldStreams.length, 2);
+  browserWindow.dispatchEvent(new Event("pagehide"));
+  assert.equal(workspace.connected.value, false);
+  assert.ok(oldStreams.every((call) => call.signal.aborted));
+  assert.equal(service.streamCount("selected"), 0);
+  browserWindow.dispatchEvent(new Event("pageshow"));
+  await ready(workspace);
+  await until(() => service.streamCount("selected") === 1, "Restoring must reconnect the selected conversation");
+  assert.equal(workspace.activeSessionId.value, "selected");
+  const count = service.calls.length;
+  browserWindow.dispatchEvent(new Event("pageshow"));
+  await setImmediate();
+  assert.equal(service.calls.length, count, "Duplicate pageshow must not open additional requests");
+  app.unmount();
+  assert.equal(service.streamCount("selected"), 0);
+  browserWindow.dispatchEvent(new Event("pageshow"));
+  await setImmediate();
+  assert.equal(service.calls.length, count, "Unmount must remove document lifecycle listeners");
+});
+
+function taskPage(slug) {
+  return {
+    slug, title: slug, summary: "", wish: "查看经营数据", version: 1,
+    url: `/pages/${slug}/?page_token=test`, pinnedAt: null, kind: "once", schedules: [],
+    updatedAt: "2026-10-17T01:00:00Z", sessionId: "", stale: null,
+  };
+}
+
+test("page pin actions retain the gateway order and allow multiple pinned pages", async () => {
+  const service = backend([], [taskPage("sales"), taskPage("inventory")]);
+  const { workspace } = mountWorkspace();
+  await ready(workspace);
+  assert.equal(await workspace.setPagePinned("inventory", true), true);
+  assert.equal(workspace.pages.value[0].slug, "inventory");
+  assert.ok(workspace.pages.value[0].pinnedAt);
+  assert.equal(await workspace.setPagePinned("sales", true), true);
+  assert.equal(workspace.pages.value.filter((page) => page.pinnedAt).length, 2);
+  assert.equal(await workspace.setPagePinned("inventory", false), true);
+  assert.equal(workspace.pages.value[0].slug, "sales");
+  assert.equal(workspace.pages.value.find((page) => page.slug === "inventory").pinnedAt, null);
+  assert.equal(service.calls.filter((call) => call.path.endsWith("/pin")).length, 3);
+});
+
+test("pinning blocks duplicate actions per page, permits other pages, and recovers from errors", async () => {
+  const service = backend([], [taskPage("sales"), taskPage("inventory")]);
+  const { workspace } = mountWorkspace();
+  await ready(workspace);
+  const held = service.hold("/api/pages/sales/pin", "PUT");
+  const pinning = workspace.setPagePinned("sales", true);
+  assert.equal(workspace.pendingPagePins.value.has("sales"), true);
+  assert.equal(await workspace.setPagePinned("sales", false), false);
+  assert.equal(await workspace.setPagePinned("inventory", true), true);
+  held.fail("置顶保存失败");
+  assert.equal(await pinning, false);
+  assert.equal(workspace.pendingPagePins.value.has("sales"), false);
+  assert.match(workspace.error.value, /置顶保存失败/);
+  assert.equal(await workspace.setPagePinned("sales", true), true);
+});
+
+test("old pin responses cannot clear a new connection's pending action or restore its pages", async () => {
+  const service = backend([], [taskPage("sales")]);
+  const { workspace } = mountWorkspace();
+  await ready(workspace);
+  const oldHold = service.hold("/api/pages/sales/pin", "PUT");
+  const oldPin = workspace.setPagePinned("sales", true);
+  workspace.token.value = "another-gateway-token";
+  assert.equal(workspace.pages.value.length, 0);
+  assert.equal(workspace.pendingPagePins.value.size, 0);
+  assert.equal(await workspace.setPagePinned("sales", true), false);
+  await workspace.loadWorkspace();
+  const newHold = service.hold("/api/pages/sales/pin", "DELETE");
+  const newPin = workspace.setPagePinned("sales", false);
+  oldHold.release();
+  assert.equal(await oldPin, false);
+  assert.equal(workspace.pendingPagePins.value.has("sales"), true);
+  newHold.release();
+  assert.equal(await newPin, true);
+  assert.equal(workspace.pages.value[0].pinnedAt, null);
+});
+
+test("a workspace snapshot started before pinning cannot overwrite the refreshed page order", async () => {
+  const service = backend([], [taskPage("sales"), taskPage("inventory")]);
+  const { workspace } = mountWorkspace();
+  await ready(workspace);
+  const snapshot = service.hold("/api/pages");
+  const refreshing = workspace.loadWorkspace();
+  assert.equal(await workspace.setPagePinned("inventory", true), true);
+  snapshot.release();
+  await refreshing;
+  assert.equal(workspace.pages.value[0].slug, "inventory");
+  assert.ok(workspace.pages.value[0].pinnedAt);
+  assert.equal(workspace.loadingPages.value, false);
+});
+
+test("schedule changes refresh task classification and its linked schedules", async () => {
+  const pages = [taskPage("sales")];
+  const service = backend([], pages);
+  const { workspace } = mountWorkspace();
+  await ready(workspace);
+  pages[0].kind = "scheduled";
+  pages[0].schedules = [{ id: "daily", name: "经营日报", enabled: false }];
+  service.gatewayEvent({ type: "schedules_changed" });
+  await until(() => workspace.pages.value[0]?.kind === "scheduled", "Schedule metadata was not refreshed");
+  assert.deepEqual(workspace.pages.value[0].schedules, pages[0].schedules);
 });
 
 test("only the first message creates a conversation and navigation keeps reusing it", async () => {

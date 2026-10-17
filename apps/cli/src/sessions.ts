@@ -254,7 +254,6 @@ export class SessionHub {
         meta.title = result.page.title;
         await this.emit(id, { type: "published", page: result.page, files: result.files });
       }
-      this.running.delete(id);
       await this.setStatus(meta, "idle");
     } catch (error) {
       // 失败也保存对话，店长可以在同一会话里说「继续」
@@ -262,7 +261,6 @@ export class SessionHub {
         await writeAtomic(this.file(id, "messages.json"), JSON.stringify(error.messages)).catch(() => {});
       }
       await this.emit(id, { type: "error", message: controller.signal.aborted ? "已取消" : (error as Error).message });
-      this.running.delete(id);
       await this.setStatus(meta, "error");
     } finally {
       this.running.delete(id);

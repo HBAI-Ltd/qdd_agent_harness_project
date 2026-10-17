@@ -55,6 +55,7 @@ export function useWorkspace() {
   const pendingStops = ref(new Set<string>());
   const pendingCancellations = ref(new Set<string>());
   const pendingActions = ref(new Set<string>());
+  const pendingPagePins = ref(new Set<string>());
   const sendTarget = () => activeSessionId.value ?? `draft:${selectionVersion.value}`;
   const pendingSend = computed(() => pendingSends.value.has(sendTarget()));
   const conversationStatus = computed(() => activeSession.value?.status
@@ -73,7 +74,9 @@ export function useWorkspace() {
   });
   const eventActionBusy = computed(() => !!activeSessionId.value && pendingActions.value.has(activeSessionId.value));
   let disposed = false;
+  let documentSuspended = false;
   let connectionVersion = 0;
+  let pageRequestVersion = 0;
   let workspaceController: AbortController | undefined;
   let pageController: AbortController | undefined;
   let detailController: AbortController | undefined;
@@ -137,6 +140,7 @@ export function useWorkspace() {
     sendRequests.clear();
     pendingCancellations.value.clear();
     pendingActions.value.clear();
+    pendingPagePins.value.clear();
   }
 
   watch([token, gatewayUrl], ([, nextGateway], [, previousGateway]) => {
@@ -178,19 +182,41 @@ export function useWorkspace() {
 
   async function refreshPages() {
     if (!connected.value || disposed) return;
+    const version = ++pageRequestVersion;
     pageController?.abort();
     const controller = new AbortController();
     pageController = controller;
     loadingPages.value = true;
     try {
       const result = await api.listPages(gatewayUrl.value, token.value, controller.signal);
-      if (controller.signal.aborted || disposed) return;
+      if (controller.signal.aborted || disposed || version !== pageRequestVersion) return;
       pages.value = result;
       if (activePageSlug.value && !result.some((page) => page.slug === activePageSlug.value)) activePageSlug.value = null;
     } catch (cause) {
       if (!controller.signal.aborted && !disposed) error.value = errorMessage(cause);
     } finally {
-      if (pageController === controller) loadingPages.value = false;
+      if (pageController === controller && version === pageRequestVersion) loadingPages.value = false;
+    }
+  }
+
+  async function setPagePinned(slug: string, pinned: boolean): Promise<boolean> {
+    if (!connected.value || disposed || pendingPagePins.value.has(slug)) return false;
+    const controller = new AbortController();
+    actionControllers.add(controller);
+    pendingPagePins.value.add(slug);
+    error.value = "";
+    try {
+      await api.setPagePinned(gatewayUrl.value, token.value, slug, pinned, controller.signal);
+      if (controller.signal.aborted || disposed) return false;
+      // The gateway owns pin order, including pins made from another window.
+      await refreshPages();
+      return !controller.signal.aborted && !disposed;
+    } catch (cause) {
+      if (!controller.signal.aborted && !disposed) error.value = errorMessage(cause);
+      return false;
+    } finally {
+      actionControllers.delete(controller);
+      if (!controller.signal.aborted) pendingPagePins.value.delete(slug);
     }
   }
 
@@ -221,7 +247,10 @@ export function useWorkspace() {
           else if (event.type === "session_updated") applyMeta(event.session);
           else if (event.type === "pending_changed") gatewayChanges.value.pending++;
           else if (event.type === "skills_changed") gatewayChanges.value.skills++;
-          else if (event.type === "schedules_changed") gatewayChanges.value.schedules++;
+          else if (event.type === "schedules_changed") {
+            gatewayChanges.value.schedules++;
+            void refreshPages();
+          }
           else if (event.type === "connectors_changed") gatewayChanges.value.connectors++;
           gatewayChanges.value.overview++;
         }, controller.signal, () => {
@@ -289,7 +318,7 @@ export function useWorkspace() {
 
   async function selectSession(id: string): Promise<void> {
     if (!connected.value || disposed) return;
-    if (activeSessionId.value === id && activeSession.value?.id === id) return;
+    if (activeSessionId.value === id && activeSession.value?.id === id && sessionController && !sessionController.signal.aborted) return;
     const selection = ++selectionVersion.value;
     detailController?.abort();
     sessionController?.abort();
@@ -373,7 +402,7 @@ export function useWorkspace() {
   }
 
   async function loadWorkspace(): Promise<void> {
-    if (disposed) return;
+    if (disposed || documentSuspended) return;
     // Refreshing history must not abort a POST that may already have created a session.
     // Keep the current identity, pending sends, and live streams on an existing connection.
     const refreshing = connected.value;
@@ -390,6 +419,8 @@ export function useWorkspace() {
       return;
     }
     workspaceController?.abort();
+    pageController?.abort();
+    const pageVersion = ++pageRequestVersion;
     const controller = new AbortController();
     const sessionSnapshot = new Map(sessions.value.map((session) => [session.id, session.updatedAt]));
     workspaceController = controller;
@@ -411,8 +442,10 @@ export function useWorkspace() {
           && (!sessionSnapshot.has(entry.id) || sessionSnapshot.get(entry.id) !== entry.updatedAt
             || pendingSends.value.has(entry.id))) applyResponseMeta(entry);
       }
-      pages.value = pageList;
-      if (activePageSlug.value && !pageList.some((page) => page.slug === activePageSlug.value)) activePageSlug.value = null;
+      if (pageVersion === pageRequestVersion) {
+        pages.value = pageList;
+        if (activePageSlug.value && !pageList.some((page) => page.slug === activePageSlug.value)) activePageSlug.value = null;
+      }
       connected.value = true;
       if (!refreshing) {
         globalController = new AbortController();
@@ -435,7 +468,7 @@ export function useWorkspace() {
     } finally {
       if (workspaceController === controller) {
         loadingSessions.value = false;
-        loadingPages.value = false;
+        if (pageVersion === pageRequestVersion) loadingPages.value = false;
       }
     }
   }
@@ -593,19 +626,39 @@ export function useWorkspace() {
     }
   }
 
+  function pageHide() {
+    documentSuspended = true;
+    // Full navigation does not unmount Vue. Release SSE before the old document freezes.
+    stopConnections();
+  }
+
+  function pageShow() {
+    if (disposed || !documentSuspended) return;
+    documentSuspended = false;
+    if (token.value.trim()) void loadWorkspace();
+  }
+
   onMounted(() => {
+    if (typeof window !== "undefined") {
+      window.addEventListener("pagehide", pageHide);
+      window.addEventListener("pageshow", pageShow);
+    }
     if (token.value.trim()) void loadWorkspace();
   });
   onBeforeUnmount(() => {
     disposed = true;
+    if (typeof window !== "undefined") {
+      window.removeEventListener("pagehide", pageHide);
+      window.removeEventListener("pageshow", pageShow);
+    }
     stopConnections();
   });
 
   return {
     sessions, activeSessionId, activeSession, pages, activePageSlug, activePage, revisionPageSlug,
     preferences, token, gatewayUrl, loadingSessions, loadingPages, loadingSession,
-    error, connected, gatewayChanges, sending, responding, pendingMessage, canCancel, cancelling, eventActionBusy,
+    error, connected, gatewayChanges, sending, responding, pendingMessage, canCancel, cancelling, eventActionBusy, pendingPagePins,
     loadWorkspace, openConversation, selectSession, startNewConversation,
-    sendMessage, answerQuestions, resolveApproval, cancel, revisePage,
+    sendMessage, answerQuestions, resolveApproval, cancel, revisePage, setPagePinned,
   };
 }

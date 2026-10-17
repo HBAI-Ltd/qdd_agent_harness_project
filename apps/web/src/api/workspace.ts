@@ -73,6 +73,12 @@ export function listPages(base: string, token: string, signal?: AbortSignal): Pr
   return json(base, token, "/api/pages", { signal: signal ?? null });
 }
 
+export function setPagePinned(base: string, token: string, slug: string, pinned: boolean, signal?: AbortSignal): Promise<Pick<PageView, "slug" | "pinnedAt">> {
+  return json(base, token, `/api/pages/${encodeURIComponent(slug)}/pin`, {
+    method: pinned ? "PUT" : "DELETE", signal: signal ?? null,
+  });
+}
+
 export function createWish(base: string, token: string, body: CreateWishBody, signal?: AbortSignal): Promise<SessionMeta> {
   return json(base, token, "/api/wishes", { method: "POST", body: JSON.stringify(body), signal: signal ?? null });
 }
@@ -102,12 +108,16 @@ export function cancelSession(base: string, token: string, id: string, signal?: 
 
 // fetch 支持 Authorization 请求头，无需把管理 token 放进 SSE 的 URL。
 async function stream<T>(base: string, token: string, path: string, onEvent: (event: T) => void, signal: AbortSignal, onOpen?: () => void): Promise<void> {
-  const response = await request(base, token, path, { headers: { Accept: "text/event-stream" }, signal: signal ?? null });
+  // Live streams must not participate in the browser's response cache.
+  const response = await request(base, token, path, { headers: { Accept: "text/event-stream" }, cache: "no-store", signal });
   if (!response.body || !response.headers.get("Content-Type")?.includes("text/event-stream")) {
+    await response.body?.cancel().catch(() => undefined);
     throw new Error("网关未返回有效的事件流。");
   }
-  onOpen?.();
   const reader = response.body.getReader();
+  // Cancel even a pending, silent read; cleanup cannot depend on the next SSE ping.
+  const cancelReader = () => { void reader.cancel().catch(() => undefined); };
+  signal.addEventListener("abort", cancelReader, { once: true });
   const decoder = new TextDecoder();
   let buffer = "";
   let data: string[] = [];
@@ -120,8 +130,11 @@ async function stream<T>(base: string, token: string, path: string, onEvent: (ev
     }
   };
   try {
+    if (signal.aborted) return;
+    onOpen?.();
     while (!signal.aborted) {
       const chunk = await reader.read();
+      if (signal.aborted) return;
       buffer += decoder.decode(chunk.value, { stream: !chunk.done });
       let newline: number;
       while ((newline = buffer.indexOf("\n")) !== -1) {
@@ -135,6 +148,7 @@ async function stream<T>(base: string, token: string, path: string, onEvent: (ev
       }
     }
   } finally {
+    signal.removeEventListener("abort", cancelReader);
     await reader.cancel().catch(() => undefined);
     reader.releaseLock();
   }

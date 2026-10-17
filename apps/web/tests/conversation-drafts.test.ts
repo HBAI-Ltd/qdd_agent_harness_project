@@ -39,6 +39,39 @@ test("switching sessions and gateways restores their independent unsent drafts",
   assert.equal(state.draft.value, "draft b");
 });
 
+test("submitting clears the composer synchronously before the request settles", async (t) => {
+  const pending = deferred<boolean>();
+  const state = setup(t, (text) => {
+    assert.equal(text, "send immediately");
+    assert.equal(state.draft.value, "");
+    return pending.promise;
+  });
+  state.draft.value = "send immediately";
+  const request = state.submitMessage();
+  assert.equal(state.draft.value, "");
+  pending.resolve(true);
+  assert.equal(await request, true);
+  assert.equal(state.draft.value, "");
+});
+
+test("empty drafts and repeated submissions to a pending conversation never send", async (t) => {
+  const pending = deferred<boolean>();
+  let calls = 0;
+  const state = setup(t, () => { calls++; return pending.promise; });
+  state.draft.value = "  \n";
+  assert.equal(await state.submitMessage(), false);
+  assert.equal(state.draft.value, "  \n");
+  state.draft.value = "first message";
+  const request = state.submitMessage();
+  assert.equal(await state.submitMessage(), false);
+  state.draft.value = "next message";
+  assert.equal(await state.submitMessage(), false);
+  assert.equal(state.draft.value, "next message");
+  assert.equal(calls, 1);
+  pending.resolve(true);
+  await request;
+});
+
 test("a successful background send clears only its original saved draft", async (t) => {
   const pending = deferred<boolean>();
   const state = setup(t, async (text) => {
@@ -69,6 +102,20 @@ test("edits made during an existing-session send survive success and later switc
   assert.equal(state.draft.value, "next question");
 });
 
+test("retyping an identical message during a send remains a new unsent draft", async (t) => {
+  const pending = deferred<boolean>();
+  const state = setup(t, () => pending.promise);
+  state.draft.value = "same question";
+  const request = state.submitMessage();
+  assert.equal(state.draft.value, "");
+  state.draft.value = "same question";
+  state.select("b");
+  pending.resolve(true);
+  await request;
+  state.select("a");
+  assert.equal(state.draft.value, "same question");
+});
+
 test("first creation clears the submitted text and carries new unsent input to the created session", async (t) => {
   const pending = deferred<boolean>();
   const state = setup(t, () => pending.promise, null);
@@ -89,6 +136,7 @@ test("an unchanged first message is cleared when its session is created", async 
   const state = setup(t, () => pending.promise, null);
   state.draft.value = "first question";
   const request = state.submitMessage();
+  assert.equal(state.draft.value, "");
   state.activeSessionId.value = "created";
   assert.equal(state.draft.value, "");
   pending.resolve(true);
@@ -170,6 +218,67 @@ test("failed sends keep the original draft after switching away and back", async
   assert.equal(state.draft.value, "retry this");
 });
 
+test("a failed send restores the cleared composer and permits retrying", async (t) => {
+  const pending = deferred<boolean>();
+  let calls = 0;
+  const state = setup(t, (text) => {
+    assert.equal(text, "retry this");
+    return ++calls === 1 ? pending.promise : Promise.resolve(true);
+  });
+  state.draft.value = "retry this";
+  const request = state.submitMessage();
+  assert.equal(state.draft.value, "");
+  pending.resolve(false);
+  assert.equal(await request, false);
+  assert.equal(state.draft.value, "retry this");
+  assert.equal(await state.submitMessage(), true);
+  assert.equal(state.draft.value, "");
+  assert.equal(calls, 2);
+});
+
+test("a failed send cannot replace a new draft or resurrect text the user deleted", async (t) => {
+  for (const nextText of ["next question", ""]) {
+    const pending = deferred<boolean>();
+    const state = setup(t, () => pending.promise);
+    state.draft.value = "retry this";
+    const request = state.submitMessage();
+    state.draft.value = "next question";
+    state.draft.value = nextText;
+    state.select("b");
+    state.draft.value = "keep b";
+    pending.resolve(false);
+    assert.equal(await request, false);
+    assert.equal(state.draft.value, "keep b");
+    state.select("a");
+    assert.equal(state.draft.value, nextText);
+  }
+});
+
+test("failure after first-session creation restores to that session", async (t) => {
+  const pending = deferred<boolean>();
+  const state = setup(t, () => pending.promise, null);
+  state.draft.value = "first question";
+  const request = state.submitMessage();
+  state.activeSessionId.value = "created";
+  state.select("history");
+  state.draft.value = "keep history";
+  pending.resolve(false);
+  assert.equal(await request, false);
+  assert.equal(state.draft.value, "keep history");
+  state.select("created");
+  assert.equal(state.draft.value, "first question");
+});
+
+test("a thrown request restores its draft before propagating the failure", async (t) => {
+  const cause = new Error("network unavailable");
+  const state = setup(t, async () => { throw cause; });
+  state.draft.value = "retry this";
+  const request = state.submitMessage();
+  assert.equal(state.draft.value, "");
+  await assert.rejects(request, cause);
+  assert.equal(state.draft.value, "retry this");
+});
+
 test("clearing credentials invalidates pending draft cleanup for the same session", async (t) => {
   const pending = deferred<boolean>();
   const state = setup(t, () => pending.promise);
@@ -180,4 +289,15 @@ test("clearing credentials invalidates pending draft cleanup for the same sessio
   pending.resolve(true);
   await request;
   assert.equal(state.draft.value, "same text");
+});
+
+test("clearing credentials invalidates pending failure recovery for the same session", async (t) => {
+  const pending = deferred<boolean>();
+  const state = setup(t, () => pending.promise);
+  state.draft.value = "old credentials' message";
+  const request = state.submitMessage();
+  state.clear();
+  pending.resolve(false);
+  assert.equal(await request, false);
+  assert.equal(state.draft.value, "");
 });

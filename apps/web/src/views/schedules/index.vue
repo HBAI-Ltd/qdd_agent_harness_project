@@ -42,6 +42,8 @@ const controllers = new Set<AbortController>();
 let saveController: AbortController | undefined;
 let version = 0;
 let editorVersion = 0;
+let editorConnection = { gatewayUrl: "", token: "" };
+let saveInterrupted = false;
 
 watch(schedules, (entries) => {
   for (const schedule of entries) {
@@ -80,7 +82,10 @@ function cronLabel(cron: string): string {
   return "自定义执行规则";
 }
 function openEditor(schedule?: Schedule, template?: (typeof templates)[number]) {
+  if (!connected.value || saving.value) return;
   editorVersion++;
+  editorConnection = { gatewayUrl: gatewayUrl.value, token: token.value };
+  saveInterrupted = false;
   editingId.value = schedule?.id ?? null;
   Object.assign(form, {
     name: schedule?.name ?? template?.name ?? "", prompt: schedule?.prompt ?? template?.prompt ?? "",
@@ -96,21 +101,36 @@ function closeEditor() {
   saveController?.abort();
   saving.value = false;
 }
+function editorConnectionChanged(): boolean {
+  return editorConnection.gatewayUrl !== gatewayUrl.value || editorConnection.token !== token.value;
+}
+function connectionFeedback(): string {
+  if (editorConnectionChanged()) return "工作空间连接配置已更改，编辑内容已保留。请恢复原连接后保存，或取消后重新编辑。";
+  if (saveInterrupted) return "连接发生变化，上次保存结果尚未确认。编辑内容已保留，请恢复连接并检查列表后再重试。";
+  return connected.value ? "连接已恢复，编辑内容已保留，请重新保存。" : "工作空间未连接，暂时无法保存。编辑内容已保留，请恢复连接后重试。";
+}
 function resetOperations() {
   version++;
   for (const controller of controllers) controller.abort();
   controllers.clear();
+  saveController = undefined;
   rowBusy.value = {};
   launchedSessions.value = {};
   saving.value = false;
-  editorOpen.value = false;
   actionError.value = "";
-  formError.value = "";
 }
-watch([gatewayUrl, token, connected], resetOperations, { flush: "sync" });
+watch([gatewayUrl, token, connected], () => {
+  saveInterrupted ||= saving.value;
+  resetOperations();
+  if (editorOpen.value) formError.value = connectionFeedback();
+}, { flush: "sync" });
 onBeforeUnmount(resetOperations);
 async function save() {
-  if (!connected.value || saving.value) return;
+  if (saving.value) return;
+  if (!connected.value || editorConnectionChanged()) {
+    formError.value = connectionFeedback();
+    return;
+  }
   let input: ScheduleInput;
   try {
     if (!form.name.trim() || !form.prompt.trim()) throw new Error("请填写任务名称与要助手执行的内容。");
@@ -123,6 +143,7 @@ async function save() {
   const currentVersion = version;
   const currentEditor = editorVersion;
   saving.value = true;
+  saveInterrupted = false;
   formError.value = "";
   try {
     if (editingId.value) await updateSchedule(gatewayUrl.value, token.value, editingId.value, input, controller.signal);
@@ -266,7 +287,7 @@ function runSessionId(schedule: Schedule): string | undefined {
         <ElAlert v-if="skillsResource.error.value || connectorsResource.error.value" :title="skillsResource.error.value || connectorsResource.error.value" type="warning" show-icon :closable="false" class="form-feedback" />
         <ElFormItem label="定时执行"><ElSwitch v-model="form.enabled" active-text="启用" inactive-text="暂停" /></ElFormItem>
       </ElForm>
-      <template #footer><ElButton :disabled="saving" @click="editorOpen = false">取消</ElButton><ElButton type="primary" :loading="saving" :disabled="!connected" @click="save">保存任务</ElButton></template>
+      <template #footer><ElButton :disabled="saving" @click="editorOpen = false">取消</ElButton><ElButton type="primary" :loading="saving" @click="save">保存任务</ElButton></template>
     </ElDialog>
   </div>
 </template>

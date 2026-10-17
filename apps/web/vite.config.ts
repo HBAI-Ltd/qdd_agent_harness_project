@@ -17,8 +17,7 @@ const FRONTEND_PORT = 5177;
 function gatewayAddress(): { host?: string; port?: number } {
   try {
     const config: unknown = JSON.parse(readFileSync(new URL("../../harness.config.json", import.meta.url), "utf8"));
-    if (!config || typeof config !== "object" || !("gateway" in config)
-      || !config.gateway || typeof config.gateway !== "object") return {};
+    if (!config || typeof config !== "object" || !("gateway" in config) || !config.gateway || typeof config.gateway !== "object") return {};
     const gateway = config.gateway;
     return {
       ...("host" in gateway && typeof gateway.host === "string" ? { host: gateway.host } : {}),
@@ -77,28 +76,28 @@ export default defineConfig(({ command, mode }) => {
         dts: "src/types/auto-imports.d.ts",
         dtsMode: "overwrite",
         imports: ["vue", "pinia", "vue-router"],
-        resolvers: [
-          ElementPlusResolver({ importStyle: false }),
-        ],
+        resolvers: [ElementPlusResolver({ importStyle: false })],
       }),
       Components({
         dts: "src/types/components.d.ts",
         syncMode: "overwrite",
 
-        resolvers: [
-          ElementPlusResolver({ importStyle: false }),
-        ],
+        resolvers: [ElementPlusResolver({ importStyle: false })],
       }),
-      ...(command === "build" ? [webUpdateNotice({
-        versionType: "build_timestamp",
-        checkInterval: 24 * 60 * 60 * 1000,
-        notificationProps: {
-          title: "系统更新",
-          description: "系统更新啦！ 请您刷新页面体验最新版本以免遇到异常问题！ 如需手动刷新，请使用Ctrl加F5进行刷新",
-          buttonText: "立即刷新",
-          dismissButtonText: "忽略",
-        },
-      })] : []),
+      ...(command === "build"
+        ? [
+            webUpdateNotice({
+              versionType: "build_timestamp",
+              checkInterval: 24 * 60 * 60 * 1000,
+              notificationProps: {
+                title: "系统更新",
+                description: "系统更新啦！ 请您刷新页面体验最新版本以免遇到异常问题！ 如需手动刷新，请使用Ctrl加F5进行刷新",
+                buttonText: "立即刷新",
+                dismissButtonText: "忽略",
+              },
+            }),
+          ]
+        : []),
     ],
     resolve: {
       alias: {

@@ -190,6 +190,7 @@ function useConfiguredAddress() {
         </ElForm>
         <ElAlert v-if="connected && styleNotice" class="settings-feedback" :title="styleNotice" :type="styleNoticeType" show-icon :closable="false" />
       </ElCard>
+      <slot />
     </section>
   </div>
 </template>

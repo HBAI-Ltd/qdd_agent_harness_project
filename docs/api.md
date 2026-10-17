@@ -12,7 +12,7 @@ harness 不提供界面，前端通过本网关完成：许愿与会话、展示
 | 调用方 | 方式 | 权限 |
 | --- | --- | --- |
 | 前端 / 管理 | `Authorization: Bearer <网关 token>`；`EventSource` 无法设请求头时用 `?access_token=<token>`（仅 GET） | 全部 `/api/*`、`/mcp` |
-| 生成的页面 | SDK 自动携带 `X-QDD-Page` + `X-QDD-Page-Token` | 仅 `POST /api/tools/<页面声明的工具>`、本页面的 `/api/state/<slug>`，以及声明了 `useAgent` 时的 `POST /api/ask` |
+| 生成的页面 | SDK 自动携带 `X-QDD-Page` + `X-QDD-Page-Token` | 仅 `POST /api/tools/<页面声明的工具>`、本页面的 `/api/state/<slug>`、页面代码中用到的 `/api/records/<name>`，以及声明了 `useAgent` 时的 `POST /api/ask` |
 
 网关 token 来自环境变量 `QDD_GATEWAY_TOKEN`（至少 16 位）；未设置时首次启动自动生成到 `workspace/.gateway-token`，`npm run qdd -- token` 查看。
 
@@ -104,6 +104,7 @@ POST   /api/schedules/:id/run    立即执行一次 → 202 { "sessionId" }
 - 到点以**无人值守**方式发起会话（`SessionMeta.origin = { kind: "schedule", … }`）：不提问；写入类操作进入工作台待办等待授权。
 - 完成后把结论推送到 `notify` 连接器；配置推送目标即视为店长授权该任务的推送。执行结果记录在 `lastRun`（含推送结果）。
 - 网关停机期间错过的执行，启动后补跑一次。变化时推送 `schedules_changed`。
+- agent 也能在会话中用 `create_schedule` 创建任务：先以 `approval_required`（`tool: "create_schedule"`，参数含名称、cron、下次执行时间、任务描述、绑定页面、推送目标）请店长确认，确认后才写入。这类任务带 `createdBy: { kind: "agent", sessionId }`；定时执行的会话本身不能再创建任务。
 
 ## 连接器
 
@@ -140,7 +141,7 @@ POST   /api/connectors/:id/test     { "text"? } 发送测试消息
 
 agent 获得 `browser` 工具（open / navigate / snapshot / read / click / hover / type / pressKey / scroll / screenshot / tabs / newTab / selectTab / closeTab / close）。每个会话一个独立浏览器会话（临时资料，不读个人浏览器登录），可跨多轮续用；取消会话会关闭浏览器。`permission: confirm` 时，每个会话首次点击、输入或按键前触发 `approval_required`（`tool: browser`, `source: browser`）。只允许 HTTP/HTTPS 网页。
 
-会话事件 `{ "type": "browser", "browser": BrowserSessionState }` 给出 `browserSessionId`、`tabId`、当前地址与标题，前端据此打开画面：
+会话事件 `{ "type": "browser", "browser": BrowserSessionState }` 给出 `browserSessionId`、`tabId`、当前地址与标题。浏览器会话建立后、导航完成前即发送首次状态，动作完成后再发送最新状态，前端据此自动展开画面并订阅后续变化：
 
 ```http
 GET  /api/browser/:browserSessionId          → BrowserSessionState
@@ -192,7 +193,26 @@ GET /api/state/:slug     → { "state": {...} }
 PUT /api/state/:slug     body 为 JSON 对象（≤64KB）→ { "state": {...} }
 ```
 
-页面通过 `qdd.state` 保存推演参数、筛选条件等，跨会话、跨设备共享；前端也可读写。
+页面通过 `qdd.state` 保存推演参数、筛选条件等，跨会话、跨设备共享；前端也可读写。逐条登记的数据请用记录数据集。
+
+## 记录数据集（门店登记）
+
+试吃报损、临期处置回填、巡检、日报确认等需要员工逐条登记的数据，存为数据集 `records/<name>`（`kind: "record"`）。每行自动带 `id`（主键）、`time`（`YYYY-MM-DD HH:mm`，未传时取当前时间）、`page`（来源页面 slug，前端写入为 `@admin`）。
+
+```http
+GET    /api/records                 → [{ name, description, schema, rowCount, watermark, updatedAt }]   仅前端
+POST   /api/records                 { "name": "loss_log", "label": "试吃报损登记", "description"?: "…",
+                                      "fields": [{ "name": "qty", "label": "数量", "type": "number", "required"?: true, "options"?: [...] }] } → 201   仅前端
+GET    /api/records/:name?from=YYYY-MM-DD&to=YYYY-MM-DD&limit=200   → { schema, rows（按时间倒序）, total }
+POST   /api/records/:name           单条对象或数组（≤200 条）→ 201 { rows }
+PUT    /api/records/:name/:id       部分字段（登记时间不可改）→ { row }
+DELETE /api/records/:name/:id       作废 → { ok: true }
+```
+
+- 结构由 agent 用 `define_record` 提出（`approval_required`，`tool: "define_record"`），店长确认后建立；也可由前端直接 `POST /api/records`。已存在时只能新增字段、改中文名/候选值；删字段或改类型返回 409。
+- 写入按结构校验：未知字段、类型不符、必填为空、不在候选值内均返回 400。
+- 修改按 id 覆盖、作废写入墓碑；读取和 `store__aggregate`（`dataset: "records/<name>"`，计数用指标 `records`）只看最新且未作废的行，原始行保留在数据集日志中便于追溯。
+- 页面只能访问代码中 `qdd.records.*("<name>")` 出现的记录（发布时写入 `PageEntry.records`），其它返回 403；页面不能定义或列出记录。
 
 ## 指标口径与数据集
 
@@ -247,6 +267,10 @@ await qdd.ask("这周毛利为什么下降？", context); // 需要 agent 时
 qdd.agg(rows, { groupBy: ["category"], metrics: ["revenue", "grossMargin"] }); // 与数据源侧同一计算引擎
 qdd.format(0.234, "grossMargin"); // "23.4%"
 await qdd.state.set({ priceUp: 0.05 });
+await qdd.records.add("loss_log", { sku: "SKU013", qty: 2, reason: "试吃" }); // 门店登记
+await qdd.records.update("loss_log", id, { qty: 3 });
+await qdd.records.remove("loss_log", id); // 作废
+await qdd.records.list("loss_log", { from: "2026-10-01", limit: 100 }); // { schema, rows, total }
 ```
 
 ## 任务模板与主界面通信

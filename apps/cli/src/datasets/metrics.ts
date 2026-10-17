@@ -4,6 +4,9 @@ import { resolveMetrics, type MetricCatalog } from "@qdd/shared";
 import type { HarnessPaths } from "../config.js";
 import { readPages, writeAtomic, writePages } from "../web/site.js";
 
+/** 记录数据集的计数指标（按 id 计行数）；旧工作区在首次建立记录数据集时补入口径目录。 */
+export const RECORDS_METRIC: MetricCatalog[string] = { label: "记录数", type: "flow", field: "id", agg: "count", digits: 0, description: "登记记录条数（已作废的不计）" };
+
 /** 指标口径：唯一来源。agent 与页面只能引用，修改需经店长授权并留历史。 */
 export const DEFAULT_METRICS: MetricCatalog = {
   revenue: { label: "销售额", type: "flow", field: "revenue", unit: "¥" },
@@ -15,6 +18,7 @@ export const DEFAULT_METRICS: MetricCatalog = {
   aov: { label: "客单价", type: "ratio", numerator: "revenue", denominator: "orders", unit: "¥", description: "销售额 ÷ 订单数" },
   stock: { label: "库存", type: "stock", field: "stock", entity: "sku", agg: "last", digits: 0, description: "各 SKU 期末库存之和" },
   status: { label: "库存状态", type: "state", field: "state" },
+  records: RECORDS_METRIC,
 };
 
 export async function loadMetrics(paths: HarnessPaths): Promise<MetricCatalog> {

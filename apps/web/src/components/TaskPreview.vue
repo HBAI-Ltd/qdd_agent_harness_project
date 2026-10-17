@@ -9,9 +9,11 @@ const props = defineProps<{
   page: PageView;
   gatewayUrl: string;
   context?: PageBridgePayload;
+  pinDisabled?: boolean;
+  pinPending?: boolean;
 }>();
 
-const emit = defineEmits<{ message: [message: TaskPageEvent] }>();
+const emit = defineEmits<{ message: [message: TaskPageEvent]; pin: [pinned: boolean]; schedules: [] }>();
 const frame = ref<HTMLIFrameElement>();
 
 const documentUrl = ref("");
@@ -65,6 +67,11 @@ function reload() {
     }
     // Use the gateway URL unchanged: its page token establishes the page cookie.
     documentUrl.value = pageUrl.href;
+    // A pending navigation may never emit load/error, so bound this phase too.
+    readyTimer = setTimeout(() => {
+      loading.value = false;
+      renderError.value = "任务页面加载超时，请检查网关连接后重新加载。";
+    }, 15000);
   } catch {
     loading.value = false;
     renderError.value = "任务页面地址无效，请检查网关配置后重试。";
@@ -114,12 +121,19 @@ watch(
         <AgentIcon name="code" :size="15" />
         <strong>{{ page.title }}</strong>
         <ElTag class="preview-label" type="info" effect="plain" size="small">v{{ page.version }}</ElTag>
+        <ElTag class="preview-kind" :type="page.kind === 'scheduled' ? 'primary' : 'info'" effect="plain" size="small">{{ page.kind === "scheduled" ? "定时任务" : "一次性任务" }}</ElTag>
       </div>
-      <ElButton class="preview-reload" text size="small" @click="reload">
-        <AgentIcon name="refresh" :size="14" />
-        重新加载
-      </ElButton>
+      <div class="preview-actions">
+        <ElButton class="preview-reload" text size="small" :loading="pinPending" :disabled="pinDisabled || pinPending" :aria-label="`${page.pinnedAt ? '取消置顶' : '置顶'}：${page.title}`" :aria-pressed="!!page.pinnedAt" @click="emit('pin', !page.pinnedAt)">{{ page.pinnedAt ? "取消置顶" : "置顶页面" }}</ElButton>
+        <ElButton class="preview-reload" text size="small" @click="reload">
+          <AgentIcon name="refresh" :size="14" />
+          重新加载
+        </ElButton>
+      </div>
     </header>
+    <div v-if="page.schedules.length" class="preview-schedules" aria-label="关联定时任务">
+      <span>定时更新：</span><ElButton v-for="schedule in page.schedules" :key="schedule.id" text size="small" :aria-label="`管理定时任务：${schedule.name}，${schedule.enabled ? '已启用' : '已暂停'}`" @click="emit('schedules')">{{ schedule.name }}<ElTag :type="schedule.enabled ? 'success' : 'info'" effect="plain" size="small">{{ schedule.enabled ? "已启用" : "已暂停" }}</ElTag><AgentIcon name="chevron" :size="12" /></ElButton>
+    </div>
     <p v-if="page.stale" class="preview-notice" role="status">
       待复核：{{ page.stale }}
     </p>
@@ -175,6 +189,13 @@ watch(
   min-width: 0;
   color: var(--qdd-text);
 }
+
+.preview-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.preview-actions :deep(.el-button + .el-button) { margin-left: 0; }
+.preview-kind { flex-shrink: 0; }
+.preview-schedules { display: flex; align-items: center; flex-wrap: wrap; flex-shrink: 0; gap: 6px 10px; padding: 9px 24px; border-bottom: 1px solid var(--qdd-border); color: var(--qdd-muted); font-size: 11px; }
+.preview-schedules .el-button { height: auto; padding: 3px 5px; margin: 0; color: var(--qdd-text); white-space: normal; text-align: left; }
+.preview-schedules :deep(.el-button > span) { gap: 6px; flex-wrap: wrap; overflow-wrap: anywhere; }
 
 .preview-heading strong {
   overflow: hidden;
@@ -248,8 +269,10 @@ watch(
 }
 
 @media (max-width: 760px) {
-  .preview-toolbar { padding: 12px 16px; }
+  .preview-toolbar { flex-wrap: wrap; gap: 10px; padding: 12px 16px; }
+  .preview-heading { flex: 1 1 100%; }
   .preview-label { display: none; }
+  .preview-schedules { padding: 9px 16px; }
   .preview-error, .preview-notice { padding: 10px 16px; }
 }
 </style>

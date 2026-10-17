@@ -14,6 +14,8 @@ const paths: Record<string, string> = {
   panel: "M3 4h18v16H3ZM9 4v16",
   spark: "m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5ZM20 2v4m-2-2h4",
   code: "m8 6-6 6 6 6m8-12 6 6-6 6m-3-14-2 16",
+  tool: "m14 6 4 4 3-3a6 6 0 0 1-8 8l-6 6a2.1 2.1 0 0 1-3-3l6-6a6 6 0 0 1 8-8Z",
+  thinking: "M9 18h6m-5 3h4M8 14a6 6 0 1 1 8 0c-1 1-1 2-1 4H9c0-2 0-3-1-4Z",
   pen: "m15 4 5 5M4 20l5-1L21 7l-5-5L4 14Z",
   shop: "M3 10v11h18V10M2 10l2-7h16l2 7M2 10c1 3 4 3 5 0 1 3 4 3 5 0 1 3 4 3 5 0 1 3 4 3 5 0M9 21v-7h6v7",
   plan: "M5 3h14v18H5ZM9 7h6M9 12h6M9 17h4",

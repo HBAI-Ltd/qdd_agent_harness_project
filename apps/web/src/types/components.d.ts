@@ -13,12 +13,14 @@ declare module 'vue' {
   export interface GlobalComponents {
     AgentIcon: typeof import('./../components/AgentIcon.vue')['default']
     DashboardPending: typeof import('./../components/DashboardPending.vue')['default']
+    MarkdownContent: typeof import('./../components/MarkdownContent.vue')['default']
     RouterLink: typeof import('vue-router')['RouterLink']
     RouterView: typeof import('vue-router')['RouterView']
     SessionActions: typeof import('./../components/SessionActions.vue')['default']
     SessionBrowser: typeof import('./../components/SessionBrowser.vue')['default']
     StoreOverview: typeof import('./../components/StoreOverview.vue')['default']
     TaskPreview: typeof import('./../components/TaskPreview.vue')['default']
+    WorkspaceData: typeof import('./../components/WorkspaceData.vue')['default']
     WorkspaceSettings: typeof import('./../components/WorkspaceSettings.vue')['default']
     WorkspaceSidebar: typeof import('./../components/WorkspaceSidebar.vue')['default']
   }

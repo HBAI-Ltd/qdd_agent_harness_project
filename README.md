@@ -49,12 +49,13 @@ Aidol 创造营参赛项目——钱多多门店人工智能助手：店铺管�
 
 - **待办与总览**：`GET /api/overview` / `GET /api/pending` 汇总所有会话里待店长处理的授权和问题；授权等待时长由 `approvalTimeoutMin`（默认 60 分钟）控制。
 - **技能**（`workspace/skills/`）：可复用的做事方法；agent 可从对话中 `save_skill`（需店长确认）、`load_skill`。
-- **定时任务**（`workspace/schedules.json`）：5 段 cron，网关内调度；到点无人值守执行（可绑定技能），结论推送到连接器；停机错过的执行会补跑。
+- **定时任务**（`workspace/schedules.json`）：5 段 cron，网关内调度；到点无人值守执行（可绑定技能、在页面上刷新），结论推送到连接器；停机错过的执行会补跑。店长说「每天 9 点…」时 agent 可用 `create_schedule` 直接创建（需店长确认）；定时执行中的推送若需确认会进入工作台待办，可用于「店长确认后再发」。
+- **记录数据集**（`records/<name>`）：试吃报损、临期处置回填、巡检等逐条登记的数据。agent 用 `define_record` 提出结构（需店长确认），页面用 `qdd.records.add/update/remove/list` 读写，网关按结构校验并只允许页面访问代码中用到的记录；修改按 id 覆盖、作废写墓碑，`store__aggregate` 可直接汇总（计数指标 `records`）。
 - **连接器**（`workspace/connectors.json`）：目前开放飞书（群机器人 webhook / 企业自建应用），安装前先验证，凭据加密存储；agent 用 `send_notification` 推送（按连接器权限需店长确认）。
 
 ### 浏览器
 
-`browser.enabled: true` 后 agent 可操作本机 Chrome/Edge（移植自 Toonflow-app 的浏览器工具），前端通过 `/api/browser/:id/stream` 实时观看、`/input` 接管；首次点击/输入需店长授权。
+在 `harness.config.json` 设置 `browser.enabled: true` 并重启网关后，agent 可操作本机 Chrome/Edge。浏览器使用内置 Puppeteer + CDP 驱动（移植自 Toonflow-app），无需另接 Chrome MCP 服务；`executablePath` 留空时自动查找本机浏览器。前端收到浏览器事件后自动展开实时画面，通过 `/api/browser/:id/stream` 观看、`/input` 接管；首次点击/输入需店长授权。画面可手动收起，切回标签页后自动恢复只读观看。
 
 ### 统一风格
 
@@ -100,6 +101,8 @@ npm run qdd -- reply <会话id> "按周汇总"
 | `npm run qdd -- style [--edit\|--reset]` | 风格提示词 |
 | `npm run qdd -- check` | 守卫重新审查所有页面 |
 | `npm test` | 计算引擎不变量、数据集回放/检查点/去重、HTTP MCP、会话与跨会话、并发锁、页面鉴权（模拟 LLM） |
+
+浏览器集成回归位于 `apps/cli/src/browser.test.ts`，使用本机 Chrome/Edge 与本地网页验证操作、授权和实时画面；没有本机浏览器时跳过。会话终态回归位于 `apps/cli/src/session-completion.test.ts`，验证状态持久化完成前保持运行锁。两者均通过 `npm test` 执行，使用 Node.js 内置测试器，测试文件命名为 `*.test.ts`。
 
 ## 目录结构
 

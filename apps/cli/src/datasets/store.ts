@@ -11,7 +11,7 @@ export interface ScanRange {
 }
 
 export type DatasetDefinition = Pick<DatasetManifest, "name" | "description" | "kind" | "fields" | "key"> &
-  Partial<Pick<DatasetManifest, "timeField" | "replay" | "source">>;
+  Partial<Pick<DatasetManifest, "timeField" | "replay" | "source" | "record">>;
 
 export interface Checkpoint {
   at: string;
@@ -27,7 +27,7 @@ export interface DatasetStore {
   get(name: string): Promise<DatasetManifest | undefined>;
   /** 创建或更新数据集定义（不影响已有数据）。 */
   define(def: DatasetDefinition): Promise<DatasetManifest>;
-  /** 追加行。同主键的行以最后写入为准（重复刷新幂等）。 */
+  /** 追加行。同主键的行以最后写入为准（重复刷新幂等）；最后一行带 __deleted: true 时该主键视为已删除。 */
   append(name: string, rows: Row[], watermark?: string): Promise<DatasetManifest>;
   /** 整体替换（维度表）。 */
   replace(name: string, rows: Row[], watermark?: string): Promise<DatasetManifest>;
@@ -45,6 +45,8 @@ export async function readAll(store: DatasetStore, name: string, range?: ScanRan
   return rows;
 }
 
+/** 墓碑标记：有主键的数据集中，同主键最后一行带此标记即视为删除。 */
+export const TOMBSTONE = "__deleted";
 const NAME_RE = /^[a-z0-9_]+(\/[a-z0-9_-]+)?$/;
 const ALL_PARTITION = "all";
 const LOCK_STALE_MS = 30_000;
@@ -156,7 +158,7 @@ export class JsonlDatasetStore implements DatasetStore {
         else yield row;
       }
     }
-    if (dedup) yield* dedup.values();
+    if (dedup) for (const row of dedup.values()) if (row[TOMBSTONE] !== true) yield row;
   }
 
   async putCheckpoint(name: string, checkpoint: Checkpoint): Promise<void> {

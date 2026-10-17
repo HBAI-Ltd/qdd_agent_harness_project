@@ -5,7 +5,7 @@ import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, before, describe, test } from "node:test";
-import type { BrowserStreamEvent, PendingItem, SessionMeta } from "@qdd/shared";
+import type { BrowserStreamEvent, PendingItem, SessionDetail, SessionEvent, SessionMeta } from "@qdd/shared";
 import type { ChatFn, ChatMessage } from "./agent/llm.js";
 import { loadConfig } from "./config.js";
 import { DataSources } from "./datasource/registry.js";
@@ -14,7 +14,17 @@ import { startGateway, type Gateway } from "./gateway/server.js";
 import { ensureWorkspace } from "./web/site.js";
 
 /** 需要本机 Chrome / Edge / Chromium；找不到时跳过。 */
+const browserEnv = Object.fromEntries(Object.entries(process.env).map(([key, value]) => [key.toUpperCase(), value]));
 const CHROME = [
+  ...(process.platform === "win32"
+    ? [browserEnv["PROGRAMFILES(X86)"], browserEnv.PROGRAMFILES, browserEnv.LOCALAPPDATA]
+      .filter((root): root is string => !!root)
+      .flatMap((root) => [
+        path.join(root, "Microsoft", "Edge", "Application", "msedge.exe"),
+        path.join(root, "Google", "Chrome", "Application", "chrome.exe"),
+        path.join(root, "Chromium", "Application", "chrome.exe"),
+      ])
+    : []),
   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
   "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
   "/usr/bin/google-chrome",
@@ -63,6 +73,30 @@ describe("浏览器工具（本机 Chrome）", { skip: CHROME ? false : "未找�
       if (Date.now() > end) throw new Error("等待超时");
       await new Promise((r) => setTimeout(r, 50));
     }
+  };
+  const watchStream = async <T>(route: string) => {
+    const controller = new AbortController();
+    const events: T[] = [];
+    const response = await api(route, { signal: controller.signal });
+    assert.equal(response.status, 200);
+    assert.match(response.headers.get("Content-Type") ?? "", /text\/event-stream/);
+    const reader = response.body!.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    void (async () => {
+      for (;;) {
+        const { value, done } = await reader.read().catch(() => ({ value: undefined, done: true }));
+        if (done) return;
+        buffer += decoder.decode(value, { stream: true });
+        let i;
+        while ((i = buffer.indexOf("\n\n")) >= 0) {
+          const chunk = buffer.slice(0, i);
+          buffer = buffer.slice(i + 2);
+          if (chunk.startsWith("data: ")) events.push(JSON.parse(chunk.slice(6)) as T);
+        }
+      }
+    })();
+    return { events, stop: () => controller.abort() };
   };
 
   before(async () => {
@@ -115,28 +149,10 @@ describe("浏览器工具（本机 Chrome）", { skip: CHROME ? false : "未找�
 
     // 授权前：前端订阅实时画面，应收到状态与画面帧
     const detail = (await (await api(`/api/sessions/${session.id}`)).json()) as { events: { type: string; browser?: { browserSessionId: string; tabId: string; url: string } }[] };
-    const state = detail.events.find((e) => e.type === "browser")!.browser!;
+    const state = detail.events.findLast((e) => e.type === "browser")!.browser!;
     assert.equal(state.url, siteUrl);
-    const controller = new AbortController();
-    const events: BrowserStreamEvent[] = [];
-    const res = await fetch(`${gateway.url}/api/browser/${state.browserSessionId}/stream?access_token=${TOKEN}`, { signal: controller.signal });
-    const reader = res.body!.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-    void (async () => {
-      for (;;) {
-        const { value, done } = await reader.read().catch(() => ({ value: undefined, done: true }));
-        if (done) return;
-        buffer += decoder.decode(value, { stream: true });
-        let i;
-        while ((i = buffer.indexOf("\n\n")) >= 0) {
-          const chunk = buffer.slice(0, i);
-          buffer = buffer.slice(i + 2);
-          if (chunk.startsWith("data: ")) events.push(JSON.parse(chunk.slice(6)) as BrowserStreamEvent);
-        }
-      }
-    })();
-    const frame = await until(async () => events.find((e) => e.type === "frame"));
+    const stream = await watchStream<BrowserStreamEvent>(`/api/browser/${state.browserSessionId}/stream`);
+    const frame = await until(async () => stream.events.find((e) => e.type === "frame"));
     assert.ok(frame.type === "frame" && frame.width > 0 && frame.data.length > 1000);
 
     await api(`/api/sessions/${session.id}/approvals/${pending.requestId}`, { method: "POST", body: JSON.stringify({ approved: true }) });
@@ -151,7 +167,67 @@ describe("浏览器工具（本机 Chrome）", { skip: CHROME ? false : "未找�
     const after = (await (await api(`/api/browser/${state.browserSessionId}/input`, { method: "POST", body: JSON.stringify({ tabId: state.tabId, type: "reload" }) })).json()) as { url: string };
     assert.equal(after.url, siteUrl);
     assert.equal((await api(`/api/browser/${state.browserSessionId}/input`, { method: "POST", body: JSON.stringify({ tabId: state.tabId, type: "navigate", url: "file:///etc/passwd" }) })).status, 400);
-    controller.abort();
+    stream.stop();
+  });
+
+  test("首次 open 导航未完成时即可看到浏览器事件并订阅实时画面", { timeout: 30_000 }, async (t) => {
+    let releaseNavigation: (() => void) | undefined;
+    const slowSite = createServer((req, res) => {
+      if (req.url === "/slow") {
+        releaseNavigation = () => {
+          if (!res.writableEnded && !res.destroyed) res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" }).end(PAGE);
+        };
+      } else res.writeHead(200).end();
+    });
+    await new Promise<void>((resolve) => slowSite.listen(0, "127.0.0.1", resolve));
+    const url = `http://127.0.0.1:${(slowSite.address() as { port: number }).port}/slow`;
+    let sessionId: string | undefined;
+    let stopSessionStream = () => {};
+    let stopBrowserStream = () => {};
+    t.after(async () => {
+      releaseNavigation?.();
+      stopSessionStream();
+      stopBrowserStream();
+      if (sessionId) {
+        gateway.hub.cancel(sessionId);
+        await gateway.hub.wait(sessionId);
+        await gateway.workbench.browser?.closeSession(sessionId);
+      }
+      await new Promise<void>((resolve, reject) => slowSite.close((error) => error ? reject(error) : resolve()));
+    });
+    let openFinished = false;
+    script = [
+      () => call("browser", { action: "open", url }),
+      () => {
+        openFinished = true;
+        return call("reply", { text: "网页已打开", gaps: [] });
+      },
+    ];
+    const session = (await (await api("/api/wishes", { method: "POST", body: JSON.stringify({ wish: "打开加载中的网页" }) })).json()) as SessionMeta;
+    sessionId = session.id;
+    const sessionStream = await watchStream<SessionEvent>(`/api/sessions/${session.id}/events`);
+    stopSessionStream = sessionStream.stop;
+    const earlyEvent = await until(async () => releaseNavigation && sessionStream.events.find((event) => event.type === "browser"));
+    assert.equal(earlyEvent.type, "browser");
+    if (earlyEvent.type !== "browser") throw new Error("缺少浏览器事件");
+    assert.equal(earlyEvent.browser.url, "about:blank");
+    assert.equal(openFinished, false, "浏览器事件应在 open 返回前发布");
+    assert.equal(gateway.hub.isRunning(session.id), true);
+
+    const browserStream = await watchStream<BrowserStreamEvent>(`/api/browser/${earlyEvent.browser.browserSessionId}/stream`);
+    stopBrowserStream = browserStream.stop;
+    const state = await until(async () => browserStream.events.find((event) => event.type === "state"));
+    assert.ok(state.type === "state" && state.session.browserSessionId === earlyEvent.browser.browserSessionId);
+    const frame = await until(async () => browserStream.events.find((event) => event.type === "frame"));
+    assert.ok(frame.type === "frame" && frame.data.length > 1000);
+    assert.equal(openFinished, false, "首次导航仍在等待时已建立实时画面流");
+
+    releaseNavigation!();
+    assert.equal((await gateway.hub.wait(session.id)).status, "idle");
+    assert.equal(openFinished, true);
+    const detail = (await (await api(`/api/sessions/${session.id}`)).json()) as SessionDetail;
+    assert.equal(detail.events.findLast((event) => event.type === "browser")?.browser.url, url);
+    await until(async () => browserStream.events.find((event) => event.type === "state" && event.session.url === url));
   });
 
   test("回归：点击下拉选项会选中；不可点击（零尺寸）的元素限时报错且不关闭会话；参数错误给出可读提示", { timeout: 60_000 }, async () => {

@@ -33,24 +33,25 @@ export function createBrowserViewer(state: BrowserViewerState, credentials: () =
   let inputController: AbortController | undefined;
   let connection: { base: string; token: string; id: string } | undefined;
   type KeyboardAction = Extract<BrowserInput, { type: "text" | "key" }>;
-  type QueuedKeyboard = { action: KeyboardAction; resolve: (sent: boolean) => void };
-  let keyboardVersion = 0;
+  type PointerAction = Extract<BrowserInput, { type: "mouse" | "wheel" }>;
+  type QueuedInput = { action: KeyboardAction | PointerAction; resolve: (sent: boolean) => void };
+  let queueVersion = 0;
   let drainingVersion: number | undefined;
-  let keyboardQueue: QueuedKeyboard[] = [];
-  let activeKeyboard: QueuedKeyboard | undefined;
+  let inputQueue: QueuedInput[] = [];
+  let activeInput: QueuedInput | undefined;
   const inputIdle = new Set<() => void>();
 
   function wakeInputWaiters() {
     for (const resolve of inputIdle) resolve();
     inputIdle.clear();
   }
-  function clearKeyboardQueue() {
-    keyboardVersion++;
+  function clearInputQueue() {
+    queueVersion++;
     drainingVersion = undefined;
-    for (const item of keyboardQueue) item.resolve(false);
-    keyboardQueue = [];
-    activeKeyboard?.resolve(false);
-    activeKeyboard = undefined;
+    for (const item of inputQueue) item.resolve(false);
+    inputQueue = [];
+    activeInput?.resolve(false);
+    activeInput = undefined;
     wakeInputWaiters();
   }
   function controlReady(): boolean {
@@ -70,7 +71,7 @@ export function createBrowserViewer(state: BrowserViewerState, credentials: () =
     inputController?.abort();
     streamController = undefined;
     inputController = undefined;
-    clearKeyboardQueue();
+    clearInputQueue();
     release();
     connection = undefined;
     state.frame = undefined;
@@ -85,7 +86,7 @@ export function createBrowserViewer(state: BrowserViewerState, credentials: () =
       inputController?.abort();
       inputController = undefined;
       state.inputBusy = false;
-      clearKeyboardQueue();
+      clearInputQueue();
       if (state.manual) release();
       state.manual = false;
       state.frame = undefined;
@@ -147,7 +148,7 @@ export function createBrowserViewer(state: BrowserViewerState, credentials: () =
     inputController?.abort();
     inputController = undefined;
     state.inputBusy = false;
-    clearKeyboardQueue();
+    clearInputQueue();
     release();
   }
   function setManual(manual: boolean) {
@@ -157,7 +158,7 @@ export function createBrowserViewer(state: BrowserViewerState, credentials: () =
   }
   async function input(action: BrowserInput): Promise<boolean> {
     if (!controlReady() || !state.session || !connection || state.inputBusy) return false;
-    if (["navigate", "back", "forward", "reload"].includes(action.type)) clearKeyboardQueue();
+    if (["navigate", "back", "forward", "reload"].includes(action.type)) clearInputQueue();
     const { base, token, id } = connection;
     const tabId = state.session.tabId;
     const current = version;
@@ -173,12 +174,12 @@ export function createBrowserViewer(state: BrowserViewerState, credentials: () =
       return true;
     } catch (cause) {
       if (current !== version || controller.signal.aborted) return false;
-      clearKeyboardQueue();
+      clearInputQueue();
+      release(tabId);
       state.error = cause instanceof Error ? cause.message : "浏览器操作失败。";
       if (cause && typeof cause === "object" && "status" in cause && cause.status === 409) {
         state.frame = undefined;
         state.manual = false;
-        release(tabId);
         state.error = "页面状态已变化，这次输入未重试。请等待新画面后重新开启人工接管。";
       }
       return false;
@@ -190,29 +191,29 @@ export function createBrowserViewer(state: BrowserViewerState, credentials: () =
       }
     }
   }
-  async function drainKeyboardQueue() {
+  async function drainInputQueue() {
     if (drainingVersion !== undefined) return;
-    const current = keyboardVersion;
+    const current = queueVersion;
     drainingVersion = current;
     try {
-      while (current === keyboardVersion && keyboardQueue.length) {
+      while (current === queueVersion && inputQueue.length) {
         if (state.inputBusy) {
           await new Promise<void>((resolve) => inputIdle.add(resolve));
           continue;
         }
         if (!controlReady()) {
-          clearKeyboardQueue();
+          clearInputQueue();
           return;
         }
-        const item = keyboardQueue.shift();
+        const item = inputQueue.shift();
         if (!item) break;
-        activeKeyboard = item;
+        activeInput = item;
         const sent = await input(item.action);
-        if (activeKeyboard === item) activeKeyboard = undefined;
+        if (activeInput === item) activeInput = undefined;
         item.resolve(sent);
-        if (current !== keyboardVersion) return;
+        if (current !== queueVersion) return;
         if (!sent) {
-          clearKeyboardQueue();
+          clearInputQueue();
           return;
         }
       }
@@ -220,12 +221,20 @@ export function createBrowserViewer(state: BrowserViewerState, credentials: () =
       if (drainingVersion === current) drainingVersion = undefined;
     }
   }
-  function queueKeyboard(action: KeyboardAction): Promise<boolean> {
+  function queueInput(action: KeyboardAction | PointerAction): Promise<boolean> {
     if (!controlReady()) return Promise.resolve(false);
     return new Promise((resolve) => {
-      keyboardQueue.push({ action: { ...action }, resolve });
-      void drainKeyboardQueue();
+      const last = inputQueue.at(-1);
+      // Preserve press/release/key boundaries while bounding a burst of pointer movement.
+      if (action.type === "mouse" && action.event === "move"
+        && last?.action.type === "mouse" && last.action.event === "move") {
+        last.resolve(false);
+        inputQueue[inputQueue.length - 1] = { action: { ...action }, resolve };
+      } else inputQueue.push({ action: { ...action }, resolve });
+      void drainInputQueue();
     });
   }
-  return { start, stop, setManual, releaseInput, input, queueKeyboard };
+  const queueKeyboard = (action: KeyboardAction) => queueInput(action);
+  const queuePointer = (action: PointerAction) => queueInput(action);
+  return { start, stop, setManual, releaseInput, input, queueKeyboard, queuePointer };
 }

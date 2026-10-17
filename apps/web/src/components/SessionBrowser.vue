@@ -15,8 +15,13 @@ const image = ref<HTMLImageElement>();
 const displayedFrame = ref(0);
 const address = ref("");
 const text = ref("");
+const pressedButtons = new Set<number>();
+let unmounted = false;
+let pageActive = true;
+let pausedForVisibility = false;
 const source = computed(() => state.frame ? `data:image/jpeg;base64,${state.frame.data}` : "");
-const canControl = computed(() => state.manual && state.online && !!state.frame && displayedFrame.value === state.frame.sequence && !state.inputBusy);
+const canPoint = computed(() => state.manual && state.online && !!state.frame && displayedFrame.value === state.frame.sequence);
+const canControl = computed(() => canPoint.value && !state.inputBusy);
 const canType = computed(() => state.manual && state.online && !!state.frame && state.frame.tabId === state.session?.tabId);
 const modifiers = (event: MouseEvent | WheelEvent | KeyboardEvent): ("Alt" | "Control" | "Meta" | "Shift")[] => {
   const result: ("Alt" | "Control" | "Meta" | "Shift")[] = [];
@@ -33,35 +38,57 @@ watch(() => state.frame?.sequence, () => {
 });
 watch([() => props.sessionId, () => props.browser.browserSessionId, workspace.gatewayUrl, workspace.token], () => {
   text.value = "";
-  void viewer.start(props.browser);
+  startWatching();
 }, { immediate: true });
 watch(() => props.browser.status, (status) => {
   if (status === "closed") {
+    pausedForVisibility = false;
     viewer.stop();
     state.session = props.browser;
   }
 });
 
+watch(() => state.manual, (manual) => { if (!manual) pressedButtons.clear(); }, { flush: "sync" });
+
 function loadedFrame(event: Event) {
   if (event.target instanceof HTMLImageElement && event.target.currentSrc === source.value) displayedFrame.value = state.frame?.sequence ?? 0;
 }
 function point(event: MouseEvent | WheelEvent) {
-  if (!canControl.value || !image.value || !state.frame) return;
+  if (!canPoint.value || !image.value || !state.frame) return;
   return frameCoordinates(event.clientX, event.clientY, image.value.getBoundingClientRect(), state.frame);
 }
-function click(event: MouseEvent) {
+function mouse(event: MouseEvent, kind: "move" | "down" | "up") {
+  if (kind !== "move" && ![0, 1, 2].includes(event.button)) return;
+  if (kind === "move" && pressedButtons.size && event.buttons === 0) releasePointer();
+  if (kind === "up" && !pressedButtons.has(event.button)) return;
   const coordinates = point(event);
-  if (!coordinates) return;
+  if (!coordinates) {
+    if (kind === "up") releasePointer();
+    return;
+  }
   event.preventDefault();
-  (event.currentTarget as HTMLElement).focus();
-  void viewer.input({ type: "click", ...coordinates, button: event.button === 2 ? "right" : "left", modifiers: modifiers(event) });
+  if (kind === "down") {
+    pressedButtons.add(event.button);
+    (event.currentTarget as HTMLElement).focus();
+  } else if (kind === "up") pressedButtons.delete(event.button);
+  // Down/up already produce browser click/dblclick events; never send an extra click.
+  void viewer.queuePointer({
+    type: "mouse", event: kind, ...coordinates,
+    ...(kind !== "move" ? { button: event.button === 2 ? "right" : event.button === 1 ? "middle" : "left", clickCount: event.detail >= 2 ? 2 : 1 } : {}),
+    modifiers: modifiers(event),
+  });
+}
+function releasePointer() {
+  const shouldRelease = state.manual || pressedButtons.size > 0;
+  pressedButtons.clear();
+  if (shouldRelease) viewer.releaseInput();
 }
 function wheel(event: WheelEvent) {
   const coordinates = point(event);
   if (!coordinates) return;
   event.preventDefault();
   const factor = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? 800 : 1;
-  void viewer.input({ type: "wheel", ...coordinates, deltaX: Math.max(-10000, Math.min(10000, event.deltaX * factor)), deltaY: Math.max(-10000, Math.min(10000, event.deltaY * factor)), modifiers: modifiers(event) });
+  void viewer.queuePointer({ type: "wheel", ...coordinates, deltaX: Math.max(-10000, Math.min(10000, event.deltaX * factor)), deltaY: Math.max(-10000, Math.min(10000, event.deltaY * factor)), modifiers: modifiers(event) });
 }
 function key(event: KeyboardEvent) {
   if (!canType.value || event.isComposing || ["Control", "Alt", "Meta", "Shift", "Dead", "Process", "Unidentified"].includes(event.key)) return;
@@ -99,14 +126,42 @@ function navigate() {
 function command(type: "back" | "forward" | "reload") {
   void viewer.input({ type } as BrowserInput);
 }
-function pause() { viewer.stop(); }
-function visibility() { if (document.visibilityState !== "visible") pause(); }
+function startWatching() {
+  if (unmounted) return;
+  pausedForVisibility = false;
+  if (!pageActive || document.visibilityState !== "visible") {
+    viewer.stop();
+    state.session = props.browser;
+    pausedForVisibility = props.browser.status !== "closed";
+    return;
+  }
+  void viewer.start(props.browser);
+}
+function blur() { viewer.setManual(false); }
+function pagehide() { pageActive = false; visibility(); }
+function pageshow() { pageActive = true; visibility(); }
+function visibility() {
+  if (unmounted) return;
+  if (!pageActive || document.visibilityState !== "visible") {
+    pausedForVisibility = props.browser.status !== "closed" && state.session?.status !== "closed";
+    viewer.stop();
+  } else if (pausedForVisibility) {
+    pausedForVisibility = false;
+    if (props.browser.status !== "closed" && state.session?.status !== "closed") startWatching();
+  }
+}
 onMounted(() => {
-  window.addEventListener("blur", pause);
+  window.addEventListener("blur", blur);
+  window.addEventListener("pagehide", pagehide);
+  window.addEventListener("pageshow", pageshow);
   document.addEventListener("visibilitychange", visibility);
 });
 onBeforeUnmount(() => {
-  window.removeEventListener("blur", pause);
+  unmounted = true;
+  pausedForVisibility = false;
+  window.removeEventListener("blur", blur);
+  window.removeEventListener("pagehide", pagehide);
+  window.removeEventListener("pageshow", pageshow);
   document.removeEventListener("visibilitychange", visibility);
   viewer.stop();
 });
@@ -116,7 +171,7 @@ onBeforeUnmount(() => {
   <section class="session-browser" aria-label="会话实时浏览器">
     <header class="browser-heading">
       <div><AgentIcon name="code" :size="18" /><strong>实时浏览器</strong><ElTag size="small" :type="state.manual ? 'warning' : 'info'">{{ state.session?.status === "closed" ? "已关闭" : state.manual ? "人工接管中" : "只读观看" }}</ElTag></div>
-      <div><ElButton text circle aria-label="重新连接浏览器画面" title="重新连接画面" :disabled="state.connecting || state.session?.status === 'closed'" @click="viewer.start(props.browser)"><AgentIcon name="refresh" :size="16" /></ElButton><ElButton text circle aria-label="关闭实时浏览器画面" @click="emit('close')"><AgentIcon name="close" :size="17" /></ElButton></div>
+      <div><ElButton text circle aria-label="重新连接浏览器画面" title="重新连接画面" :disabled="state.connecting || state.session?.status === 'closed'" @click="startWatching"><AgentIcon name="refresh" :size="16" /></ElButton><ElButton text circle aria-label="关闭实时浏览器画面" @click="emit('close')"><AgentIcon name="close" :size="17" /></ElButton></div>
     </header>
     <div class="browser-control-mode">
       <span>{{ state.manual ? "你正在操作当前画面" : "开启人工接管后，可以在画面中点击和输入" }}</span>
@@ -136,23 +191,29 @@ onBeforeUnmount(() => {
       :tabindex="state.manual ? 0 : -1"
       role="region"
       :aria-label="state.manual ? '浏览器操作画面，点击后可直接输入' : '浏览器只读实时画面'"
-      @click="click"
-      @contextmenu="click"
+      @mousedown="mouse($event, 'down')"
+      @mousemove="mouse($event, 'move')"
+      @mouseup="mouse($event, 'up')"
+      @mouseleave="releasePointer"
+      @click.stop.prevent
+      @dblclick.stop.prevent
+      @contextmenu.prevent
+      @auxclick.prevent
       @wheel="wheel"
       @keydown="key"
       @compositionend="compose"
       @paste="paste"
-      @blur="viewer.releaseInput()">
+      @blur="releasePointer">
       <img v-if="source" ref="image" :src="source" :alt="state.session?.title || '浏览器实时画面'" draggable="false" @load="loadedFrame" @error="state.error = '无法显示浏览器画面，请重新连接。'" />
       <div v-else class="browser-placeholder">
         <AgentIcon name="code" :size="26" />
         <p>{{ state.session?.status === "closed" ? "此浏览器会话已关闭" : state.connecting ? "正在连接实时画面…" : state.online ? "等待浏览器画面…" : "实时画面已暂停" }}</p>
-        <ElButton v-if="!state.connecting && !state.online && state.session?.status !== 'closed'" size="small" @click="viewer.start(props.browser)">重新连接</ElButton>
+        <ElButton v-if="!state.connecting && !state.online && state.session?.status !== 'closed'" size="small" @click="startWatching">重新连接</ElButton>
       </div>
     </div>
     <footer class="browser-footer">
       <form class="browser-text" @submit.prevent="sendText"><ElInput v-model="text" size="small" :disabled="!canControl" :maxlength="20000" aria-label="向浏览器输入文本" placeholder="需要输入的文字（支持中文）" /><ElButton size="small" :disabled="!canControl || !text" native-type="submit">输入文本</ElButton></form>
-      <p>{{ state.manual ? "在画面内点击、滚动或按键；窗口失焦时会暂停画面并释放输入。" : "画面按当前会话隔离。只读模式不会向网页发送操作。" }}</p>
+      <p>{{ state.manual ? "在画面内点击、双击、拖动、滚动或按键；移出画面会释放输入，窗口失焦时会退出人工接管。" : "画面按当前会话隔离。只读模式不会向网页发送操作；返回此页面后自动恢复观看。" }}</p>
     </footer>
   </section>
 </template>

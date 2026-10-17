@@ -3,8 +3,10 @@ import { computed, defineAsyncComponent, nextTick, onMounted, ref, watch } from 
 import { ElButton, ElCard, ElInput, type InputInstance } from "element-plus";
 import type { SessionEvent } from "@qdd/shared";
 import AgentIcon from "@/components/AgentIcon.vue";
+import MarkdownContent from "@/components/MarkdownContent.vue";
 import SessionActions from "@/components/SessionActions.vue";
 import { useWorkspaceContext } from "@/composables/workspaceContext";
+import { buildChatTimeline, toolStatus, toolTitle } from "@/utils/chatTimeline";
 
 const SessionBrowser = defineAsyncComponent(() => import("@/components/SessionBrowser.vue"));
 
@@ -35,11 +37,7 @@ const composerHint = computed(() => {
   if (responding.value) return "可先编写下一条消息 · 点击停止可结束回复";
   return preferences.value.enterToSend ? "Enter 发送 · Shift + Enter 换行" : "点击发送 · Enter 换行";
 });
-const timeline = computed(() =>
-  [...(activeSession.value?.events ?? []), ...(pendingMessage.value ? [pendingMessage.value] : [])]
-    .map((event, index) => ({ event, key: event === pendingMessage.value ? "pending" : index }))
-    .filter(({ event }) => ["user", "say", "tool", "skill", "browser", "warn", "error", "published", "gaps"].includes(event.type)),
-);
+const timeline = computed(() => buildChatTimeline(activeSession.value?.events ?? [], pendingMessage.value));
 const suggestions = [
   { title: "经营看板", description: "查看销售与毛利，发现经营机会", prompt: "展示最近 30 天各品类销售额和毛利" },
   { title: "库存分析", description: "梳理库存变化，掌握门店状态", prompt: "帮我查看当前库存，并分析最近一周的变化" },
@@ -75,6 +73,9 @@ function eventText(event: SessionEvent): string {
   if (event.type === "published") return `页面已发布：${event.page.title}`;
   return "";
 }
+function formatToolInput(input: Record<string, unknown>): string {
+  return JSON.stringify(input, null, 2);
+}
 async function copyMessage(content: string) {
   try {
     await navigator.clipboard.writeText(content);
@@ -87,8 +88,15 @@ watch([activeSessionId, () => activeSession.value?.id], () => {
   void scrollToLatest();
   focusComposer();
 });
-watch(activeSessionId, () => { browserOpen.value = false; });
-watch([() => timeline.value.length, activityLabel], async () => {
+watch([
+  activeSessionId,
+  () => activeSession.value?.id,
+  () => latestBrowser.value?.browserSessionId,
+  () => latestBrowser.value?.status,
+], () => {
+  browserOpen.value = activeSession.value?.id === activeSessionId.value && latestBrowser.value?.status === "running";
+}, { immediate: true });
+watch([() => activeSession.value?.events.length, pendingMessage, activityLabel], async () => {
   const element = messageList.value;
   const nearBottom = !element || element.scrollHeight - element.scrollTop - element.clientHeight < 100;
   if (nearBottom) await scrollToLatest();
@@ -128,46 +136,87 @@ onMounted(() => {
       <div class="chat-messages">
         <article
           v-for="entry in timeline"
-          :key="entry.key"
+          :key="`${activeSessionId ?? 'draft'}:${entry.key}`"
           class="chat-message"
-          :class="entry.event.type === 'user' ? 'chat-message-user' : 'chat-message-assistant'">
-          <span class="chat-avatar" :class="{ 'chat-avatar-assistant': entry.event.type !== 'user' }">
-            <span v-if="entry.event.type === 'user'">Q</span>
+          :class="entry.kind === 'user' ? 'chat-message-user' : 'chat-message-assistant'">
+          <span class="chat-avatar" :class="{ 'chat-avatar-assistant': entry.kind !== 'user' }">
+            <span v-if="entry.kind === 'user'">Q</span>
             <AgentIcon v-else name="spark" :size="18" />
           </span>
           <div class="chat-message-main">
-            <template v-if="entry.event.type === 'tool'">
-              <div class="chat-message-meta"><strong>执行进度</strong><time :datetime="entry.event.at">{{ new Date(entry.event.at).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }) }}</time></div>
-              <div class="chat-tool"><span>工具</span><div>{{ entry.event.text }}</div></div>
-            </template>
-            <div v-else-if="entry.event.type === 'skill'" class="chat-skill">
-              <span class="chat-skill-kind">技能</span>
-              <div><strong>{{ entry.event.skill.name }}</strong><span>{{ entry.event.action === "loaded" ? "已加载，按技能步骤继续执行" : "已保存，可在技能页面复用" }}</span></div>
-              <ElButton link type="primary" @click="openView('skills')">查看技能<AgentIcon name="chevron" :size="13" /></ElButton>
+            <div v-if="entry.kind === 'user'" class="chat-bubble">
+              <p class="chat-message-text">{{ entry.event.text }}</p>
             </div>
-            <div v-else-if="entry.event.type === 'browser'" class="chat-browser-event">
-              <AgentIcon name="code" :size="17" />
-              <div><strong>{{ entry.event.browser.status === "closed" ? "浏览器已关闭" : "会话浏览器已打开" }}</strong><span>{{ entry.event.browser.title || entry.event.browser.url }}</span></div>
-              <ElButton v-if="latestBrowser" link type="primary" @click="browserOpen = !browserOpen">{{ browserOpen ? "收起画面" : "查看实时画面" }}</ElButton>
-            </div>
-            <div v-else class="chat-bubble" :class="{ 'chat-bubble-warning': entry.event.type === 'warn' || entry.event.type === 'gaps', 'chat-bubble-error': entry.event.type === 'error' }">
-              <div v-if="entry.event.type !== 'user'" class="chat-message-meta">
+            <template v-else>
+              <div class="chat-message-meta">
                 <strong>门店助手</strong>
-                <time :datetime="entry.event.at">{{ new Date(entry.event.at).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }) }}</time>
+                <time :datetime="entry.at">{{ new Date(entry.at).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }) }}</time>
               </div>
-              <div v-if="entry.event.type === 'gaps'" class="chat-gaps">
-                <div v-for="(gap, index) in entry.event.gaps" :key="index">
-                  <strong>{{ gapLabels[gap.kind] }} · {{ gap.item }}</strong>
-                  <p>{{ gap.reason }}</p>
-                  <p v-if="gap.suggestion">{{ gap.suggestion }}</p>
+              <div v-if="entry.activities.length" class="chat-activities" aria-label="思考与执行过程">
+                <details v-for="activity in entry.activities" :key="activity.key" class="chat-process" :data-kind="activity.event.type" :data-status="activity.event.type === 'tool' ? activity.event.status : undefined">
+                  <summary class="chat-process-summary">
+                    <AgentIcon class="chat-process-chevron" name="chevron" :size="13" />
+                    <AgentIcon :name="activity.event.type === 'thinking' ? 'thinking' : activity.event.type === 'browser' ? 'code' : activity.event.type === 'skill' ? 'plan' : 'tool'" :size="15" />
+                    <template v-if="activity.event.type === 'tool'">
+                      <span class="chat-process-name" :title="toolTitle(activity.event)">{{ toolTitle(activity.event) }}</span>
+                      <span class="chat-process-status">{{ toolStatus(activity.event) }}</span>
+                    </template>
+                    <template v-else-if="activity.event.type === 'thinking'">
+                      <span class="chat-process-name">思考</span>
+                    </template>
+                    <template v-else-if="activity.event.type === 'skill'">
+                      <span class="chat-process-name">{{ activity.event.skill.name }}</span>
+                      <span class="chat-process-status">{{ activity.event.action === 'loaded' ? '已加载' : '已保存' }}</span>
+                    </template>
+                    <template v-else-if="activity.event.type === 'browser'">
+                      <span class="chat-process-name">浏览器</span>
+                      <span class="chat-process-status">{{ activity.event.browser.status === 'closed' ? '已关闭' : '已打开' }}</span>
+                    </template>
+                  </summary>
+                  <div class="chat-process-details">
+                    <MarkdownContent v-if="activity.event.type === 'thinking'" :content="activity.event.text" />
+                    <template v-else-if="activity.event.type === 'tool'">
+                      <template v-if="activity.event.input">
+                        <p class="chat-process-label">参数</p>
+                        <pre class="chat-process-data" tabindex="0" aria-label="工具参数">{{ formatToolInput(activity.event.input) }}</pre>
+                      </template>
+                      <template v-if="activity.progress.length">
+                        <p class="chat-process-label">执行详情</p>
+                        <p v-for="(text, index) in activity.progress" :key="index" class="chat-process-text">{{ text }}</p>
+                      </template>
+                      <template v-if="activity.event.output !== undefined">
+                        <p class="chat-process-label">{{ activity.event.status === 'failed' ? '错误详情' : '结果' }}</p>
+                        <pre class="chat-process-data" tabindex="0" aria-label="工具结果">{{ activity.event.output }}</pre>
+                      </template>
+                      <p v-if="!activity.event.input && !activity.progress.length && activity.event.output === undefined" class="chat-process-text">{{ activity.event.text }}</p>
+                    </template>
+                    <template v-else-if="activity.event.type === 'skill'">
+                      <p class="chat-process-text">{{ activity.event.action === 'loaded' ? '已加载，按技能步骤继续执行。' : '已保存，可在技能页面复用。' }}</p>
+                      <ElButton link type="primary" @click="openView('skills')">查看技能<AgentIcon name="chevron" :size="13" /></ElButton>
+                    </template>
+                    <template v-else-if="activity.event.type === 'browser'">
+                      <p class="chat-process-text">{{ activity.event.browser.title || activity.event.browser.url }}</p>
+                      <p v-if="activity.event.browser.title" class="chat-process-text">{{ activity.event.browser.url }}</p>
+                      <ElButton v-if="activity.event.browser.status === 'running' && latestBrowser?.status === 'running' && activity.event.browser.browserSessionId === latestBrowser.browserSessionId" link type="primary" @click="browserOpen = !browserOpen">{{ browserOpen ? '收起画面' : '查看实时画面' }}</ElButton>
+                    </template>
+                  </div>
+                </details>
+              </div>
+              <div v-for="message in entry.messages" :key="message.key" class="chat-answer" :class="{ 'chat-bubble-warning': message.event.type === 'warn' || message.event.type === 'gaps', 'chat-bubble-error': message.event.type === 'error' }">
+                <div v-if="message.event.type === 'gaps'" class="chat-gaps">
+                  <div v-for="(gap, index) in message.event.gaps" :key="index">
+                    <strong>{{ gapLabels[gap.kind] }} · {{ gap.item }}</strong>
+                    <p>{{ gap.reason }}</p>
+                    <p v-if="gap.suggestion">{{ gap.suggestion }}</p>
+                  </div>
+                </div>
+                <MarkdownContent v-else class="chat-message-text chat-message-markdown" :content="eventText(message.event)" />
+                <div v-if="message.event.type === 'say' || message.event.type === 'published'" class="chat-message-actions">
+                  <ElButton v-if="message.event.type === 'say'" link @click="copyMessage(message.event.text)"><AgentIcon name="copy" :size="14" />复制</ElButton>
+                  <ElButton v-if="message.event.type === 'published'" link type="primary" @click="openPage(message.event.page.slug)">查看页面<AgentIcon name="chevron" :size="13" /></ElButton>
                 </div>
               </div>
-              <p v-else class="chat-message-text">{{ eventText(entry.event) }}</p>
-              <div v-if="entry.event.type === 'say' || entry.event.type === 'published'" class="chat-message-actions">
-                <ElButton v-if="entry.event.type === 'say'" link @click="copyMessage(entry.event.text)"><AgentIcon name="copy" :size="14" />复制</ElButton>
-                <ElButton v-if="entry.event.type === 'published'" link type="primary" @click="openPage(entry.event.page.slug)">查看页面<AgentIcon name="chevron" :size="13" /></ElButton>
-              </div>
-            </div>
+            </template>
           </div>
         </article>
         <article v-if="activityLabel" class="chat-message chat-message-assistant chat-activity" role="status" aria-live="polite" aria-atomic="true">
@@ -230,7 +279,7 @@ onMounted(() => {
       <div class="chat-composer-footer">
         <div class="chat-conversation-actions">
           <ElButton v-if="activeSession?.slug" link type="primary" @click="openPage(activeSession.slug)">查看生成页面</ElButton>
-          <ElButton v-if="latestBrowser" link @click="browserOpen = !browserOpen">{{ browserOpen ? "收起浏览器" : "查看浏览器" }}</ElButton>
+          <ElButton v-if="latestBrowser?.status === 'running'" link @click="browserOpen = !browserOpen">{{ browserOpen ? "收起浏览器" : "查看浏览器" }}</ElButton>
         </div>
         <p class="chat-keyboard-hint">{{ composerHint }}</p>
       </div>
@@ -267,6 +316,9 @@ onMounted(() => {
 .chat-message-meta strong { color: var(--qdd-text); font-size: 13px; font-weight: 600; }
 .chat-message-meta time { margin-left: auto; }
 .chat-message-text { margin: 0; font-size: 14px; line-height: 1.8; white-space: pre-wrap; overflow-wrap: anywhere; }
+.chat-message-markdown { white-space: normal; }
+.chat-answer { min-width: 0; }
+.chat-answer + .chat-answer { margin-top: 16px; }
 .chat-message-actions { display: flex; margin-top: 10px; }
 .chat-message-actions :deep(.el-button) { color: var(--qdd-muted); font-size: 12px; }
 .chat-message-actions :deep(.el-button--primary) { color: var(--qdd-primary); }
@@ -278,18 +330,26 @@ onMounted(() => {
 .chat-loading-dots i:nth-child(2) { animation-delay: .16s; }
 .chat-loading-dots i:nth-child(3) { animation-delay: .32s; }
 @keyframes chat-loading-pulse { 0%, 80%, 100% { opacity: .35; transform: translateY(0); } 40% { opacity: 1; transform: translateY(-3px); } }
-.chat-tool { display: flex; align-items: flex-start; gap: 10px; padding: 10px 13px; border: 1px solid var(--qdd-border); border-radius: 8px; background: var(--qdd-surface); color: var(--qdd-text); font-size: 13px; line-height: 1.7; }
-.chat-tool > span { flex: 0 0 auto; margin-top: 1px; padding: 0 6px; border-radius: 4px; background: var(--qdd-bg); color: var(--qdd-muted); font-size: 11px; }
-.chat-tool > div { min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
-.chat-skill, .chat-browser-event { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; padding: 14px 16px; border: 1px solid var(--qdd-border); border-radius: 9px; background: var(--qdd-surface); }
-.chat-skill-kind { flex: 0 0 auto; padding: 2px 7px; border-radius: 4px; background: var(--qdd-primary-soft); color: var(--qdd-primary); font-size: 11px; }
-.chat-skill > div, .chat-browser-event > div { flex: 1; min-width: 100px; }
-.chat-skill strong, .chat-browser-event strong { display: block; color: var(--qdd-text); font-size: 14px; font-weight: 600; }
-.chat-skill > div > span, .chat-browser-event > div > span { display: block; margin-top: 3px; color: var(--qdd-muted); font-size: 12px; overflow-wrap: anywhere; }
-.chat-skill :deep(.el-button), .chat-browser-event :deep(.el-button) { margin: 0; font-size: 12px; }
-.chat-browser-event > svg { color: var(--qdd-primary); }
-.chat-bubble-warning { background: color-mix(in srgb, var(--qdd-warn) 5%, var(--qdd-surface)); border-color: color-mix(in srgb, var(--qdd-warn) 30%, var(--qdd-border)); }
-.chat-bubble-error { color: var(--qdd-bad); border-color: color-mix(in srgb, var(--qdd-bad) 30%, var(--qdd-border)); }
+.chat-activities { display: grid; gap: 2px; min-width: 0; margin: 0 0 14px; }
+.chat-process { min-width: 0; color: var(--qdd-muted); font-size: 13px; }
+.chat-process-summary { display: flex; align-items: center; gap: 7px; min-height: 30px; width: fit-content; max-width: 100%; padding: 3px 6px 3px 0; border-radius: 5px; cursor: pointer; list-style: none; line-height: 1.6; }
+.chat-process-summary::-webkit-details-marker { display: none; }
+.chat-process-summary:hover { color: var(--qdd-text); background: var(--qdd-hover); }
+.chat-process-summary:focus-visible { outline: 2px solid var(--qdd-primary); outline-offset: 2px; }
+.chat-process-summary > svg { flex: 0 0 auto; }
+.chat-process-chevron { transition: transform .15s; }
+.chat-process[open] > .chat-process-summary .chat-process-chevron { transform: rotate(90deg); }
+.chat-process-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-process-status { flex: 0 0 auto; font-size: 12px; }
+.chat-process[data-status="failed"] .chat-process-status { color: var(--qdd-bad); }
+.chat-process[data-status="running"] .chat-process-status { color: var(--qdd-primary); }
+.chat-process-details { display: grid; gap: 8px; min-width: 0; margin: 5px 0 10px 6px; padding: 6px 0 6px 18px; border-left: 2px solid var(--qdd-border); color: var(--qdd-text); }
+.chat-process-label { margin: 0; color: var(--qdd-muted); font-size: 12px; }
+.chat-process-data { max-width: 100%; max-height: 280px; margin: 0; padding: 12px; overflow: auto; overscroll-behavior: contain; border: 1px solid var(--qdd-border); border-radius: 8px; background: var(--qdd-surface); font: 12px/1.65 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre; }
+.chat-process-text { margin: 0; line-height: 1.7; white-space: pre-wrap; overflow-wrap: anywhere; }
+.chat-process-details :deep(.el-button) { justify-self: start; margin: 0; font-size: 12px; }
+.chat-bubble-warning { padding: 12px 14px; border-left: 2px solid var(--qdd-warn); border-radius: 6px; background: color-mix(in srgb, var(--qdd-warn) 5%, var(--qdd-surface)); }
+.chat-bubble-error { padding: 12px 14px; border-left: 2px solid var(--qdd-bad); border-radius: 6px; color: var(--qdd-bad); background: color-mix(in srgb, var(--qdd-bad) 5%, var(--qdd-surface)); }
 .chat-gaps { display: grid; gap: 12px; font-size: 13px; line-height: 1.8; }
 .chat-gaps strong { color: var(--qdd-warn); font-weight: 500; }
 .chat-gaps p { margin: 3px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -315,6 +375,7 @@ onMounted(() => {
 @media (prefers-reduced-motion: reduce) {
   .chat-messages-scroll { scroll-behavior: auto; }
   .chat-loading-dots i { animation: none; opacity: .65; }
+  .chat-process-chevron { transition: none; }
 }
 @media (max-width: 760px) {
   .chat-welcome-scroll { padding: 26px 20px; }

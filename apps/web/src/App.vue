@@ -5,8 +5,7 @@ import zhCn from "element-plus/es/locale/lang/zh-cn";
 
 try {
   const saved: unknown = JSON.parse(localStorage.getItem("harness-preferences-v1") || "null");
-  if (saved && typeof saved === "object" && "theme" in saved
-    && (saved.theme === "light" || saved.theme === "dark")) {
+  if (saved && typeof saved === "object" && "theme" in saved && (saved.theme === "light" || saved.theme === "dark")) {
     document.documentElement.dataset.theme = saved.theme;
     document.documentElement.classList.toggle("dark", saved.theme === "dark");
   }

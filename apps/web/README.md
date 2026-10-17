@@ -31,20 +31,22 @@ npm run qdd -- token
 生成的任务页面需要直接使用实际网关来源：页面级 token、cookie、SDK 注入、CSP 嵌入权限和父页面通信均由网关处理。`gateway.corsOrigins` 同时控制跨域请求、页面嵌入与 SDK 允许的主界面来源。网关 token 只存于当前浏览器会话，不放入页面地址。
 
 - 对话：支持新建对话、历史记录与会话切换，发送经营需求、续聊、查看 SSE 进度，并完成需求确认与显式授权。点击「新建对话」进入空白草稿，首次发送消息时通过 `POST /api/wishes` 建立会话；已有对话通过 `POST /api/sessions/:id/messages` 续聊。
+- 同一轮助手消息集中展示，思考、工具、技能和浏览器记录以正文上方的紧凑行独立展开。旧接口只有工具文本时显示「执行记录」；前端预留 `thinking { text }` 和工具可选 `callId`、`name`、`status`（`running/completed/failed/cancelled`）、`input`、`output` 展示字段，相同 `callId` 在本轮内合并。后端提供相应数据后才显示思考和调用状态，本次不修改后端契约。
+- 助手正文与思考支持 Markdown 标题、表格、代码块、引用、任务列表和链接；用户输入保留原文。表格和代码横向滚动，原始 HTML 按文字显示，危险链接协议不渲染为链接。
 - 对话记录来自 `GET /api/sessions`，按更新时间倒序展示；切换时加载 `GET /api/sessions/:id` 并订阅该会话的 SSE。前端按网关保存当前选择，刷新或重新连接后恢复同一会话或新对话草稿状态。
 - 工作台总览：接入 `GET /api/overview` 与 `GET /api/pending`，展示真实计数、已启用定时任务、最近对话和已发布页面。可在总览直接回答问题或授权，也可进入来源对话；侧栏同步技能、任务和已连接来源数量。
-- 任务：侧边栏展示历史对话和已发布页面，支持搜索和 `Ctrl K` 展开侧边栏并聚焦搜索框。页面通过 `PageView.url` 嵌入，保留网关注入的 SDK、样式及页面鉴权。
+- 任务：按后端 `PageView.kind` 区分定时与一次性页面，支持类型筛选、关联定时任务名称搜索，并展示各任务启停状态。列表和预览可置顶或取消置顶多个页面，侧边栏同步标记，始终保留后端的置顶顺序。侧边栏支持搜索和 `Ctrl K` 展开并聚焦搜索框。页面通过 `PageView.url` 嵌入，保留网关注入的 SDK、样式及页面鉴权。
 - 侧边栏：桌面端可收缩为图标导航并保存偏好；移动端使用抽屉，可通过遮罩或 `Escape` 关闭。
 - 设置：Element Plus 输入框、按钮和开关，用于网关连接、浅色/深色主题、发送快捷键及后端统一页面风格。
 - 修改已发布页面时，在同一对话面板恢复该页面对应的原始会话，继续其上下文，不额外创建会话。
 - 后端没有任务重命名、删除和手动状态接口，前端不提供这些操作。
-- 发送后立即在消息区展示用户消息和等待进度，发送位置切换为「停止回复」；执行中或等待回答、授权时均可停止，下一条草稿可以继续编辑。停止请求被接受后仍等待真实终态再恢复发送。
+- 发送时立即清空输入框，并在消息区展示用户消息和等待进度，发送位置切换为「停止回复」；发送失败会恢复未被编辑的草稿，不覆盖发送后继续输入或主动删除的内容。执行中或等待回答、授权时均可停止，下一条草稿可以继续编辑。停止请求被接受后仍等待真实终态再恢复发送。
 - 刷新工作空间保留正在提交的请求和当前会话；续聊、答题、授权与取消通过 SSE 原位更新，避免重载聊天记录。新建请求尚未返回会话 ID 时点击停止，会在创建确认后取消该会话。
 - 提问器：后端已有 `question_required` / `question_answered` 事件和 `POST /api/sessions/:id/questions/:requestId`，前端沿用现有接口；按原型同时展示问题及标签选项，支持推荐默认值、单选、多选、自填、答案汇总和确认。
 - 连接器：使用后端目录与安装列表，支持飞书 Webhook / 企业自建应用安装、设置、验证、测试消息和删除；内置与配置文件 MCP 来源只读展示。安装或重新验证可能发送验证消息，表单明确说明；其他未开放目录类型保持禁用与 `// TODO`。
-- 技能：支持真实列表、新建、编辑、删除、来源对话和运行。运行时以 `POST /api/wishes` 的 `skillId` 预加载技能；对话中的 `skill` 事件显示加载与保存结果，`save_skill` 授权展示实际名称、步骤与工具。
+- 技能：技能库与模板分组展示，支持按来源筛选和搜索名称、说明、步骤及工具；详情提供运行、编辑和来源对话入口，编辑器支持步骤排序及可选工具设置。加载、断连、失败、空列表与无搜索结果分别展示对应操作。运行时以 `POST /api/wishes` 的 `skillId` 预加载技能；对话中的 `skill` 事件显示加载与保存结果，`save_skill` 授权展示实际名称、步骤与工具。
 - 定时任务：支持真实列表、新建、编辑、删除、启停、立即执行、执行结果及通知状态，可绑定技能、已发布页面和可推送连接器；高级 cron 保留已有自定义规则，空值编辑发送 `null` 解绑。cron 按网关时区执行；配置通知目标即授权该任务完成后自动推送，数据修改默认需确认，并遵守工作空间已有的授权设置。
-- 浏览器：收到真实 `browser` 会话事件后，可显式打开实时 JPEG 画面；默认只读，开启「人工接管」后可导航、点击、滚动、键盘与中文输入。按画面尺寸换算坐标，校验会话和标签标识，409 不重放输入；切会话、失焦和停止观看时释放输入并关闭订阅。
+- 浏览器：收到真实 `browser` 会话事件或恢复含运行中浏览器的历史对话后，自动打开实时 JPEG 画面，展示助手正在浏览和操作的页面；用户可关闭画面，同一浏览器会话不会自行重新打开。默认只读，开启「人工接管」后可导航、点击、滚动、键盘与中文输入。按画面尺寸换算坐标，校验会话和标签标识，409 不重放输入；窗口失焦时退出人工接管并释放输入，但继续观看。页面隐藏时暂停订阅，返回后自动恢复只读观看；切会话、停止观看和卸载时释放输入并关闭订阅，已关闭浏览器不会自动重连。
 - 数据同步：全局 SSE 的 `skills_changed`、`schedules_changed`、`connectors_changed`、`pending_changed` 更新对应资源及总览；重连后重新拉取。切换 token 或网关会取消旧请求并清空资源，迟到响应不会覆盖新连接。
 - 任务详情继续通过 iframe 加载后端提供的 `PageView.url`，主界面顶部提供「通过对话修改」，不在前端重建原型动画中的经营图表。
 
@@ -88,10 +90,22 @@ node --test apps/web/tests/gateway-config.test.ts apps/web/tests/workspace-api.t
 node --test apps/web/tests/conversation-selection.test.ts apps/web/tests/conversation-drafts.test.ts apps/web/tests/workspace-conversation.test.mjs
 ```
 
-聊天模板交互回归位于 `tests/chat-view.test.mjs`，验证首发消息、loading、停止与恢复发送、草稿编辑和 Enter 防重；会话状态回归另覆盖发送期间刷新、创建响应与历史快照竞态、停止失败重试及旧连接响应隔离。所有前端测试可一次执行：
+聊天模板交互回归位于 `tests/chat-view.test.mjs`，结合真实草稿逻辑验证延迟请求期间立即清空、失败恢复、新输入保护、首发消息、loading、停止与恢复发送、草稿编辑和 Enter 防重；草稿回归另覆盖重复相同文本、主动删除与身份清除隔离。会话状态回归另覆盖发送期间刷新、创建响应与历史快照竞态、停止失败重试及旧连接响应隔离。所有前端测试可一次执行：
 
 ```powershell
 node --test apps/web/tests/*.test.*
+```
+
+对话排布回归使用真实聊天与 Markdown 组件，覆盖独立折叠、状态更新时保留展开、切换会话重置、工具行合并与旧事件兼容。`tests/chat-timeline.test.ts` 检查显示分组不会修改原始 SSE 事件；`tests/markdown.test.ts` 检查 Markdown 内容与 HTML、链接安全处理：
+
+```powershell
+node --test apps/web/tests/chat-view.test.mjs apps/web/tests/chat-timeline.test.ts apps/web/tests/markdown.test.ts
+```
+
+技能界面交互回归位于 `tests/skills-view.test.mjs`，直接编译实际 Vue 模板，覆盖来源与步骤搜索、加载和失败重试、模板自定义、步骤排序与校验、编辑草稿及工具保留、运行和删除：
+
+```powershell
+node --test apps/web/tests/skills-view.test.mjs
 ```
 
 提问与授权状态的回归测试位于 `tests/session-actions.test.mjs`，直接编译真实组件的 setup 脚本，验证默认选项、答案校验、多选与自填、会话切换重置、已解决请求过滤和提交防重：
@@ -100,7 +114,7 @@ node --test apps/web/tests/*.test.*
 node --test apps/web/tests/session-actions.test.mjs
 ```
 
-新增领域接口、资源订阅及浏览器输入回归位于 `tests/connectors-api.test.mjs`、`tests/skills-schedules-api.test.ts`、`tests/gateway-resource.test.mjs`、`tests/browser-session.test.mjs`、`tests/session-browser.test.mjs`。测试只使用本地桩，不发送外部消息：
+新增领域接口、资源订阅及浏览器输入回归位于 `tests/connectors-api.test.mjs`、`tests/skills-schedules-api.test.ts`、`tests/gateway-resource.test.mjs`、`tests/browser-session.test.mjs`、`tests/session-browser.test.mjs`。浏览器组件回归覆盖失焦后持续收帧、隐藏后恢复只读、隐藏期间切会话，以及关闭或卸载后不重连；聊天组件回归覆盖自动展开及用户关闭后的行为。测试只使用本地桩，不发送外部消息：
 
 ```powershell
 node --test apps/web/tests/connectors-api.test.mjs apps/web/tests/skills-schedules-api.test.ts apps/web/tests/gateway-resource.test.mjs apps/web/tests/browser-session.test.mjs apps/web/tests/session-browser.test.mjs
@@ -112,4 +126,29 @@ node --test apps/web/tests/connectors-api.test.mjs apps/web/tests/skills-schedul
 npm run build
 node --test apps/cli/dist/page-bridge.test.js apps/cli/dist/page-sdk-bridge.test.js
 node --test apps/web/tests/task-page-bridge.test.ts
+```
+
+设置中的「数据与指标」通过 `/api/datasets` 和 `/api/metrics` 展示数据集版本、水位线、行数、来源及统一指标口径。可对全部配置来源或单个数据集执行增量刷新；逐项展示 `/api/datasets/refresh` 返回的成功与失败，没有增量来源的数据集只读展示。切换连接、凭据或离开设置时会取消请求并隔离迟到响应。
+
+浏览器人工接管支持悬停、拖动、双击及左/中/右键。鼠标和键盘输入按顺序发送，连续移动只保留最新坐标；移出画面、失焦或切换标签时释放输入，遇到 409 不重放操作。
+
+任务分类、计划关联、置顶和页面预览的真实组件交互回归位于 `tests/task-pages-view.test.mjs`；置顶接口、防重与旧响应隔离另由 `tests/workspace-api.test.ts` 和 `tests/workspace-conversation.test.mjs` 覆盖。
+
+对应 API 与真实组件模板的回归测试覆盖部分刷新失败、空刷新结果、连接切换取消和旧响应隔离：
+
+```powershell
+node --test apps/web/tests/datasets-api.test.mjs apps/web/tests/workspace-data.test.mjs
+```
+
+整页刷新、跳转或离页时，工作空间和实时浏览器通过 `pagehide` 主动关闭事件流，避免旧文档占满 Chrome 的 HTTP 连接；从浏览器历史返回时通过 `pageshow` 恢复订阅，浏览器画面恢复为只读。站内路由切换继续复用公共布局的连接。技能与定时任务编辑器在断连时保留草稿并提示未保存；保存中断时明确提示结果尚未确认，切换地址或 token 后阻止把旧编辑目标写入新连接。任务页面请求超过 15 秒未加载时显示可重试的错误；已加载但 SDK 握手未完成仍使用 8 秒期限。
+
+相关组件回归位于 `tests/workspace-conversation.test.mjs`、`tests/workspace-api.test.ts`、`tests/session-browser.test.mjs`、`tests/skills-view.test.mjs`、`tests/schedules-view.test.mjs`、`tests/schedules-actions.test.mjs` 和 `tests/task-preview.test.mjs`，包含静默事件流取消、离页恢复、离线保存、模板技能、任务启停/立即执行/执行对话、自定义执行规则以及页面加载和握手超时。使用上方全量前端测试命令执行。
+
+真实 Chrome 回归使用独立临时工作区和本机 HTTP 服务，不调用外部模型或发送消息。连接回归使用完整生产构建与真实网关，记录网关实际收到的请求和活动事件流，默认执行 30 次整页跳转、30 次站内切换、5 次离页及 15 次历史前进后退。预览回归将实际 TaskPreview 组件和 SDK 打包为生产模式，验证 30 次正常握手、挂起请求和缺失 SDK 的超时反馈。浏览器默认使用本机 Chrome；可通过 `CHROME_PATH` 指定路径，连接回归次数可通过 `NAVIGATION_ROUNDS` 调整：
+
+```powershell
+npm run build
+npm run build:web
+node scripts/test-frontend-navigation.mjs
+node scripts/test-task-preview-browser.mjs
 ```

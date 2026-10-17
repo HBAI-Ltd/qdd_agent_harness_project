@@ -13,6 +13,7 @@ import { refreshDatasets } from "./datasets/refresh.js";
 import { resolveGatewayToken } from "./gateway/auth.js";
 import { startGateway } from "./gateway/server.js";
 import { openWorkbench } from "./workbench/index.js";
+import { Scheduler } from "./workbench/scheduler.js";
 import { checkFile } from "./guard.js";
 import { SessionHub } from "./sessions.js";
 import { ensureWorkspace, readPages, readStyle, resetStyle } from "./web/site.js";
@@ -184,6 +185,8 @@ async function main() {
       const sources = await openSources(loaded);
       const workbench = await openWorkbench(loaded);
       const hub = new SessionHub(loaded, sources, chat, workbench);
+      // 终端会话创建的定时任务只写入 schedules.json，由网关进程到点执行（不在这里启动调度）
+      workbench.scheduler = new Scheduler(loaded, hub, workbench);
       try {
         let id: string;
         if (command === "wish") {

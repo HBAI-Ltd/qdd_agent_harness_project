@@ -210,12 +210,13 @@ defineExpose({ focusSearch });
             :class="{ active: view === 'tasks' && activePageSlug === page.slug }"
             text
             native-type="button"
-            :aria-label="`打开页面：${page.title}`"
-            :title="page.title"
+            :aria-label="`打开${page.pinnedAt ? '已置顶' : ''}${page.kind === 'scheduled' ? '定时任务' : '一次性任务'}页面：${page.title}`"
+            :title="`${page.title}${page.pinnedAt ? ' · 已置顶' : ''} · ${page.kind === 'scheduled' ? '定时任务' : '一次性任务'}`"
             :aria-current="view === 'tasks' && activePageSlug === page.slug ? 'true' : undefined"
             @click="navigation.openPage(page.slug)">
-            <AgentIcon name="code" :size="15" />
+            <AgentIcon :name="page.kind === 'scheduled' ? 'clock' : 'code'" :size="15" />
             <span class="task-title">{{ page.title }}</span>
+            <ElTag v-if="page.pinnedAt" class="session-tag" type="warning" effect="plain" size="small">置顶</ElTag>
           </ElButton>
           <p v-if="!filteredPages.length && !loadingPages" class="sidebar-status">
             {{ searchTerm ? "没有找到相关页面" : connected ? "已发布页面将在这里显示" : "连接网关后加载页面" }}

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -177,7 +177,7 @@ describe("gateway", () => {
       call("write_file", { path: "index.html", content: "<script>fetch('/api')</script>" }),
       call("write_file", {
         path: "index.html",
-        content: '<html><head><link rel="stylesheet" href="../../assets/theme.css"></head><body><script src="./data/cat.js"></script></body></html>',
+        content: '<html><head><link rel="stylesheet" href="../../assets/theme.css"></head><body><script src="./data/cat.js"></script><script>qdd.data("cat", "store__sales_summary", { groupBy: "category" })</script></body></html>',
       }),
       call("finish", { title: "品类销售", summary: "饮料品类毛利最高", tools: ["store__sales_summary"], useAgent: false, metrics: ["revenue"], gaps: [] }),
     );
@@ -217,7 +217,7 @@ describe("gateway", () => {
     const final = await gateway.hub.wait(created.id);
     assert.equal(final.status, "idle");
     const lastPrompt = seen.at(-1)!;
-    assert.ok(lastPrompt.some((m) => m.role === "user" && m.content === "看看各品类"));
+    assert.ok(lastPrompt.some((m) => m.role === "user" && String(m.content).startsWith("看看各品类")));
     assert.ok(lastPrompt.some((m) => m.role === "tool" && m.content === "已发布"));
     const after = (await (await api(`/api/sessions/${created.id}`)).json()) as SessionDetail;
     assert.ok(after.events.some((e) => e.type === "say" && e.text === "饮料毛利最高"));
@@ -407,6 +407,64 @@ describe("gateway", () => {
     assert.match(outputs[0]!, /请先调用 clarify/);
     assert.match(outputs[1]!, /→ 就这样（推荐）/);
     assert.match(outputs[2]!, /已写入草稿/);
+  });
+
+  test("回归：重复调用拦截、结论数字核验、页面工具以代码为准、失败保留对话", async () => {
+    const outputs: string[] = [];
+    const steps: ChatMessage[] = [
+      call("store__aggregate", { dataset: "order_items", groupBy: ["sku", "channel"], metrics: ["revenue"], time: { field: "date", bucket: "day" } }),
+      call("store__aggregate", { dataset: "order_items", groupBy: ["sku", "channel"], metrics: ["revenue"], time: { field: "date", bucket: "day" } }),
+      call("store__aggregate", { dataset: "order_items", metrics: ["revenue", "grossMargin"] }),
+      call("write_file", { path: "index.html", content: '<script>qdd.tool("store__aggregate", {})</script>' }),
+      call("finish", { title: "t", summary: "全店销售额 ¥9,548.90", tools: ["store__get_inventory"], useAgent: false, gaps: [] }),
+    ];
+    const scripted: ChatFn = async (messages) => {
+      const last = messages.at(-1)!;
+      if (last.role === "tool") outputs.push(String(last.content));
+      if (steps.length) return steps.shift()!;
+      // 用工具结果里的真实总额改正
+      const total = JSON.parse(outputs[2]!) as { revenue: number; grossMargin: number }[];
+      const revenue = total[0]!.revenue.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      const margin = (total[0]!.grossMargin * 100).toFixed(2);
+      return call("finish", { title: "t", summary: `全店销售额 ¥${revenue}，毛利率 ${margin}%，推演提价后可达 ¥99,999.00`, tools: ["store__get_inventory"], useAgent: false, gaps: [] });
+    };
+    const result = await runWish(base, sources, scripted, { wish: "看看", sessionId: "00000000-0000-0000-0000-000000000001" }, { onEvent: () => {}, authorize: async () => false });
+    assert.match(outputs[0]!, /"truncated":true.*"rows":\d+/); // 大结果给摘要而非截断
+    assert.match(outputs[1]!, /^重复调用/);
+    assert.match(outputs[4]!, /¥9,548\.90：在本次工具结果中找不到出处/);
+    assert.deepEqual(result.page?.tools, ["store__aggregate"]); // 未使用的移除、使用的补上
+
+    // 失败（超出步数）也保留对话，可续聊
+    const looping: ChatFn = async () => call("store__get_store_info", { n: Math.random() });
+    const limited: LoadedConfig = { ...base, config: { ...base.config, llm: { ...base.config.llm, maxSteps: 3 } } };
+    const hub = new (gateway.hub.constructor as new (...a: unknown[]) => typeof gateway.hub)(limited, sources, () => looping);
+    const meta = await hub.create("随便看看");
+    const end = await hub.wait(meta.id);
+    assert.equal(end.status, "error");
+    const saved = JSON.parse(await readFile(path.join(base.paths.sessions, `${meta.id}.messages.json`), "utf8")) as ChatMessage[];
+    assert.ok(saved.length >= 4);
+  });
+
+  test("熔断：换着花样写错参数的循环会暂停探索；快照名自动规范化", async () => {
+    let n = 0;
+    const seenTools: string[][] = [];
+    const outputs: string[] = [];
+    const scripted: ChatFn = async (messages, tools) => {
+      seenTools.push(tools.map((t) => t.function.name));
+      const last = messages.at(-1)!;
+      if (last.role === "tool") outputs.push(String(last.content));
+      n++;
+      if (n <= 4) return call("store__aggregate", { dataset: "order_items", metrics: ["revenue"], [`metrics_extra${n}`]: ["x"] });
+      if (n === 5) return call("snapshot_data", { name: "Sales 30D!", tool: "store__aggregate", arguments: { dataset: "order_items", metrics: ["revenue"] } });
+      return call("reply", { text: "好", gaps: [] });
+    };
+    await runWish(base, sources, scripted, { wish: "看看", sessionId: "00000000-0000-0000-0000-000000000002" }, { onEvent: () => {}, authorize: async () => false });
+    assert.match(outputs[0]!, /未知参数 metrics_extra1/);
+    assert.ok(seenTools[2]!.includes("store__aggregate"), "熔断前仍可探索");
+    assert.ok(!seenTools[3]!.includes("store__aggregate"), "连续 3 步全部报错后移除探索工具");
+    assert.ok(seenTools[3]!.includes("snapshot_data"));
+    assert.ok(outputs.some((o) => o.startsWith("探索已暂停")), "模型无视工具列表硬调也会被挡");
+    assert.match(outputs.at(-1)!, /已保存 data\/sales_30d\.js/);
   });
 
   test("风格提示词接口", async () => {

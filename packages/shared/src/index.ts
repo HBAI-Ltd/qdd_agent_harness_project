@@ -33,9 +33,13 @@ export interface HarnessConfig {
     model: string;
     apiKeyEnv: string;
     maxSteps: number;
+    /** 单次回复的最大输出 token（长页面文件需要较大值） */
+    maxTokens: number;
     /** required：新许愿写页面前必须先 clarify；auto：由模型判断；off：不提问 */
     clarify: "required" | "auto" | "off";
   };
+  /** 授权请求等待店长处理的时长（分钟），超时视为拒绝；工作台可集中处理。 */
+  approvalTimeoutMin: number;
   gateway: {
     host: string;
     port: number;
@@ -177,6 +181,8 @@ export interface SessionMeta {
   /** 会话产出的页面；首次发布前为 null。 */
   slug: string | null;
   status: SessionStatus;
+  /** 会话来源：缺省为店长发起；定时任务触发时记录任务 id。 */
+  origin?: { kind: "schedule"; scheduleId: string; scheduleName: string };
   createdAt: string;
   updatedAt: string;
 }
@@ -196,6 +202,7 @@ export type SessionEvent = At &
     | { type: "question_answered"; requestId: string; answers: ClarifyAnswers | null }
     | { type: "published"; page: PageEntry; files: string[] }
     | { type: "gaps"; gaps: CapabilityGap[] }
+    | { type: "skill"; skill: { id: string; name: string }; action: "loaded" | "saved" }
     | { type: "error"; message: string }
   );
 
@@ -209,6 +216,8 @@ export interface CreateWishBody {
   wish: string;
   /** 在已有页面上修改（新开会话）。 */
   slug?: string;
+  /** 预先加载的技能（名称或 id） */
+  skillId?: string;
 }
 
 export interface SendMessageBody {
@@ -232,8 +241,157 @@ export interface ToolInfo extends ToolSpec {
 /** 网关推送（GET /api/events）的全局事件。 */
 export type GatewayEvent =
   | { type: "pages_changed" }
-  | { type: "session_updated"; session: SessionMeta };
+  | { type: "session_updated"; session: SessionMeta }
+  | { type: "pending_changed" }
+  | { type: "skills_changed" }
+  | { type: "schedules_changed" }
+  | { type: "connectors_changed" };
 
 export interface ApiError {
   error: string;
+}
+
+// ---------------------------------------------------------------- 工作台：待办与总览
+
+/** 跨会话等待店长处理的事项（授权 / 澄清问题）。 */
+export type PendingItem = {
+  requestId: string;
+  sessionId: string;
+  sessionTitle: string;
+  origin?: SessionMeta["origin"];
+  createdAt: string;
+  /** 超时时间，超时后授权视为拒绝、问题按推荐项继续 */
+  expiresAt: string;
+} & (
+  | { kind: "approval"; tool: string; source: string; args: JsonObject }
+  | { kind: "question"; questions: ClarifyQuestion[] }
+);
+
+/** GET /api/overview：工作台总览与侧边栏计数。 */
+export interface Overview {
+  sessions: { total: number; running: number; waiting: number; error: number; active: { id: string; title: string; status: SessionStatus }[] };
+  pages: { total: number; stale: number };
+  skills: { total: number };
+  schedules: { total: number; enabled: number; next: { id: string; name: string; at: string } | null };
+  connectors: { total: number; connected: number };
+  pending: PendingItem[];
+}
+
+// ---------------------------------------------------------------- 技能
+
+/** 可复用的做事方法：步骤 + 用到的工具，agent 运行时加载。 */
+export interface Skill {
+  id: string;
+  name: string;
+  description: string;
+  steps: string[];
+  /** 用到的数据工具 / harness 工具，如 store__get_inventory、send_notification */
+  tools: string[];
+  source: "user" | "agent";
+  /** agent 从对话中提炼时的来源会话 */
+  sessionId?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SkillInput {
+  name: string;
+  description: string;
+  steps: string[];
+  tools?: string[];
+}
+
+// ---------------------------------------------------------------- 定时任务
+
+export interface ScheduleRun {
+  at: string;
+  sessionId: string | null;
+  status: "ok" | "error";
+  /** 结论摘要或错误信息 */
+  message: string;
+  /** 推送结果 */
+  notified?: { connectorId: string; ok: boolean; error?: string };
+}
+
+export interface Schedule {
+  id: string;
+  name: string;
+  /** 5 段 cron（分 时 日 月 周），按网关所在时区 */
+  cron: string;
+  /** 每次执行时交给 agent 的任务描述 */
+  prompt: string;
+  /** 绑定的技能，执行时预先加载 */
+  skillId?: string;
+  /** 在已有页面上刷新 */
+  slug?: string;
+  /** 执行完成后推送到的连接器（如飞书） */
+  notify?: { connectorId: string };
+  enabled: boolean;
+  nextRunAt: string | null;
+  lastRun: ScheduleRun | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ScheduleInput {
+  name: string;
+  cron: string;
+  prompt: string;
+  skillId?: string | null;
+  slug?: string | null;
+  notify?: { connectorId: string } | null;
+  enabled?: boolean;
+}
+
+// ---------------------------------------------------------------- 连接器
+
+export type ConnectorType = "feishu";
+
+/** read：只查看数据；confirm：写入/推送需店长逐次确认；auto：无需确认。 */
+export type ConnectorPermission = "read" | "confirm" | "auto";
+
+export type ConnectorStatus = "connected" | "error";
+
+/** 连接器目录条目（含暂未开放的类型，供前端展示）。 */
+export interface ConnectorCatalogEntry {
+  type: string;
+  name: string;
+  category: string;
+  tags: string[];
+  available: boolean;
+  /** 安装方式，如 webhook / app / mcp */
+  modes: string[];
+}
+
+export interface FeishuConnectorInput {
+  type: "feishu";
+  name?: string;
+  permission?: ConnectorPermission;
+  /** webhook：自定义机器人；app：企业自建应用（需 receiveId 才能推送） */
+  mode: "webhook" | "app";
+  webhookUrl?: string;
+  /** 自定义机器人「签名校验」密钥 */
+  signSecret?: string;
+  appId?: string;
+  appSecret?: string;
+  receiveId?: string;
+  receiveIdType?: "chat_id" | "open_id" | "user_id" | "union_id" | "email";
+}
+
+export type ConnectorInput = FeishuConnectorInput;
+
+/** 返回给前端的连接器：密钥只给是否已设置，不回传明文。 */
+export interface ConnectorView {
+  id: string;
+  type: string;
+  name: string;
+  /** builtin：内置数据；mcp：配置文件中的 MCP 服务（只读展示）；installed：通过 API 安装 */
+  origin: "builtin" | "mcp" | "installed";
+  permission: ConnectorPermission;
+  status: ConnectorStatus;
+  /** 验证结果说明，如机器人名称或错误信息 */
+  detail: string;
+  config: Record<string, string | boolean>;
+  lastVerifiedAt: string | null;
+  createdAt: string | null;
 }

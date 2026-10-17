@@ -19,7 +19,7 @@ harness 不提供界面，前端通过本网关完成：许愿与会话、展示
 ## 许愿与会话
 
 ```http
-POST /api/wishes                     { "wish": "最近 30 天各品类毛利", "slug"?: "在已有页面上修改" }
+POST /api/wishes                     { "wish": "最近 30 天各品类毛利", "slug"?: "在已有页面上修改", "skillId"?: "技能名称或 id" }
 → 201 SessionMeta                    agent 在后台运行
 ```
 
@@ -42,7 +42,8 @@ POST /api/sessions/:id/cancel        → 202
 | `say` | `text` | agent 的回复 |
 | `tool` | `text` | 数据查询、快照、写文件等进度 |
 | `warn` | `text` | 守卫拦截、工具失败等 |
-| `approval_required` | `requestId, tool, source, args` | 写入类数据工具等待授权，5 分钟未处理视为拒绝 |
+| `approval_required` | `requestId, tool, source, args` | 写入类工具、保存技能（`tool: save_skill`）、推送消息（`tool: send_notification`, `source: connector:<id>`）等待授权；`approvalTimeoutMin`（默认 60）分钟未处理视为拒绝，也可在工作台待办中统一处理 |
+| `skill` | `skill: {id,name}, action: loaded \| saved` | 技能已加载 / 已保存 |
 | `approval_resolved` | `requestId, approved` | |
 | `question_required` | `requestId, round, questions: ClarifyQuestion[]` | agent 引导式提问，30 分钟未回答按推荐项继续 |
 | `question_answered` | `requestId, answers \| null` | `null` 表示未回答 |
@@ -64,6 +65,70 @@ POST /api/sessions/:id/cancel        → 202
 | `allowOther` | 是否允许自填（候选项之外的内容） |
 
 建议的界面：一次一题的向导，默认选中第一个候选，最后一步汇总确认后一次性提交。回答校验失败（单选给了多个、不允许自填却自填）返回 400。一轮最多 4 题，最多 3 轮。
+
+## 工作台：总览与待办
+
+```http
+GET /api/overview   → Overview：会话（运行中/待确认/失败/活跃列表）、页面（总数/待复核）、技能数、定时任务（启用数/下一次）、连接器（已接入数）、待办
+GET /api/pending    → PendingItem[]：所有会话中等待店长处理的授权与澄清问题
+```
+
+`PendingItem` 带 `kind: approval | question`、`requestId`、`sessionId`、`sessionTitle`、`origin`（定时任务触发时）、`expiresAt`。处理方式与会话内相同：
+`POST /api/sessions/:sessionId/approvals/:requestId` / `.../questions/:requestId`。全局 `GET /api/events` 在待办变化时推送 `{ "type": "pending_changed" }`。
+
+## 技能
+
+```http
+GET    /api/skills          → Skill[]
+POST   /api/skills          { "name", "description", "steps": ["…"], "tools"?: ["store__get_inventory", "send_notification"] } → 201 Skill
+GET    /api/skills/:id      → Skill
+PUT    /api/skills/:id      （同 POST 字段）→ Skill
+DELETE /api/skills/:id      被定时任务使用时 409
+```
+
+agent 也可在对话中用 `save_skill` 提炼技能（`source: "agent"`），保存前触发 `approval_required`（`tool: save_skill`，`args` 为技能内容，对应「就这样，保存为技能 / 再改改」）。对话中需求与技能吻合时 agent 会 `load_skill`，会话产生 `skill` 事件。变化时推送 `skills_changed`。
+
+## 定时任务
+
+```http
+GET    /api/schedules            → Schedule[]
+POST   /api/schedules            { "name": "经营日报", "cron": "0 8 * * *", "prompt": "汇总昨日销售与异常",
+                                   "skillId"?: "技能名或 id", "slug"?: "刷新的页面", "notify"?: { "connectorId": "…" }, "enabled"?: true } → 201
+GET    /api/schedules/:id        → Schedule（含 nextRunAt、lastRun）
+PUT    /api/schedules/:id        部分字段；skillId/slug/notify 传 null 解绑
+DELETE /api/schedules/:id
+POST   /api/schedules/:id/run    立即执行一次 → 202 { "sessionId" }
+```
+
+- `cron` 为 5 段（分 时 日 月 周），按网关时区；例：`0 8 * * *` 每天 8 点、`0 9 * * 1` 每周一 9 点、`0 */2 * * *` 每 2 小时。
+- 到点以**无人值守**方式发起会话（`SessionMeta.origin = { kind: "schedule", … }`）：不提问；写入类操作进入工作台待办等待授权。
+- 完成后把结论推送到 `notify` 连接器；配置推送目标即视为店长授权该任务的推送。执行结果记录在 `lastRun`（含推送结果）。
+- 网关停机期间错过的执行，启动后补跑一次。变化时推送 `schedules_changed`。
+
+## 连接器
+
+```http
+GET    /api/connectors              → { catalog: ConnectorCatalogEntry[], connectors: ConnectorView[] }
+POST   /api/connectors              安装：先验证，验证失败返回 400 且不保存 → 201 ConnectorView
+GET    /api/connectors/:id
+PUT    /api/connectors/:id          { "name"?, "permission"?, "receiveId"?, "receiveIdType"? }（换凭据请删除后重装）
+DELETE /api/connectors/:id          被定时任务用于推送时 409
+POST   /api/connectors/:id/verify   重新验证并记录 status/detail
+POST   /api/connectors/:id/test     { "text"? } 发送测试消息
+```
+
+`connectors` 包含内置数据（`origin: builtin`）、配置文件中的 MCP 服务（`origin: mcp`，只读展示）与通过 API 安装的连接器（`origin: installed`）。`catalog` 中 `available: false` 的类型（收银、ERP、摄像头、门店手机、外卖平台、企业微信）暂未开放安装。
+
+`permission`：`read` 只查看（不能推送）/ `confirm` 每次推送需店长确认（默认）/ `auto` 无需确认。
+
+**飞书**（`type: "feishu"`）两种模式：
+
+| mode | 字段 | 验证方式 |
+| --- | --- | --- |
+| `webhook` 自定义机器人 | `webhookUrl`（必须是 `https://open.feishu.cn/open-apis/bot/v2/hook/…`）、`signSecret`（开启签名校验时） | 向群发送一条测试消息，返回 code 0 才保存 |
+| `app` 企业自建应用 | `appId`、`appSecret`、`receiveId`（群 chat_id 等，可后补）、`receiveIdType`（默认 `chat_id`） | 换取 tenant_access_token、读取机器人信息；设置了 receiveId 时再发送测试消息 |
+
+常见失败会翻译成中文提示（签名错误、关键词不匹配、IP 白名单、App Secret 错误、机器人不在群中等）。凭据用 AES-256-GCM 加密保存在 `workspace/connectors.json`（密钥来自 `QDD_SECRET_KEY` 或自动生成的 `workspace/.secret-key`），接口只返回脱敏后的地址与「是否已设置」。
 
 ## 页面
 

@@ -21,7 +21,8 @@
     "typecheck": "tsc -p tsconfig.check.json",
     "test": "tsc -b && node --test \"apps/cli/dist/**/*.test.js\"",
     "clean": "tsc -b --clean",
-    "start": "node --env-file-if-exists=.env --enable-source-maps apps/cli/dist/index.js serve"
+    "start": "node --env-file-if-exists=.env --enable-source-maps apps/cli/dist/index.js serve",
+    "mock:erp": "node --env-file-if-exists=.env scripts/mock-erp-mcp.mjs"
   },
   "devDependencies": {
     "@types/node": "24.19.2",

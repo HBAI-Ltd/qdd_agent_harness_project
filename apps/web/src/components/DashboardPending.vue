@@ -1,6 +1,10 @@
 <script setup lang="ts">
 import { onBeforeUnmount, ref, watch } from "vue";
-import { ElAlert, ElButton, ElEmpty, ElSkeleton, ElTag } from "element-plus";
+import { ElAlert } from "element-plus/es/components/alert/index";
+import { ElButton } from "element-plus/es/components/button/index";
+import { ElEmpty } from "element-plus/es/components/empty/index";
+import { ElSkeleton } from "element-plus/es/components/skeleton/index";
+import { ElTag } from "element-plus/es/components/tag/index";
 import type { ClarifyAnswers, PendingItem, SessionEvent } from "@qdd/shared";
 import SessionActions from "./SessionActions.vue";
 import { answerQuestions, resolveApproval } from "@/api/workspace";

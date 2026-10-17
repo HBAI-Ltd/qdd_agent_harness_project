@@ -1,7 +1,12 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import type { Overview, PageView, SessionDetail, SessionMeta, SessionStatus } from "@qdd/shared";
-import { ElAlert, ElButton, ElCard, ElEmpty, ElSkeleton, ElTag } from "element-plus";
+import { ElAlert } from "element-plus/es/components/alert/index";
+import { ElButton } from "element-plus/es/components/button/index";
+import { ElCard } from "element-plus/es/components/card/index";
+import { ElEmpty } from "element-plus/es/components/empty/index";
+import { ElSkeleton } from "element-plus/es/components/skeleton/index";
+import { ElTag } from "element-plus/es/components/tag/index";
 import AgentIcon from "@/components/AgentIcon.vue";
 
 const props = defineProps<{

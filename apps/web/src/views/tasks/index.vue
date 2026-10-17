@@ -1,6 +1,11 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import { ElButton, ElCard, ElEmpty, ElInput, ElSkeleton, ElTag } from "element-plus";
+import { ElButton } from "element-plus/es/components/button/index";
+import { ElCard } from "element-plus/es/components/card/index";
+import { ElEmpty } from "element-plus/es/components/empty/index";
+import { ElInput } from "element-plus/es/components/input/index";
+import { ElSkeleton } from "element-plus/es/components/skeleton/index";
+import { ElTag } from "element-plus/es/components/tag/index";
 import AgentIcon from "@/components/AgentIcon.vue";
 import TaskPreview from "@/components/TaskPreview.vue";
 import { useWorkspaceContext } from "@/composables/workspaceContext";
@@ -56,6 +61,7 @@ async function handleTaskMessage(message: TaskPageEvent) {
       :pin-pending="pendingPagePins.has(activePage.slug)"
       @pin="setPagePinned(activePage.slug, $event)"
       @schedules="navigation.openView('schedules')"
+      @records="navigation.openRecords"
       @message="handleTaskMessage" />
     <div v-else class="task-content-status">
       <p>{{ loadingPages ? "正在加载页面…" : "该页面尚未发布或已不可用" }}</p>
@@ -93,6 +99,9 @@ async function handleTaskMessage(message: TaskPageEvent) {
           <ElButton v-for="schedule in page.schedules" :key="schedule.id" class="work-task-schedule" text :aria-label="`管理定时任务：${schedule.name}，${schedule.enabled ? '已启用' : '已暂停'}`" @click="navigation.openView('schedules')">
             <span class="work-task-schedule-name">{{ schedule.name }}</span><ElTag :type="schedule.enabled ? 'success' : 'info'" effect="plain" size="small">{{ schedule.enabled ? "已启用" : "已暂停" }}</ElTag><AgentIcon name="chevron" :size="12" />
           </ElButton>
+        </div>
+        <div v-if="page.records?.length" class="work-task-schedules" aria-label="页面使用的登记表">
+          <ElButton v-for="name in page.records" :key="name" class="work-task-schedule" text :aria-label="`管理登记记录：${name}`" @click="navigation.openRecords(name)">登记表 · {{ name }}<AgentIcon name="chevron" :size="12" /></ElButton>
         </div>
         <div class="work-task-footer"><span class="work-task-updated"><time :datetime="page.updatedAt">{{ new Date(page.updatedAt).toLocaleDateString("zh-CN") }} 更新</time><span>v{{ page.version }}</span></span><div class="work-task-actions"><ElButton link :type="page.pinnedAt ? 'warning' : 'default'" :aria-label="`${page.pinnedAt ? '取消置顶' : '置顶'}：${page.title}`" :aria-pressed="!!page.pinnedAt" :loading="pendingPagePins.has(page.slug)" :disabled="!connected || pendingPagePins.has(page.slug)" @click="setPagePinned(page.slug, !page.pinnedAt)">{{ page.pinnedAt ? "取消置顶" : "置顶" }}</ElButton><ElButton link type="primary" @click="openPage(page.slug)">打开页面<AgentIcon name="chevron" :size="14" /></ElButton></div></div>
       </ElCard>

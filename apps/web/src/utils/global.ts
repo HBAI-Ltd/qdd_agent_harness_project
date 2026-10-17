@@ -1,4 +1,4 @@
-import { ElMessage } from "element-plus";
+import { ElMessage } from "element-plus/es/components/message/index";
 import axios from "./axios";
 
 declare global {

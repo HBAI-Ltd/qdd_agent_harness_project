@@ -1,6 +1,16 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from "vue";
-import { ElAlert, ElButton, ElCard, ElCheckbox, ElCheckboxGroup, ElDialog, ElEmpty, ElForm, ElFormItem, ElInput, ElMessageBox, ElSkeleton, ElTag } from "element-plus";
+import { ElAlert } from "element-plus/es/components/alert/index";
+import { ElButton } from "element-plus/es/components/button/index";
+import { ElCard } from "element-plus/es/components/card/index";
+import { ElCheckbox, ElCheckboxGroup } from "element-plus/es/components/checkbox/index";
+import { ElDialog } from "element-plus/es/components/dialog/index";
+import { ElEmpty } from "element-plus/es/components/empty/index";
+import { ElForm, ElFormItem } from "element-plus/es/components/form/index";
+import { ElInput } from "element-plus/es/components/input/index";
+import { ElMessageBox } from "element-plus/es/components/message-box/index";
+import { ElSkeleton } from "element-plus/es/components/skeleton/index";
+import { ElTag } from "element-plus/es/components/tag/index";
 import type { InputInstance } from "element-plus";
 import type { Skill, SkillInput, ToolInfo } from "@qdd/shared";
 import AgentIcon from "@/components/AgentIcon.vue";

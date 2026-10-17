@@ -1,6 +1,11 @@
 <script setup lang="ts">
 import { computed, nextTick, ref } from "vue";
-import { ElButton, ElInput, ElMenu, ElMenuItem, ElScrollbar, ElTag, type InputInstance } from "element-plus";
+import { ElButton } from "element-plus/es/components/button/index";
+import { ElInput } from "element-plus/es/components/input/index";
+import { ElMenu, ElMenuItem } from "element-plus/es/components/menu/index";
+import { ElScrollbar } from "element-plus/es/components/scrollbar/index";
+import { ElTag } from "element-plus/es/components/tag/index";
+import type { InputInstance } from "element-plus";
 import type { SessionMeta, SessionStatus } from "@qdd/shared";
 import AgentIcon from "@/components/AgentIcon.vue";
 import { useWorkspaceContext, type WorkspaceView } from "@/composables/workspaceContext";

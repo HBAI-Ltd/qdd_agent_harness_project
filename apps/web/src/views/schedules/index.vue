@@ -1,6 +1,18 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, reactive, ref, watch } from "vue";
-import { ElAlert, ElButton, ElCard, ElDialog, ElEmpty, ElForm, ElFormItem, ElInput, ElMessageBox, ElSelect, ElSkeleton, ElSwitch, ElTag, ElTimePicker } from "element-plus";
+import { ElAlert } from "element-plus/es/components/alert/index";
+import { ElButton } from "element-plus/es/components/button/index";
+import { ElCard } from "element-plus/es/components/card/index";
+import { ElDialog } from "element-plus/es/components/dialog/index";
+import { ElEmpty } from "element-plus/es/components/empty/index";
+import { ElForm, ElFormItem } from "element-plus/es/components/form/index";
+import { ElInput } from "element-plus/es/components/input/index";
+import { ElMessageBox } from "element-plus/es/components/message-box/index";
+import { ElSelect } from "element-plus/es/components/select/index";
+import { ElSkeleton } from "element-plus/es/components/skeleton/index";
+import { ElSwitch } from "element-plus/es/components/switch/index";
+import { ElTag } from "element-plus/es/components/tag/index";
+import { ElTimePicker } from "element-plus/es/components/time-picker/index";
 import type { Schedule, ScheduleInput } from "@qdd/shared";
 import AgentIcon from "@/components/AgentIcon.vue";
 import StringSelectOption from "@/components/StringSelectOption";
@@ -222,6 +234,7 @@ function runSessionId(schedule: Schedule): string | undefined {
           <ElCard v-for="schedule in schedules" :key="schedule.id" class="schedule-job" shadow="never">
             <div class="job-heading"><div><h3>{{ schedule.name }}</h3><div class="job-tags"><ElTag :type="schedule.enabled ? 'success' : 'info'" size="small" effect="plain">{{ schedule.enabled ? "已启用" : "已暂停" }}</ElTag><ElTag v-if="currentRun(schedule)" :type="currentRun(schedule)?.status === 'waiting' ? 'warning' : 'success'" size="small" effect="plain">{{ currentRun(schedule)?.status === "waiting" ? "等待确认" : "正在执行" }}</ElTag><ElTag v-if="schedule.skillId" type="info" size="small" effect="plain">{{ skills.find((skill) => skill.id === schedule.skillId)?.name || "关联技能" }}</ElTag></div></div><ElSwitch :model-value="schedule.enabled" :loading="rowBusy[schedule.id] === 'toggle'" :disabled="!connected || !!rowBusy[schedule.id]" :aria-label="`${schedule.enabled ? '暂停' : '启用'}${schedule.name}`" @change="toggle(schedule, !!$event)" /></div>
             <p class="job-prompt">{{ schedule.prompt }}</p><div class="job-timing"><span><AgentIcon name="clock" :size="14" />{{ cronLabel(schedule.cron) }}</span><span>下次：{{ schedule.enabled ? formatTime(schedule.nextRunAt) : "已暂停" }}</span></div>
+            <p v-if="schedule.createdBy?.kind === 'agent'" class="job-origin"><span>助手经确认创建</span><ElButton v-if="schedule.createdBy.sessionId" link type="primary" @click="navigation.openSession(schedule.createdBy.sessionId)">查看创建对话</ElButton></p>
             <p v-if="schedule.notify" class="job-channel">推送到：{{ connectors.find((connector) => connector.id === schedule.notify?.connectorId)?.name || "原消息接收方" }}</p>
             <div v-if="schedule.lastRun" class="last-run"><div><ElTag :type="schedule.lastRun.status === 'ok' ? 'success' : 'danger'" size="small" effect="plain">{{ schedule.lastRun.status === "ok" ? "最近执行成功" : "最近执行失败" }}</ElTag><time :datetime="schedule.lastRun.at">{{ formatTime(schedule.lastRun.at) }}</time></div><p>{{ schedule.lastRun.message }}</p><p v-if="schedule.lastRun.notified" :class="{ 'notification-error': !schedule.lastRun.notified.ok }">{{ schedule.lastRun.notified.ok ? "结果已推送" : `结果推送失败：${schedule.lastRun.notified.error || '请检查通知渠道'}` }}</p></div>
             <p v-else class="no-run">尚无完成的执行记录</p>
@@ -308,6 +321,8 @@ function runSessionId(schedule: Schedule): string | undefined {
 .job-timing { display:flex; align-items:center; flex-wrap:wrap; gap:10px 20px; color:var(--qdd-muted); font-size:12px; }
 .job-timing > span:first-child { display:inline-flex; align-items:center; gap:5px; }
 .job-channel { color:var(--qdd-muted); font-size:12px; margin:10px 0; }
+.job-origin { display:flex; align-items:center; flex-wrap:wrap; gap:8px; color:var(--qdd-muted); font-size:12px; margin:10px 0; }
+.job-origin :deep(.el-button) { font-size:12px; }
 .last-run { margin-top:16px; padding:14px; border-radius:8px; background:var(--qdd-bg); }
 .last-run > div { display:flex; flex-wrap:wrap; align-items:center; gap:10px; }
 .last-run time { font-size:11px; color:var(--qdd-muted); }

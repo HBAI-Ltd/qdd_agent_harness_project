@@ -12,6 +12,8 @@
 
 <script setup lang="ts">
 import { onMounted, ref } from "vue";
+import { ElButton } from "element-plus/es/components/button/index";
+import { ElCard } from "element-plus/es/components/card/index";
 import { getHealth, type HealthResponse } from "@/api/health";
 
 const health = ref<HealthResponse | null>(null);

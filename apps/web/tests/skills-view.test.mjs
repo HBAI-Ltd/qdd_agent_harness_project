@@ -60,7 +60,7 @@ registerHooks({
   resolve(specifier, context, nextResolve) {
     if (context.parentURL?.startsWith("data:text/javascript,")) {
       if (specifier === "vue") return { url: vueUrl, shortCircuit: true };
-      if (specifier === "element-plus") return { url: controlsUrl, shortCircuit: true };
+      if (specifier.startsWith("element-plus/es/components/")) return { url: controlsUrl, shortCircuit: true };
       if (specifier === "@/components/AgentIcon.vue") return { url: iconUrl, shortCircuit: true };
       if (specifier.startsWith("@/composables/")) return { url: contextUrl, shortCircuit: true };
       if (specifier.startsWith("@/api/")) return { url: apiUrl, shortCircuit: true };

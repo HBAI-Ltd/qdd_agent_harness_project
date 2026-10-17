@@ -1,8 +1,14 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import { ElButton, ElCard, ElCheckboxButton, ElCheckboxGroup, ElCollapse, ElCollapseItem, ElInput, ElRadioButton, ElRadioGroup } from "element-plus";
+import { ElButton } from "element-plus/es/components/button/index";
+import { ElCard } from "element-plus/es/components/card/index";
+import { ElCheckboxButton, ElCheckboxGroup } from "element-plus/es/components/checkbox/index";
+import { ElCollapse, ElCollapseItem } from "element-plus/es/components/collapse/index";
+import { ElInput } from "element-plus/es/components/input/index";
+import { ElRadioButton, ElRadioGroup } from "element-plus/es/components/radio/index";
 import type { ClarifyAnswers, ClarifyQuestion, SessionEvent, SessionStatus } from "@qdd/shared";
 import AgentIcon from "@/components/AgentIcon.vue";
+import { approvalPresentation, recordApprovalPreview, scheduleApprovalPreview } from "@/utils/approvalPreview";
 
 const props = defineProps<{
   sessionId?: string;
@@ -182,8 +188,8 @@ function skillPreview(request: ApprovalEvent) {
     <div v-for="request in pendingApprovals" :key="request.requestId" class="action-message">
       <span class="action-avatar"><AgentIcon name="spark" :size="18" /></span>
       <ElCard class="action-card approval-card" shadow="never">
-        <header class="action-heading"><strong>{{ request.tool === "save_skill" ? "把这套做法保存为技能" : "需要你的授权" }}</strong><span>{{ request.tool === "save_skill" ? "保存前确认" : "写入操作" }}</span></header>
-        <p class="action-description">{{ request.tool === "save_skill" ? "助手整理了以下步骤，确认后可以在其他对话和定时任务中复用。" : "助手申请执行以下操作，请确认后继续。" }}</p>
+        <header class="action-heading"><strong>{{ approvalPresentation(request.tool).title }}</strong><span>{{ approvalPresentation(request.tool).category }}</span></header>
+        <p class="action-description">{{ approvalPresentation(request.tool).description }}</p>
         <template v-if="skillPreview(request)">
           <div class="skill-preview">
             <h3>{{ skillPreview(request)?.name }}</h3>
@@ -192,6 +198,25 @@ function skillPreview(request: ApprovalEvent) {
             <div v-if="skillPreview(request)?.tools.length" class="skill-preview-tools"><span>会用到的工具</span><div><span v-for="tool in skillPreview(request)?.tools" :key="tool">{{ tool }}</span></div></div>
           </div>
         </template>
+        <div v-if="recordApprovalPreview(request)" class="operation-preview record-preview">
+          <h3>{{ recordApprovalPreview(request)?.label }}</h3>
+          <p class="operation-name">{{ recordApprovalPreview(request)?.name }}</p>
+          <ul><li v-for="(field, index) in recordApprovalPreview(request)?.fields" :key="index">{{ field }}</li></ul>
+          <p class="operation-note">记录编号、登记时间与来源由系统填写。已有字段会保留，不能删除或修改类型。</p>
+        </div>
+        <div v-if="scheduleApprovalPreview(request)" class="operation-preview schedule-preview">
+          <h3>{{ scheduleApprovalPreview(request)?.name }}</h3>
+          <dl class="operation-details">
+            <div><dt>执行规则</dt><dd>{{ scheduleApprovalPreview(request)?.cron }}<small>按网关所在时区执行</small></dd></div>
+            <div><dt>下次执行</dt><dd>{{ scheduleApprovalPreview(request)?.nextRun }}<small>网关时间</small></dd></div>
+            <div><dt>创建后状态</dt><dd>启用定时执行</dd></div>
+            <div><dt>关联技能</dt><dd>{{ scheduleApprovalPreview(request)?.skill || "不关联技能" }}</dd></div>
+            <div><dt>绑定页面</dt><dd>{{ scheduleApprovalPreview(request)?.page || "不绑定已有页面" }}<small v-if="scheduleApprovalPreview(request)?.page">绑定新页面时，页面发布后才会创建任务；已有页面确认后创建。</small></dd></div>
+            <div><dt>推送接收方</dt><dd>{{ scheduleApprovalPreview(request)?.notify || "仅留在工作台，不推送消息" }}</dd></div>
+          </dl>
+          <p class="operation-prompt">{{ scheduleApprovalPreview(request)?.prompt }}</p>
+          <p v-if="scheduleApprovalPreview(request)?.notify" class="operation-note">确认创建即允许此任务每次执行完成后向该接收方推送结论。</p>
+        </div>
         <dl class="approval-details"><div><dt>工具</dt><dd>{{ request.tool }}</dd></div><div><dt>来源</dt><dd>{{ request.source }}</dd></div></dl>
         <ElCollapse class="approval-arguments">
           <ElCollapseItem :name="request.requestId" title="查看操作参数">
@@ -199,8 +224,8 @@ function skillPreview(request: ApprovalEvent) {
           </ElCollapseItem>
         </ElCollapse>
         <footer class="action-footer">
-          <ElButton :disabled="busy" @click="approve(request.requestId, false)">{{ request.tool === "save_skill" ? "再改改" : "拒绝" }}</ElButton>
-          <ElButton type="warning" :disabled="busy" @click="approve(request.requestId, true)">{{ request.tool === "save_skill" ? "就这样，保存为技能" : "允许执行" }}</ElButton>
+          <ElButton :disabled="busy" @click="approve(request.requestId, false)">{{ approvalPresentation(request.tool).decline }}</ElButton>
+          <ElButton type="warning" :disabled="busy" @click="approve(request.requestId, true)">{{ approvalPresentation(request.tool).approve }}</ElButton>
         </footer>
       </ElCard>
     </div>
@@ -243,6 +268,17 @@ function skillPreview(request: ApprovalEvent) {
 .skill-preview-tools > span { color: var(--qdd-muted); font-size: 12px; }
 .skill-preview-tools > div { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 7px; }
 .skill-preview-tools > div > span { padding: 3px 8px; border: 1px solid var(--qdd-border); border-radius: 5px; background: var(--qdd-surface); font-size: 12px; }
+.operation-preview { margin-bottom:18px; padding-bottom:16px; border-bottom:1px solid var(--qdd-border); }
+.operation-preview h3 { margin:0 0 8px; font-size:17px; font-weight:600; overflow-wrap:anywhere; }
+.operation-name { margin:0 0 12px; color:var(--qdd-muted); font:12px/1.7 Consolas,monospace; overflow-wrap:anywhere; }
+.operation-preview ul { padding-left:22px; margin:0 0 12px; font-size:13px; line-height:1.9; overflow-wrap:anywhere; }
+.operation-details { display:grid; gap:10px; margin:14px 0; font-size:13px; line-height:1.7; }
+.operation-details > div { display:grid; grid-template-columns:85px minmax(0,1fr); gap:12px; }
+.operation-details dt { color:var(--qdd-muted); }
+.operation-details dd { margin:0; overflow-wrap:anywhere; }
+.operation-details small { display:block; margin-top:2px; color:var(--qdd-muted); font-size:11px; }
+.operation-prompt { margin:12px 0; font-size:13px; line-height:1.8; white-space:pre-wrap; overflow-wrap:anywhere; }
+.operation-note { margin:10px 0 0; color:var(--qdd-muted); font-size:12px; line-height:1.8; }
 .approval-details { display: grid; gap: 7px; margin: 0 0 12px; font-size: 13px; }
 .approval-details > div { display: flex; gap: 16px; }
 .approval-details dt { flex: 0 0 auto; color: var(--qdd-muted); }

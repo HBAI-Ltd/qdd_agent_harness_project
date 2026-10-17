@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { computed, defineAsyncComponent, nextTick, onMounted, ref, watch } from "vue";
-import { ElButton, ElCard, ElInput, type InputInstance } from "element-plus";
+import { ElButton } from "element-plus/es/components/button/index";
+import { ElCard } from "element-plus/es/components/card/index";
+import { ElInput } from "element-plus/es/components/input/index";
+import type { InputInstance } from "element-plus";
 import type { SessionEvent } from "@qdd/shared";
 import AgentIcon from "@/components/AgentIcon.vue";
 import MarkdownContent from "@/components/MarkdownContent.vue";

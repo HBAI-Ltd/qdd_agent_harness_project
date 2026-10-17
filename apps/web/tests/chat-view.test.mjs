@@ -51,7 +51,7 @@ registerHooks({
   resolve(specifier, context, nextResolve) {
     if (context.parentURL?.startsWith("data:text/javascript,")) {
       if (specifier === "vue") return { url: vueUrl, shortCircuit: true };
-      if (specifier === "element-plus") return { url: controlsUrl, shortCircuit: true };
+      if (specifier.startsWith("element-plus/es/components/")) return { url: controlsUrl, shortCircuit: true };
       if (specifier === "@/composables/workspaceContext") return { url: contextUrl, shortCircuit: true };
       if (specifier === "@/utils/markdown") return { url: markdownUrl, shortCircuit: true };
       if (specifier === "@/utils/chatTimeline") return { url: timelineUrl, shortCircuit: true };

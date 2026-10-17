@@ -13,7 +13,7 @@ registerHooks({
   resolve(specifier, contextInfo, nextResolve) {
     if (contextInfo.parentURL?.startsWith("data:text/javascript,")) {
       if (specifier === "vue") return { url: vueUrl, shortCircuit: true };
-      if (specifier === "element-plus") return { url: controls, shortCircuit: true };
+      if (specifier.startsWith("element-plus/es/components/")) return { url: controls, shortCircuit: true };
       if (specifier === "@/components/AgentIcon.vue") return { url: "data:text/javascript,export default {}", shortCircuit: true };
       if (specifier === "@/composables/workspaceContext") return { url: context, shortCircuit: true };
       if (specifier === "./browserSession") return { url: new URL("../src/components/browserSession.ts", import.meta.url).href, shortCircuit: true };

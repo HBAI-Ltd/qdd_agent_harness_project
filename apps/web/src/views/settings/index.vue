@@ -1,11 +1,14 @@
 <script setup lang="ts">
 import { onBeforeUnmount, ref, watch } from "vue";
+import { useRoute } from "vue-router";
 import WorkspaceSettings from "@/components/WorkspaceSettings.vue";
 import WorkspaceData from "@/components/WorkspaceData.vue";
+import WorkspaceRecords from "@/components/WorkspaceRecords.vue";
 import { useWorkspaceContext } from "@/composables/workspaceContext";
 import * as gatewayApi from "@/api/workspace";
 
 const { workspace } = useWorkspaceContext();
+const route = useRoute();
 const { gatewayUrl, token, preferences, connected, loadingSessions, loadingPages, error, loadWorkspace } = workspace;
 const styleText = ref("");
 const styleLoading = ref(false);
@@ -92,5 +95,6 @@ onBeforeUnmount(stopStyleRequests);
     @save-style="saveStyle()"
     @reset-style="saveStyle(true)">
     <WorkspaceData :connected="connected" :gateway-url="gatewayUrl" :token="token" />
+    <WorkspaceRecords :connected="connected" :gateway-url="gatewayUrl" :token="token" :initial-name="typeof route.query.record === 'string' ? route.query.record : undefined" />
   </WorkspaceSettings>
 </template>

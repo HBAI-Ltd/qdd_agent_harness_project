@@ -45,7 +45,6 @@ const bridgeUrl = dataModule(`
 `);
 const dependencies = new Map([
   ["vue", import.meta.resolve("vue")],
-  ["element-plus", controlsUrl],
   ["@/composables/workspaceContext", contextUrl],
   ["@/components/AgentIcon.vue", iconUrl],
   ["@/components/TaskPreview.vue", previewStubUrl],
@@ -53,8 +52,9 @@ const dependencies = new Map([
 ]);
 registerHooks({
   resolve(specifier, context, nextResolve) {
-    if (context.parentURL?.startsWith("data:text/javascript,") && dependencies.has(specifier)) {
-      return { url: dependencies.get(specifier), shortCircuit: true };
+    if (context.parentURL?.startsWith("data:text/javascript,")) {
+      const url = specifier.startsWith("element-plus/es/components/") ? controlsUrl : dependencies.get(specifier);
+      if (url) return { url, shortCircuit: true };
     }
     return nextResolve(specifier, context);
   },

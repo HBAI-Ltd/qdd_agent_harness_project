@@ -1,6 +1,10 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
-import { ElAlert, ElButton, ElInput, ElSwitch, ElTag } from "element-plus";
+import { ElAlert } from "element-plus/es/components/alert/index";
+import { ElButton } from "element-plus/es/components/button/index";
+import { ElInput } from "element-plus/es/components/input/index";
+import { ElSwitch } from "element-plus/es/components/switch/index";
+import { ElTag } from "element-plus/es/components/tag/index";
 import type { BrowserInput, BrowserSessionState } from "@qdd/shared";
 import AgentIcon from "@/components/AgentIcon.vue";
 import { useWorkspaceContext } from "@/composables/workspaceContext";

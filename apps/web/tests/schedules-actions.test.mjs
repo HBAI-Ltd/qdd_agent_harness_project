@@ -72,7 +72,7 @@ registerHooks({
   resolve(specifier, context, nextResolve) {
     if (context.parentURL?.startsWith("data:text/javascript,")) {
       if (specifier === "vue") return { url: vueUrl, shortCircuit: true };
-      if (specifier === "element-plus") return { url: controlsUrl, shortCircuit: true };
+      if (specifier.startsWith("element-plus/es/components/")) return { url: controlsUrl, shortCircuit: true };
       if (specifier === "@/components/AgentIcon.vue") return { url: iconUrl, shortCircuit: true };
       if (specifier === "@/components/StringSelectOption") return { url: optionUrl, shortCircuit: true };
       if (specifier.startsWith("@/composables/")) return { url: contextUrl, shortCircuit: true };
@@ -183,6 +183,21 @@ test("pause and enable submit partial updates, then refresh and show the actual 
   assert.deepEqual(calls.update[1].input, { enabled: true });
   assert.equal(calls.notices[1], "已启用定时执行");
   assert.equal(calls.refresh, 2);
+});
+
+test("agent-created schedules link to their creation conversation separately from execution", async () => {
+  const { root, calls, resources } = await mount({ schedules: [schedule({
+    createdBy: { kind: "agent", sessionId: "creation-session" },
+    lastRun: { sessionId: "execution-session", at, status: "ok", message: "完成" },
+  })] });
+  assert.match(textContent(root), /助手经确认创建/);
+  await click(root, "查看创建对话");
+  await click(root, "查看执行对话");
+  assert.deepEqual(calls.sessions, ["creation-session", "execution-session"]);
+  resources.schedules.data.value = [schedule()];
+  await nextTick();
+  assert.equal(button(root, "查看创建对话"), undefined);
+  assert.doesNotMatch(textContent(root), /助手经确认创建/);
 });
 
 test("immediate run uses its returned session before the global session list catches up", async () => {

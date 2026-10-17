@@ -16,7 +16,7 @@ registerHooks({
   resolve(specifier, context, nextResolve) {
     if (context.parentURL?.startsWith("data:text/javascript,")) {
       if (specifier === "vue") return { url: import.meta.resolve("vue"), shortCircuit: true };
-      if (specifier === "element-plus") return { url: controlsUrl, shortCircuit: true };
+      if (specifier.startsWith("element-plus/es/components/")) return { url: controlsUrl, shortCircuit: true };
       if (specifier === "@/components/AgentIcon.vue") return { url: iconUrl, shortCircuit: true };
       if (specifier === "@/utils/taskPageBridge") return { url: new URL("../src/utils/taskPageBridge.ts", import.meta.url).href, shortCircuit: true };
     }

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { ElButton, ElTag } from "element-plus";
+import { ElButton } from "element-plus/es/components/button/index";
+import { ElTag } from "element-plus/es/components/tag/index";
 import type { JsonValue as PageBridgePayload, PageView } from "@qdd/shared";
 import AgentIcon from "@/components/AgentIcon.vue";
 import { createTaskPageBridge, type TaskPageEvent } from "@/utils/taskPageBridge";
@@ -13,7 +14,7 @@ const props = defineProps<{
   pinPending?: boolean;
 }>();
 
-const emit = defineEmits<{ message: [message: TaskPageEvent]; pin: [pinned: boolean]; schedules: [] }>();
+const emit = defineEmits<{ message: [message: TaskPageEvent]; pin: [pinned: boolean]; schedules: []; records: [name: string] }>();
 const frame = ref<HTMLIFrameElement>();
 
 const documentUrl = ref("");
@@ -133,6 +134,9 @@ watch(
     </header>
     <div v-if="page.schedules.length" class="preview-schedules" aria-label="关联定时任务">
       <span>定时更新：</span><ElButton v-for="schedule in page.schedules" :key="schedule.id" text size="small" :aria-label="`管理定时任务：${schedule.name}，${schedule.enabled ? '已启用' : '已暂停'}`" @click="emit('schedules')">{{ schedule.name }}<ElTag :type="schedule.enabled ? 'success' : 'info'" effect="plain" size="small">{{ schedule.enabled ? "已启用" : "已暂停" }}</ElTag><AgentIcon name="chevron" :size="12" /></ElButton>
+    </div>
+    <div v-if="page.records?.length" class="preview-schedules" aria-label="页面使用的登记表">
+      <span>登记记录：</span><ElButton v-for="name in page.records" :key="name" text size="small" :aria-label="`管理登记记录：${name}`" @click="emit('records', name)">{{ name }}<AgentIcon name="chevron" :size="12" /></ElButton>
     </div>
     <p v-if="page.stale" class="preview-notice" role="status">
       待复核：{{ page.stale }}

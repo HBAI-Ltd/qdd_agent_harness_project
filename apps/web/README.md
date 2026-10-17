@@ -16,7 +16,9 @@ npm run dev:web
 
 访问 `http://127.0.0.1:5177`。前端的默认网关地址和开发/预览代理目标按以下顺序读取配置：`API_PROXY_TARGET` → 根目录 `.env` 的 `HOST`、`PORT` → `harness.config.json` 的 `gateway.host`、`gateway.port` → 后端内置默认值。`.env.example` 与 `harness.config.example.json` 均使用 `http://127.0.0.1:3000`。环境中的 `HOST`、`PORT` 会覆盖后端配置文件中的地址。
 
-开发模式会预热入口、公共布局和默认聊天页，并显式预构建 Element Plus 的自动导入入口，减少首次打开时的串行转换与新增依赖触发的重新预构建。实时浏览器组件在点击查看画面后才加载；版本更新提示插件只在生产构建启用。保留 Vite 的 `node_modules/.vite` 缓存，日常启动无需使用 `--force`。修改 Vite 配置后重启 `npm run dev:web`；首次重建依赖缓存仍需时间，后续启动会复用缓存。
+开发模式会预热入口、公共布局和默认聊天页。Element Plus 的运行时代码显式从 `element-plus/es/components/<组件族>/index` 导入，由 Vite 扫描并预构建实际使用的入口，避免加载整库 JavaScript；类型仍可从 `element-plus` 导入。新增 UI 组件时沿用组件级导入（例如 `ElButton` 使用 `button/index`，`ElFormItem` 使用 `form/index`）。实时浏览器组件在需要展示画面时才加载；版本更新提示插件只在生产构建启用。保留 `apps/web/node_modules/.vite` 缓存，日常启动无需使用 `--force`。修改 Vite 配置后重启 `npm run dev:web`；首次重建依赖缓存仍需时间，后续启动会复用缓存。
+
+开发时保存文件即可触发热更新，通常无需手动刷新。浏览器开发者工具 Network 中不要勾选 **Disable cache**；普通刷新会复用预构建依赖，源码的 `304` 请求只是检查是否修改，不会重新下载整份代码。`Ctrl+F5` 等强制刷新会绕过缓存，适合排查缓存问题；不要作为日常刷新方式。缓存行为见 [Vite 性能指南](https://vite.dev/guide/performance.html#review-your-browser-setup)。
 
 在「设置」检查网关地址与后端启动时打印的地址一致；浏览器可能保留了旧地址，可点击「使用配置地址」更新。修改地址配置后需重启 Vite；预览或部署已有构建时需重新构建前端。`API_PROXY_TARGET` 只调整前端连接目标，不会启动网关或改变后端监听地址。
 
@@ -77,6 +79,14 @@ UI 对接入口：
 npm run typecheck --workspace @qdd/web
 npm run build:web
 ```
+
+开发加载与缓存回归使用独立 Vite 端口、临时依赖缓存和干净的 Chrome 会话，验证重复刷新复用依赖、源码返回 `304`，以及模块热更新无需重载文档：
+
+```powershell
+node scripts/test-frontend-dev-cache.mjs
+```
+
+默认使用本机 Chrome；可通过 `CHROME_PATH` 指定浏览器可执行文件。脚本输出本机加载耗时和传输量，不设固定耗时门槛。
 
 网关地址与接口回归测试位于 `tests/gateway-config.test.ts`、`tests/workspace-api.test.ts` 和 `tests/workspace.test.mjs`，使用 Node.js 内置测试器：
 

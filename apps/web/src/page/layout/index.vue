@@ -1,7 +1,11 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, provide, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
-import { ElAlert, ElBreadcrumb, ElBreadcrumbItem, ElButton, ElMessage, ElTag } from "element-plus";
+import { ElAlert } from "element-plus/es/components/alert/index";
+import { ElBreadcrumb, ElBreadcrumbItem } from "element-plus/es/components/breadcrumb/index";
+import { ElButton } from "element-plus/es/components/button/index";
+import { ElMessage } from "element-plus/es/components/message/index";
+import { ElTag } from "element-plus/es/components/tag/index";
 import AgentIcon from "@/components/AgentIcon.vue";
 import WorkspaceSidebar from "@/components/WorkspaceSidebar.vue";
 import { useWorkspace } from "@/composables/useWorkspace";
@@ -87,6 +91,11 @@ async function openPage(slug: string): Promise<void> {
   sidebarOpen.value = false;
   await router.push({ name: "tasks", params: { slug } });
 }
+async function openRecords(name: string): Promise<void> {
+  navigationVersion++;
+  sidebarOpen.value = false;
+  await router.push({ name: "settings", query: { record: name }, hash: "#settings-records" });
+}
 async function editPage(slug: string): Promise<boolean> {
   const version = ++navigationVersion;
   if (activeSessionId.value !== null || !workspace.sending.value) beginSelection();
@@ -137,7 +146,7 @@ function shortcut(event: KeyboardEvent) {
 
 provide(WORKSPACE_CONTEXT, {
   workspace, overview, pending, draft, submitMessage, notify,
-  navigation: { openConversation, openSession: selectConversation, newConversation, runSkill, openPage, openView, editPage },
+  navigation: { openConversation, openSession: selectConversation, newConversation, runSkill, openPage, openRecords, openView, editPage },
 });
 onMounted(() => {
   document.addEventListener("keydown", shortcut);

@@ -27,7 +27,7 @@ const controlsUrl = "data:text/javascript," + encodeURIComponent(`
 const hooks = registerHooks({
   resolve(specifier, context, nextResolve) {
     if (context.parentURL?.startsWith("data:text/javascript,")) {
-      const url = specifier === "vue" ? vueUrl : specifier === "element-plus" ? controlsUrl : specifier === "@/api/datasets" ? apiUrl : undefined;
+      const url = specifier === "vue" ? vueUrl : specifier.startsWith("element-plus/es/components/") ? controlsUrl : specifier === "@/api/datasets" ? apiUrl : undefined;
       if (url) return { url, shortCircuit: true };
     }
     return nextResolve(specifier, context);

@@ -44,6 +44,17 @@ Aidol 创造营参赛项目——钱多多门店人工智能助手：店铺管�
 - **草稿 + 原子发布**，失败不留半成品；页面带 CSP，只能连回网关。
 - **写入类数据工具**：不开放直接调用；只能在许愿会话里由 agent 发起，并等店长通过 `approval_required` 授权（终端或前端），配置 `allowWrite: true` 才免确认。
 
+### 工作台：技能、定时任务、连接器
+
+- **待办与总览**：`GET /api/overview` / `GET /api/pending` 汇总所有会话里待店长处理的授权和问题；授权等待时长由 `approvalTimeoutMin`（默认 60 分钟）控制。
+- **技能**（`workspace/skills/`）：可复用的做事方法；agent 可从对话中 `save_skill`（需店长确认）、`load_skill`。
+- **定时任务**（`workspace/schedules.json`）：5 段 cron，网关内调度；到点无人值守执行（可绑定技能），结论推送到连接器；停机错过的执行会补跑。
+- **连接器**（`workspace/connectors.json`）：目前开放飞书（群机器人 webhook / 企业自建应用），安装前先验证，凭据加密存储；agent 用 `send_notification` 推送（按连接器权限需店长确认）。
+
+### 浏览器
+
+`browser.enabled: true` 后 agent 可操作本机 Chrome/Edge（移植自 Toonflow-app 的浏览器工具），前端通过 `/api/browser/:id/stream` 实时观看、`/input` 接管；首次点击/输入需店长授权。
+
 ### 统一风格
 
 `workspace/style.md` 是所有页面共用的风格提示词（内置主题 `assets/theme.css`）。前端设置页调用 `GET/PUT/DELETE /api/style`，或在终端执行 `npm run qdd -- style --edit`。

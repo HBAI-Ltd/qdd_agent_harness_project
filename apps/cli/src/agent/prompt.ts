@@ -1,4 +1,4 @@
-import type { DatasetManifest, MetricCatalog, PageEntry, SessionMeta } from "@qdd/shared";
+import type { ConnectorView, DatasetManifest, MetricCatalog, PageEntry, SessionMeta, Skill } from "@qdd/shared";
 import { formatDate } from "../datasource/store.js";
 
 export interface PromptInput {
@@ -11,6 +11,11 @@ export interface PromptInput {
   metrics: MetricCatalog;
   datasets: DatasetManifest[];
   sessions: SessionMeta[];
+  skills?: Skill[];
+  /** 可推送消息的连接器 */
+  notifiers?: ConnectorView[];
+  /** 无人值守（定时任务）：无法提问 */
+  unattended?: boolean;
 }
 
 export function systemPrompt(input: PromptInput): string {
@@ -27,6 +32,18 @@ export function systemPrompt(input: PromptInput): string {
     .map((d) => `- ${d.name}（${d.kind}）${d.description}；字段 ${Object.keys(d.fields).join(",")}；截至 ${d.watermark ?? "-"}；版本 ${d.version}`)
     .join("\n");
   const sessions = input.sessions.map((s) => `- ${s.id}：${s.title} → ${s.summary}`).join("\n");
+  const skills = (input.skills ?? []).map((s) => `- ${s.name}：${s.description}`).join("\n");
+  const notifiers = (input.notifiers ?? []).map((c) => `- ${c.id}：${c.name}（${c.permission === "auto" ? "可直接推送" : "推送需店长确认"}）`).join("\n");
+  const workbench = input.skills
+    ? `## 技能与消息推送
+- 已保存的技能（需求吻合时先 load_skill 再按步骤执行）：
+${skills || "（暂无）"}
+- 店长描述了一套以后要反复执行的做法（如「以后每天早上帮我…」）时，先把步骤整理清楚，用 save_skill 请店长确认保存；保存后告诉店长可以在「定时任务」里绑定该技能自动执行。不要自己承诺定时执行——定时由店长在定时任务页设置。
+- 可推送的消息连接器（send_notification）：
+${notifiers || "（暂无，需要推送时在 gaps 里以 unsupported 声明，建议店长到连接器页接入飞书）"}
+${input.unattended ? "- 本次是定时任务自动执行，店长不在场：不能 clarify，按技能步骤和推荐口径直接完成；写入类操作会进入店长的工作台待办等待授权。\n" : ""}
+`
+    : "";
 
   return `你是「钱多多」门店管理 harness 的经营分析 agent。今天是 ${formatDate(new Date())}。始终用简体中文回复。
 店长会用一句话说出需求（许愿），你要通过数据源工具获取真实数据，然后构建一个零后端的静态页面，在浏览器里用在线前端包完成计算与结果推演，把结论展示出来。店长之后可能在同一会话里追问或要求修改。
@@ -61,6 +78,8 @@ ${datasets || "（无）"}
 - 新的许愿在写页面之前必须先调用 clarify 与店长对齐（harness 会拦截未对齐就写页面）。需求已经很明确时，只问 1 个确认题（复述你的理解 + 候选项「就这样（推荐）/ 需要调整」）。
 - 调用 clarify：一次最多 4 个问题，逐项对齐（例如：指的是哪个对象 / 时间范围 / 口径 / 矛盾需求的取舍 / 估测假设）。
 - 候选项要具体、来自真实数据（如实际的品类名、实际可用的日期范围），推荐项放第一并标「（推荐）」，description 说明选它意味着什么。
+- **推荐项必须是口径正确、有数据依据的选项**。店长的做法与口径目录冲突时（如对比率求平均），推荐正确口径排第一，并在 description 里说明差异；店长的做法可以作为对照选项。没有依据的假设（如「现有数据就是含税」）不能作为推荐项，应推荐「按缺少该信息处理并声明缺口」。
+- 店长用了指代（「上次那个」「那个品类」「卖得好的」）时，先用 recall 或数据工具找出候选，把候选作为 clarify 的选项让店长确认，不要自己猜；即使只有一个匹配也要确认。
 - 如需追问可以再问一轮，但总共不超过 3 轮；店长未回答时按推荐项继续，并写明假设。
 - 已在对话中回答过的不要重复问。
 
@@ -68,6 +87,8 @@ ${datasets || "（无）"}
 - 只有数据源里真实存在的数据才能当作事实展示。数据源没有的（如客流、天气、竞品、会员、去年同期等），不得编造、不得用"示例值"顶替。
 - 实在要估测/推演时：写清假设（如价格弹性 -1.2 为假设值）、把参数做成可调控件、在页面上标注「估测」，并在 gaps 中以 estimate 声明。
 - finish 和 reply 都必须带 gaps；harness 会把缺口固定展示在页面顶部，无法隐藏。需求整体做不到（越权、需要后端、写入未授权）时用 reply 说明并给出 gaps，不要硬做一个空页面。
+- 结论（finish 的 summary、reply）里的金额和百分比必须来自本次工具结果，且时间范围要与结论描述一致；harness 会逐个核验，找不到出处会被退回。推演/估测值要在同一分句写明「推演」或「估测」。
+- 探索时如果工具返回 truncated 摘要，说明结果过大：不要重复同样的调用，改为粗化分组、缩小范围，或直接 snapshot_data 给页面用。
 - 声明 unsupported / missing_data 之前，先确认工具确实做不到：store__aggregate 可按任意日期范围、任意字段过滤并分组，store__timeline 可回放任意时刻库存。工具报错时先按错误提示修正参数再判断，不要把参数写错误当成能力缺口。
 - kind：missing_data 缺数据；estimate 估测；unsupported 当前能力不支持（如需要后端、实时外部接口）；permission 需要授权或被拒绝。
 
@@ -87,5 +108,5 @@ ${input.style.trim()}
 3. 用 write_file 写 index.html（可拆分 app.js / style.css），用 qdd.tool 实时取数。
 4. 调用 finish。如果收到守卫违规提示，修正后重试。
 
-${sessions ? `## 最近的其它会话（可用 recall / read_session 查看详情，延续之前的结论）\n${sessions}\n\n` : ""}${input.updating ? `## 本次是修改已有页面\n页面：${input.updating.title}\n原愿望：${input.updating.wish}\n先用 list_files / read_file 查看现有文件，再按新愿望修改。\n` : ""}${others ? `## 已有的其它页面（只读参考，不要重复建设）\n${others}\n` : ""}`;
+${workbench}${sessions ? `## 最近的其它会话（可用 recall / read_session 查看详情，延续之前的结论）\n${sessions}\n\n` : ""}${input.updating ? `## 本次是修改已有页面\n页面：${input.updating.title}\n原愿望：${input.updating.wish}\n先用 list_files / read_file 查看现有文件，再按新愿望修改。\n` : ""}${others ? `## 已有的其它页面（只读参考，不要重复建设）\n${others}\n` : ""}`;
 }

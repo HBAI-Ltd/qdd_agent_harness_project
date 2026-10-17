@@ -86,12 +86,12 @@ export function useWorkspace() {
         enterToSend: typeof value.enterToSend === "boolean" ? value.enterToSend : true,
       };
     }
-    gatewayUrl.value = localStorage.getItem(GATEWAY_KEY) || api.DEFAULT_GATEWAY_URL;
+    gatewayUrl.value = localStorage.getItem(GATEWAY_KEY) || __DEV_GATEWAY_URL__ || api.DEFAULT_GATEWAY_URL;
   } catch {
     // 浏览器禁用存储时仍可在当前页面设置连接与偏好。
   }
   try {
-    token.value = sessionStorage.getItem(TOKEN_KEY) || "";
+    token.value = sessionStorage.getItem(TOKEN_KEY) || __DEV_GATEWAY_TOKEN__;
   } catch {
     // token 只在当前标签页保存，存储不可用时留在内存。
   }
@@ -197,7 +197,7 @@ export function useWorkspace() {
         await api.gatewayEvents(gatewayUrl.value, token.value, (event) => {
           if (controller.signal.aborted || disposed || version !== connectionVersion) return;
           if (event.type === "pages_changed") void refreshPages();
-          else applyMeta(event.session);
+          else if (event.type === "session_updated") applyMeta(event.session);
         }, controller.signal, () => {
           streamOpened(controller);
           if (reconnecting) {

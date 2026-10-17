@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { appendFile, readdir, readFile } from "node:fs/promises";
 import path from "node:path";
-import type { ClarifyAnswers, ClarifyQuestion, JsonObject, SessionDetail, SessionEvent, SessionMeta } from "@qdd/shared";
-import { runWish, type AgentEvent } from "./agent/agent.js";
+import type { ClarifyAnswers, ClarifyQuestion, JsonObject, PendingItem, SessionDetail, SessionEvent, SessionMeta } from "@qdd/shared";
+import { runWish, WishError, type AgentEvent } from "./agent/agent.js";
 import type { ChatFn, ChatMessage } from "./agent/llm.js";
 import type { LoadedConfig } from "./config.js";
 import type { DataSources } from "./datasource/registry.js";
+import type { Workbench } from "./workbench/index.js";
 import { writeAtomic } from "./web/site.js";
 
 /**
@@ -15,23 +16,32 @@ import { writeAtomic } from "./web/site.js";
  *   sessions/<id>.messages.json  完整 LLM 对话（续聊用）
  */
 const ID_RE = /^[0-9a-f-]{36}$/;
-const APPROVAL_TIMEOUT_MS = 5 * 60_000;
 const QUESTION_TIMEOUT_MS = 30 * 60_000;
 
 type Distribute<T> = T extends unknown ? Omit<T, "at"> : never;
 export type NewEvent = Distribute<SessionEvent>;
 
-interface PendingApproval {
-  resolve(approved: boolean): void;
-  timer: NodeJS.Timeout;
+type PendingDetail = PendingItem extends infer T ? (T extends unknown ? Omit<T, "sessionTitle" | "origin"> : never) : never;
+
+export interface CreateOptions {
+  /** 在已有页面上修改 */
+  slug?: string | undefined;
+  origin?: SessionMeta["origin"];
+  /** 预先加载的技能 */
+  skillId?: string | undefined;
+  /** 无人值守（定时任务）：不提问，授权仍进入工作台待办 */
+  unattended?: boolean;
 }
 
 export class SessionHub {
   private readonly running = new Map<string, AbortController>();
   /** 页面 → 正在修改它的会话，同一页面同时只允许一个会话修改 */
   private readonly editing = new Map<string, string>();
-  private readonly approvals = new Map<string, PendingApproval & { sessionId: string }>();
-  private readonly questions = new Map<string, { sessionId: string; questions: ClarifyQuestion[]; resolve(a: ClarifyAnswers | null): void }>();
+  private readonly approvals = new Map<string, { detail: PendingDetail; resolve(approved: boolean): void }>();
+  private readonly questions = new Map<string, { detail: PendingDetail; questions: ClarifyQuestion[]; resolve(a: ClarifyAnswers | null): void }>();
+  /** 无人值守运行的会话 */
+  private readonly unattended = new Set<string>();
+  private readonly pendingListeners = new Set<() => void>();
   /** 每个会话尚未处理的提问/授权数，>0 时状态为 waiting */
   private readonly pendingCount = new Map<string, number>();
   private readonly rounds = new Map<string, number>();
@@ -42,6 +52,7 @@ export class SessionHub {
     private readonly loaded: LoadedConfig,
     private readonly sources: DataSources,
     private readonly chat: () => ChatFn,
+    private readonly workbench?: Workbench,
   ) {}
 
   private file(id: string, kind: "meta.json" | "events.jsonl" | "messages.json") {
@@ -91,16 +102,61 @@ export class SessionHub {
     return () => this.metaListeners.delete(listener);
   }
 
+  onPending(listener: () => void): () => void {
+    this.pendingListeners.add(listener);
+    return () => this.pendingListeners.delete(listener);
+  }
+
+  private pendingChanged(): void {
+    for (const l of this.pendingListeners) l();
+  }
+
+  /** 所有会话里等待店长处理的授权与问题（工作台待办）。 */
+  async pending(): Promise<PendingItem[]> {
+    const details = [...[...this.approvals.values()].map((a) => a.detail), ...[...this.questions.values()].map((q) => q.detail)];
+    const metas = new Map<string, SessionMeta | undefined>();
+    for (const d of details) if (!metas.has(d.sessionId)) metas.set(d.sessionId, await this.meta(d.sessionId).catch(() => undefined));
+    return details
+      .map((d) => {
+        const meta = metas.get(d.sessionId);
+        return { ...d, sessionTitle: meta?.title ?? "", ...(meta?.origin ? { origin: meta.origin } : {}) } as PendingItem;
+      })
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  }
+
   isRunning(id: string): boolean {
     return this.running.has(id);
   }
 
   /** 发起许愿，返回会话 id；agent 在后台运行，进度通过事件推送。 */
-  async create(wish: string, slug?: string): Promise<SessionMeta> {
+  async create(wish: string, options: CreateOptions | string = {}): Promise<SessionMeta> {
+    const opts: CreateOptions = typeof options === "string" ? { slug: options } : options;
+    let skill: { id: string; name: string } | undefined;
+    if (opts.skillId) {
+      if (!this.workbench) throw new BadRequest("技能不可用");
+      const found = await this.workbench.skills.find(opts.skillId);
+      if (!found) throw new NotFound("技能不存在");
+      skill = { id: found.id, name: found.name };
+    }
     const now = new Date().toISOString();
-    const meta: SessionMeta = { id: randomUUID(), title: wish.slice(0, 40), summary: "", slug: slug ?? null, status: "idle", createdAt: now, updatedAt: now };
+    const meta: SessionMeta = {
+      id: randomUUID(),
+      title: (opts.origin?.scheduleName ?? wish).slice(0, 40),
+      summary: "",
+      slug: opts.slug ?? null,
+      status: "idle",
+      ...(opts.origin ? { origin: opts.origin } : {}),
+      createdAt: now,
+      updatedAt: now,
+    };
     await this.saveMeta(meta);
-    await this.start(meta, wish);
+    if (opts.unattended) this.unattended.add(meta.id);
+    try {
+      await this.start(meta, wish, skill?.id);
+    } catch (error) {
+      this.unattended.delete(meta.id);
+      throw error;
+    }
     return this.meta(meta.id);
   }
 
@@ -114,14 +170,14 @@ export class SessionHub {
 
   approve(id: string, requestId: string, approved: boolean): void {
     const pending = this.approvals.get(requestId);
-    if (!pending || pending.sessionId !== id) throw new NotFound("授权请求不存在或已过期");
+    if (!pending || pending.detail.sessionId !== id) throw new NotFound("授权请求不存在或已过期");
     pending.resolve(approved);
   }
 
   /** 回答澄清问题；校验答案必须是候选项（允许自填的问题除外）。 */
   answer(id: string, requestId: string, answers: ClarifyAnswers): void {
     const pending = this.questions.get(requestId);
-    if (!pending || pending.sessionId !== id) throw new NotFound("问题不存在或已过期");
+    if (!pending || pending.detail.sessionId !== id) throw new NotFound("问题不存在或已过期");
     const clean: ClarifyAnswers = {};
     for (const q of pending.questions) {
       const picked = answers[q.id];
@@ -146,7 +202,7 @@ export class SessionHub {
     return this.meta(id);
   }
 
-  private async start(meta: SessionMeta, text: string): Promise<void> {
+  private async start(meta: SessionMeta, text: string, skillId?: string): Promise<void> {
     const chat = this.chat(); // 缺少 API key 时在这里同步报错
     if (meta.slug) {
       const holder = this.editing.get(meta.slug);
@@ -157,10 +213,10 @@ export class SessionHub {
     this.running.set(meta.id, controller);
     await this.emit(meta.id, { type: "user", text });
     await this.setStatus(meta, "running");
-    void this.run(meta, text, chat, controller);
+    void this.run(meta, text, chat, controller, skillId);
   }
 
-  private async run(meta: SessionMeta, text: string, chat: ChatFn, controller: AbortController): Promise<void> {
+  private async run(meta: SessionMeta, text: string, chat: ChatFn, controller: AbortController, skillId?: string): Promise<void> {
     const id = meta.id;
     try {
       let history: ChatMessage[] = [];
@@ -173,14 +229,16 @@ export class SessionHub {
         this.loaded,
         this.sources,
         chat,
-        { wish: text, sessionId: id, slug: meta.slug ?? undefined, history },
+        { wish: text, sessionId: id, slug: meta.slug ?? undefined, history, skillId, workbench: this.workbench },
         {
           signal: controller.signal,
           onEvent: (e: AgentEvent) => {
-            if (e.kind !== "ok") void this.emit(id, { type: e.kind, text: e.text });
+            if (e.kind === "skill") void this.emit(id, { type: "skill", skill: e.skill, action: e.action });
+            else if (e.kind === "browser") void this.emit(id, { type: "browser", browser: e.state });
+            else if (e.kind !== "ok") void this.emit(id, { type: e.kind, text: e.text });
           },
           authorize: (tool, args) => this.waitFor(meta, this.requestApproval(id, tool.name, tool.source, args)),
-          clarify: (questions) => this.waitFor(meta, this.requestClarify(id, questions)),
+          clarify: this.unattended.has(id) ? undefined : (questions) => this.waitFor(meta, this.requestClarify(id, questions)),
         },
       );
       await writeAtomic(this.file(id, "messages.json"), JSON.stringify(result.messages));
@@ -194,14 +252,20 @@ export class SessionHub {
       this.running.delete(id);
       await this.setStatus(meta, "idle");
     } catch (error) {
+      // 失败也保存对话，店长可以在同一会话里说「继续」
+      if (error instanceof WishError && error.messages.length) {
+        await writeAtomic(this.file(id, "messages.json"), JSON.stringify(error.messages)).catch(() => {});
+      }
       await this.emit(id, { type: "error", message: controller.signal.aborted ? "已取消" : (error as Error).message });
       this.running.delete(id);
       await this.setStatus(meta, "error");
     } finally {
       this.running.delete(id);
       for (const [slug, holder] of this.editing) if (holder === id) this.editing.delete(slug);
-      for (const q of this.questions.values()) if (q.sessionId === id) q.resolve(null);
+      for (const q of this.questions.values()) if (q.detail.sessionId === id) q.resolve(null);
+      for (const a of this.approvals.values()) if (a.detail.sessionId === id) a.resolve(false);
       this.pendingCount.delete(id);
+      this.unattended.delete(id);
     }
   }
 
@@ -227,26 +291,35 @@ export class SessionHub {
       const done = (answers: ClarifyAnswers | null) => {
         clearTimeout(timer);
         if (!this.questions.delete(requestId)) return;
+        this.pendingChanged();
         void this.emit(sessionId, { type: "question_answered", requestId, answers });
         resolve(answers);
       };
       const timer = setTimeout(() => done(null), QUESTION_TIMEOUT_MS);
-      this.questions.set(requestId, { sessionId, questions, resolve: done });
+      const now = Date.now();
+      const detail: PendingDetail = { kind: "question", requestId, sessionId, questions, createdAt: new Date(now).toISOString(), expiresAt: new Date(now + QUESTION_TIMEOUT_MS).toISOString() };
+      this.questions.set(requestId, { detail, questions, resolve: done });
+      this.pendingChanged();
       void this.emit(sessionId, { type: "question_required", requestId, round, questions });
     });
   }
 
   private requestApproval(sessionId: string, tool: string, source: string, args: JsonObject): Promise<boolean> {
     const requestId = randomUUID();
+    const timeoutMs = this.loaded.config.approvalTimeoutMin * 60_000;
     return new Promise<boolean>((resolve) => {
       const done = (approved: boolean) => {
         clearTimeout(timer);
-        this.approvals.delete(requestId);
+        if (!this.approvals.delete(requestId)) return;
+        this.pendingChanged();
         void this.emit(sessionId, { type: "approval_resolved", requestId, approved });
         resolve(approved);
       };
-      const timer = setTimeout(() => done(false), APPROVAL_TIMEOUT_MS);
-      this.approvals.set(requestId, { sessionId, resolve: done, timer });
+      const timer = setTimeout(() => done(false), timeoutMs);
+      const now = Date.now();
+      const detail: PendingDetail = { kind: "approval", requestId, sessionId, tool, source, args, createdAt: new Date(now).toISOString(), expiresAt: new Date(now + timeoutMs).toISOString() };
+      this.approvals.set(requestId, { detail, resolve: done });
+      this.pendingChanged();
       void this.emit(sessionId, { type: "approval_required", requestId, tool, source, args });
     });
   }

@@ -12,6 +12,7 @@ import { compactDataset } from "./datasets/query.js";
 import { refreshDatasets } from "./datasets/refresh.js";
 import { resolveGatewayToken } from "./gateway/auth.js";
 import { startGateway } from "./gateway/server.js";
+import { openWorkbench } from "./workbench/index.js";
 import { checkFile } from "./guard.js";
 import { SessionHub } from "./sessions.js";
 import { ensureWorkspace, readPages, readStyle, resetStyle } from "./web/site.js";
@@ -120,6 +121,8 @@ function printEvent(e: SessionEvent): void {
     case "published": return console.log(`\x1b[32m✓ 已发布「${e.page.title}」${e.page.summary}\x1b[0m`);
     case "error": return console.log(`\x1b[31m✗ ${e.message}\x1b[0m`);
     case "user": return console.log(`\x1b[2m> ${e.text}\x1b[0m`);
+    case "skill": return console.log(`\x1b[36m· 技能「${e.skill.name}」${e.action === "saved" ? "已保存" : "已加载"}\x1b[0m`);
+    case "browser": return console.log(`\x1b[36m· 浏览器 ${e.browser.status === "closed" ? "已关闭" : `${e.browser.title || e.browser.url}`}\x1b[0m`);
     case "status": return;
   }
 }
@@ -179,7 +182,8 @@ async function main() {
     case "wish":
     case "reply": {
       const sources = await openSources(loaded);
-      const hub = new SessionHub(loaded, sources, chat);
+      const workbench = await openWorkbench(loaded);
+      const hub = new SessionHub(loaded, sources, chat, workbench);
       try {
         let id: string;
         if (command === "wish") {
@@ -193,6 +197,7 @@ async function main() {
         }
         await follow(hub, id, values.yes);
       } finally {
+        await workbench.browser?.close();
         await sources.close();
       }
       return;

@@ -5,6 +5,7 @@ import {
   join,
   mapKeys,
   replay,
+  resolveMetrics,
   segments,
   timeline,
   type AggSpec,
@@ -62,6 +63,23 @@ async function validateAggregate(ctx: QueryContext, args: AggregateArgs): Promis
     if (typeof f !== "string" || !fields.has(f)) errors.push(`${where}：字段 ${String(f)} 不存在（可用：${[...fields].join(", ")}）`);
   };
   if (!Array.isArray(args.metrics) || !args.metrics.length) errors.push("metrics 不能为空");
+  else {
+    // 指标依赖的字段必须在数据集里，否则会静默聚合出 0
+    const catalog = await ctx.metrics();
+    const missing = new Set<string>();
+    try {
+      for (const name of resolveMetrics(args.metrics, catalog).base) {
+        const f = catalog[name]?.field;
+        if (f && !fields.has(f)) missing.add(`${name}（需要字段 ${f}）`);
+      }
+    } catch (error) {
+      errors.push((error as Error).message);
+    }
+    if (missing.size) {
+      const usable = Object.entries(catalog).filter(([, d]) => d.type !== "ratio" && d.field && fields.has(d.field)).map(([k]) => k);
+      errors.push(`数据集 ${args.dataset} 不支持指标 ${[...missing].join("、")}；该数据集可用指标：${usable.join(", ") || "无"}（字段：${Object.keys(m.fields).join(", ")}）`);
+    }
+  }
   for (const g of args.groupBy ?? []) field(g, "groupBy");
   for (const f of args.filter ?? []) {
     if (!Array.isArray(f) || f.length !== 3) errors.push(`filter 每项应为 [字段, 操作, 值]，收到 ${JSON.stringify(f)}`);

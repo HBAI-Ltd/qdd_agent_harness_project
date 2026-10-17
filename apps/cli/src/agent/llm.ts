@@ -35,7 +35,7 @@ export function createChat(llm: HarnessConfig["llm"]): ChatFn {
       const res = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-        body: JSON.stringify({ model: llm.model, messages, tools, tool_choice: "auto", temperature: 0.2 }),
+        body: JSON.stringify({ model: llm.model, messages, tools, tool_choice: "auto", temperature: 0.2, max_tokens: llm.maxTokens }),
         signal: signal ?? null,
       });
       if ((res.status === 429 || res.status >= 500) && attempt < 3) {

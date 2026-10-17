@@ -11,8 +11,11 @@ export const DEFAULT_CONFIG: HarnessConfig = {
     model: "deepseek-chat",
     apiKeyEnv: "DEEPSEEK_API_KEY",
     maxSteps: 40,
+    maxTokens: 8192,
     clarify: "required",
   },
+  approvalTimeoutMin: 60,
+  browser: { enabled: false, executablePath: "", permission: "confirm" },
   gateway: { host: "127.0.0.1", port: 5173, tokenEnv: "QDD_GATEWAY_TOKEN", corsOrigins: [] },
   cdnAllowlist: [
     "cdn.jsdelivr.net",
@@ -37,6 +40,10 @@ export interface HarnessPaths {
   style: string;
   store: string;
   token: string;
+  skills: string;
+  schedules: string;
+  connectors: string;
+  secretKey: string;
 }
 
 export interface LoadedConfig {
@@ -61,6 +68,7 @@ export async function loadConfig(root = process.cwd()): Promise<LoadedConfig> {
     gateway: { ...DEFAULT_CONFIG.gateway, ...user.gateway },
     mcpServers: user.mcpServers ?? {},
     datasets: { ...DEFAULT_CONFIG.datasets, ...user.datasets },
+    browser: { ...DEFAULT_CONFIG.browser, ...user.browser },
   };
   for (const [name, server] of Object.entries(config.mcpServers)) {
     if (typeof server.url !== "string" || !/^https?:\/\//.test(server.url)) {
@@ -73,6 +81,8 @@ export async function loadConfig(root = process.cwd()): Promise<LoadedConfig> {
   if (env.DEEPSEEK_MODEL) config.llm.model = env.DEEPSEEK_MODEL;
   if (env.HOST) config.gateway.host = env.HOST;
   if (env.PORT) config.gateway.port = Number(env.PORT);
+  if (!["confirm", "auto"].includes(config.browser.permission)) throw new Error("browser.permission 只能是 confirm 或 auto。");
+  if (!(config.approvalTimeoutMin > 0)) throw new Error("approvalTimeoutMin 必须大于 0。");
   if (!Number.isInteger(config.gateway.port) || config.gateway.port < 0 || config.gateway.port > 65535) {
     throw new Error("PORT 必须是 0-65535 之间的整数。");
   }
@@ -93,6 +103,10 @@ export async function loadConfig(root = process.cwd()): Promise<LoadedConfig> {
       style: path.join(workspace, "style.md"),
       store: path.join(workspace, "store.json"),
       token: path.join(workspace, ".gateway-token"),
+      skills: path.join(workspace, "skills"),
+      schedules: path.join(workspace, "schedules.json"),
+      connectors: path.join(workspace, "connectors.json"),
+      secretKey: path.join(workspace, ".secret-key"),
     },
   };
 }

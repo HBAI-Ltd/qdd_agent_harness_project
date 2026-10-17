@@ -2,7 +2,7 @@ import { watch } from "node:fs";
 import { mkdir, readFile, stat } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import path from "node:path";
-import type { AnswerBody, AskBody, CreateWishBody, GatewayEvent, JsonObject, PageView, SendMessageBody, ToolInfo } from "@qdd/shared";
+import type { AnswerBody, AskBody, BrowserStreamEvent, CreateWishBody, GatewayEvent, JsonObject, Overview, PageView, SendMessageBody, ToolInfo } from "@qdd/shared";
 import { runAsk } from "../agent/ask.js";
 import type { ChatFn } from "../agent/llm.js";
 import type { LoadedConfig } from "../config.js";
@@ -14,6 +14,10 @@ import { readPages, readStyle, resetStyle, toScriptJson, writeAtomic, writeStyle
 import { Auth } from "./auth.js";
 import { handleMcp } from "./mcp-endpoint.js";
 import { buildComputeScript, SDK_JS } from "./sdk.js";
+import { CONNECTOR_CATALOG, type McpConnectorInfo } from "../workbench/connectors.js";
+import { openWorkbench, type Workbench } from "../workbench/index.js";
+import { Scheduler } from "../workbench/scheduler.js";
+import { InvalidInput, Missing, parseSkillInput } from "../workbench/skills.js";
 
 const MIME: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -38,6 +42,8 @@ class HttpError extends Error {
 export interface Gateway {
   url: string;
   hub: SessionHub;
+  scheduler: Scheduler;
+  workbench: Workbench;
   close(): Promise<void>;
 }
 
@@ -45,6 +51,10 @@ export interface GatewayOptions {
   token: string;
   /** 延迟创建，缺少 API key 时只影响需要 agent 的接口。 */
   chat: () => ChatFn;
+  /** 缺省时按工作区创建（测试可注入假的飞书客户端） */
+  workbench?: Workbench;
+  /** 为 false 时不自动运行定时任务（测试用） */
+  scheduler?: boolean;
 }
 
 /**
@@ -54,7 +64,9 @@ export interface GatewayOptions {
 export async function startGateway(loaded: LoadedConfig, sources: DataSources, options: GatewayOptions): Promise<Gateway> {
   const { config, paths } = loaded;
   const auth = new Auth(options.token);
-  const hub = new SessionHub(loaded, sources, options.chat);
+  const workbench = options.workbench ?? (await openWorkbench(loaded));
+  const hub = new SessionHub(loaded, sources, options.chat, workbench);
+  const scheduler = new Scheduler(loaded, hub, workbench);
   const csp = pageCsp(config.cdnAllowlist, config.gateway.corsOrigins);
   const globalClients = new Set<ServerResponse>();
   const computeJs = await buildComputeScript();
@@ -64,10 +76,50 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
     for (const c of globalClients) c.write(`data: ${JSON.stringify(event)}\n\n`);
   };
   hub.onMeta((session) => broadcast({ type: "session_updated", session }));
+  hub.onPending(() => broadcast({ type: "pending_changed" }));
+  scheduler.onChange(() => broadcast({ type: "schedules_changed" }));
+  if (options.scheduler !== false) scheduler.start();
+
+  const mcpInfo = (): McpConnectorInfo[] =>
+    Object.entries(config.mcpServers).map(([name, server]) => ({
+      name,
+      allowWrite: server.allowWrite === true,
+      error: sources.warnings.find((w) => w.startsWith(`MCP 服务 ${name} 接入失败`)),
+    }));
+
+  async function overview(): Promise<Overview> {
+    const [sessions, pages, skills, schedules, connectors, pending] = await Promise.all([
+      hub.list(),
+      readPages(paths),
+      workbench.skills.list(),
+      scheduler.list(),
+      workbench.connectors.list(mcpInfo()),
+      hub.pending(),
+    ]);
+    const count = (status: string) => sessions.filter((x) => x.status === status).length;
+    const next = schedules
+      .filter((x) => x.enabled && x.nextRunAt)
+      .sort((a, b) => a.nextRunAt!.localeCompare(b.nextRunAt!))[0];
+    return {
+      sessions: {
+        total: sessions.length,
+        running: count("running"),
+        waiting: count("waiting"),
+        error: count("error"),
+        active: sessions.filter((x) => x.status === "running" || x.status === "waiting").map(({ id, title, status }) => ({ id, title, status })),
+      },
+      pages: { total: pages.length, stale: pages.filter((x) => x.stale).length },
+      skills: { total: skills.length },
+      schedules: { total: schedules.length, enabled: schedules.filter((x) => x.enabled).length, next: next ? { id: next.id, name: next.name, at: next.nextRunAt! } : null },
+      connectors: { total: connectors.length, connected: connectors.filter((x) => x.status === "connected").length },
+      pending,
+    };
+  }
 
   const server = createServer((req, res) => {
     route(req, res).catch((error: Error) => {
-      const status = error instanceof HttpError ? error.status : error instanceof NotFound ? 404 : error instanceof Conflict ? 409 : error instanceof BadRequest ? 400 : 500;
+      const tagged = (error as { status?: unknown }).status;
+      const status = error instanceof HttpError ? error.status : typeof tagged === "number" ? tagged : error.name === "ZodError" ? 400 : error instanceof NotFound || error instanceof Missing ? 404 : error instanceof Conflict ? 409 : error instanceof BadRequest || error instanceof InvalidInput ? 400 : 500;
       if (res.headersSent) {
         res.end();
         return;
@@ -223,7 +275,144 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
       if (body.slug !== undefined && !(await readPages(paths)).some((x) => x.slug === body.slug)) {
         throw new HttpError(404, `页面 ${body.slug} 不存在`);
       }
-      return json(res, 201, await hub.create(body.wish.trim(), body.slug));
+      if (body.skillId !== undefined && typeof body.skillId !== "string") throw new HttpError(400, "skillId 必须是字符串");
+      return json(res, 201, await hub.create(body.wish.trim(), { slug: body.slug, skillId: body.skillId }));
+    }
+
+    // ---------------------------------------------------------------- 工作台
+    if (p === "/api/overview" && m === "GET") return json(res, 200, await overview());
+    if (p === "/api/pending" && m === "GET") return json(res, 200, await hub.pending());
+
+    if (p === "/api/skills") {
+      if (m === "GET") return json(res, 200, await workbench.skills.list());
+      if (m === "POST") {
+        const skill = await workbench.skills.create(parseSkillInput(await readJson(req)), "user");
+        broadcast({ type: "skills_changed" });
+        return json(res, 201, skill);
+      }
+    }
+    const skill = /^\/api\/skills\/([^/]+)$/.exec(p);
+    if (skill) {
+      const id = decodeURIComponent(skill[1]!);
+      if (m === "GET") return json(res, 200, await workbench.skills.get(id));
+      if (m === "PUT") {
+        const updated = await workbench.skills.update(id, parseSkillInput(await readJson(req)));
+        broadcast({ type: "skills_changed" });
+        return json(res, 200, updated);
+      }
+      if (m === "DELETE") {
+        const using = (await scheduler.list()).filter((x) => x.skillId === id);
+        if (using.length) throw new HttpError(409, `技能被定时任务使用中：${using.map((x) => x.name).join("、")}`);
+        await workbench.skills.remove(id);
+        broadcast({ type: "skills_changed" });
+        return json(res, 200, { ok: true });
+      }
+    }
+
+    if (p === "/api/schedules") {
+      if (m === "GET") return json(res, 200, await scheduler.list());
+      if (m === "POST") return json(res, 201, await scheduler.create(await readJson(req)));
+    }
+    const schedule = /^\/api\/schedules\/([^/]+)(\/run)?$/.exec(p);
+    if (schedule) {
+      const id = decodeURIComponent(schedule[1]!);
+      if (schedule[2]) {
+        if (m === "POST") return json(res, 202, { sessionId: await scheduler.runNow(id) });
+      } else {
+        if (m === "GET") return json(res, 200, await scheduler.get(id));
+        if (m === "PUT") return json(res, 200, await scheduler.update(id, await readJson(req)));
+        if (m === "DELETE") {
+          await scheduler.remove(id);
+          return json(res, 200, { ok: true });
+        }
+      }
+    }
+
+    // ---------------------------------------------------------------- 浏览器实时画面与人工接管
+    const browserRoute = /^\/api\/browser\/([^/]+)(\/stream|\/input)?$/.exec(p);
+    if (browserRoute) {
+      const browser = workbench.browser;
+      if (!browser) throw new HttpError(404, "浏览器工具未启用");
+      const id = decodeURIComponent(browserRoute[1]!);
+      const sub = browserRoute[2];
+      if (!sub && m === "GET") {
+        const state = browser.state(id);
+        if (!state) throw new HttpError(404, "浏览器会话不存在或已关闭");
+        return json(res, 200, state);
+      }
+      if (sub === "/stream" && m === "GET") {
+        const stream = openSse(req, res);
+        // 背压：写缓冲未清空时只保留最新一帧，drain 后补发
+        let pendingFrame: BrowserStreamEvent | undefined;
+        res.on("drain", () => {
+          if (pendingFrame) {
+            const frame = pendingFrame;
+            pendingFrame = undefined;
+            stream(frame);
+          }
+        });
+        const listener = (event: BrowserStreamEvent) => {
+          if (event.type === "frame" && res.writableNeedDrain) pendingFrame = event;
+          else stream(event);
+          if (event.type === "closed") res.end();
+        };
+        let off: () => void;
+        try {
+          off = browser.runtime.subscribe(browser.cwd, id, listener);
+        } catch (error) {
+          stream({ type: "error", message: (error as Error).message });
+          res.end();
+          return;
+        }
+        req.on("close", off);
+        return;
+      }
+      if (sub === "/input" && m === "POST") {
+        const body = (await readJson(req)) as ({ tabId?: unknown } & Record<string, unknown>) | undefined;
+        if (!body || typeof body.tabId !== "string") throw new HttpError(400, "tabId 不能为空");
+        const { tabId, ...input } = body;
+        return json(res, 200, await browser.runtime.input(browser.cwd, id, tabId, input));
+      }
+    }
+
+    if (p === "/api/connectors") {
+      if (m === "GET") return json(res, 200, { catalog: CONNECTOR_CATALOG, connectors: await workbench.connectors.list(mcpInfo()) });
+      if (m === "POST") {
+        const installed = await workbench.connectors.install(await readJson(req));
+        broadcast({ type: "connectors_changed" });
+        return json(res, 201, installed);
+      }
+    }
+    const connector = /^\/api\/connectors\/([^/]+)(\/verify|\/test)?$/.exec(p);
+    if (connector) {
+      const id = decodeURIComponent(connector[1]!);
+      const action = connector[2];
+      if (action === "/verify" && m === "POST") {
+        const view = await workbench.connectors.verify(id);
+        broadcast({ type: "connectors_changed" });
+        return json(res, 200, view);
+      }
+      if (action === "/test" && m === "POST") {
+        const body = (await readJson(req)) as { text?: unknown } | undefined;
+        const text = typeof body?.text === "string" && body.text.trim() ? body.text.trim().slice(0, 500) : "【钱多多】这是一条测试消息。";
+        await workbench.connectors.send(id, text);
+        return json(res, 200, { ok: true });
+      }
+      if (!action) {
+        if (m === "GET") return json(res, 200, await workbench.connectors.get(id));
+        if (m === "PUT") {
+          const view = await workbench.connectors.update(id, await readJson(req));
+          broadcast({ type: "connectors_changed" });
+          return json(res, 200, view);
+        }
+        if (m === "DELETE") {
+          const using = (await scheduler.list()).filter((x) => x.notify?.connectorId === id);
+          if (using.length) throw new HttpError(409, `连接器被定时任务使用中：${using.map((x) => x.name).join("、")}`);
+          await workbench.connectors.remove(id);
+          broadcast({ type: "connectors_changed" });
+          return json(res, 200, { ok: true });
+        }
+      }
     }
     if (p === "/api/sessions" && m === "GET") return json(res, 200, await hub.list());
     if (p === "/api/metrics" && m === "GET") return json(res, 200, await sources.metrics());
@@ -348,9 +537,13 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
   return {
     url: `http://${host}:${port}`,
     hub,
+    scheduler,
+    workbench,
     close: () =>
       new Promise((resolve) => {
         watcher.close();
+        scheduler.stop();
+        void workbench.browser?.close();
         clearTimeout(timer);
         clearInterval(refreshTimer);
         for (const c of globalClients) c.end();

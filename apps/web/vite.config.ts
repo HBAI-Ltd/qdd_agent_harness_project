@@ -31,7 +31,7 @@ function gatewayAddress(): { host?: string; port?: number } {
   }
 }
 
-export default defineConfig(({ mode }) => {
+export default defineConfig(({ command, mode }) => {
   const env = loadEnv(mode, envDir, "");
   const gateway = gatewayAddress();
   const target = resolveGatewayTarget(env, gateway);
@@ -46,10 +46,17 @@ export default defineConfig(({ mode }) => {
     },
   };
 
+  // 本地开发：用 .env 中的网关地址与 token 预填连接，免去每次手动输入；生产构建不注入 token。
+  const devGateway = command === "serve" ? { url: target, token: env.QDD_GATEWAY_TOKEN ?? "" } : { url: "", token: "" };
+
   return {
     envDir,
-    // Only expose the validated public address; environment credentials stay server-side.
-    define: { __QDD_GATEWAY_URL__: JSON.stringify(target) },
+    // 公开网关地址始终注入；开发预填的 token 只在 vite serve 时注入，生产构建为空。
+    define: {
+      __QDD_GATEWAY_URL__: JSON.stringify(target),
+      __DEV_GATEWAY_URL__: JSON.stringify(devGateway.url),
+      __DEV_GATEWAY_TOKEN__: JSON.stringify(devGateway.token),
+    },
     build: {
       outDir: "dist",
       assetsInlineLimit: Infinity,

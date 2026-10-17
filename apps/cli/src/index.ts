@@ -5,7 +5,7 @@ import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
 import { HARNESS_VERSION, SERVICE_NAME, type ClarifyAnswers, type ClarifyQuestion, type SessionEvent } from "@qdd/shared";
 import { createChat } from "./agent/llm.js";
-import { loadConfig, type LoadedConfig } from "./config.js";
+import { loadConfig, resolveModel, type LoadedConfig } from "./config.js";
 import { DataSources } from "./datasource/registry.js";
 import { ensureMetrics, loadMetrics } from "./datasets/metrics.js";
 import { compactDataset } from "./datasets/query.js";
@@ -36,6 +36,14 @@ const HELP = `${SERVICE_NAME} ${HARNESS_VERSION} —— 钱多多门店管理 ha
   metrics                     查看指标口径目录
   style [--edit | --reset]    查看 / 修改风格提示词
   check                       用零后端守卫重新审查所有已发布页面
+  connectors                  列出连接器（内置 + MCP 状态 + 已安装的飞书）
+  connectors add feishu [--mode app|webhook] [--name <名称>] [--permission read|confirm|auto]
+                              从环境变量（.env）读取飞书凭据，验证后加密保存到工作区：
+                                app 模式：FEISHU_APP_ID、FEISHU_APP_SECRET、FEISHU_RECEIVE_ID、FEISHU_RECEIVE_ID_TYPE（默认 chat_id）
+                                webhook 模式：FEISHU_WEBHOOK_URL、FEISHU_SIGN_SECRET（可选）
+  connectors test <id> [--text "<消息>"]
+                              重新验证；带 --text 时推送一条消息
+  connectors rm <id>          删除已安装的连接器
   init                        初始化工作区（其它命令会自动执行）
 `;
 
@@ -138,6 +146,10 @@ async function main() {
       yes: { type: "boolean", default: false },
       edit: { type: "boolean", default: false },
       reset: { type: "boolean", default: false },
+      mode: { type: "string" },
+      name: { type: "string" },
+      permission: { type: "string" },
+      text: { type: "string" },
       help: { type: "boolean", short: "h", default: false },
     },
   });
@@ -151,7 +163,7 @@ async function main() {
   const { config, paths } = loaded;
   await ensureWorkspace(paths);
   await ensureMetrics(paths);
-  const chat = (llm = config.llm) => createChat(llm);
+  const chat = (llm = resolveModel(config.llm)) => createChat(llm);
 
   switch (command) {
     case "init":
@@ -263,6 +275,55 @@ async function main() {
       if (!name || !at) throw new Error('用法：npm run qdd -- compact <数据集> "YYYY-MM-DD HH:mm"');
       const sources = await DataSources.open({ ...loaded, config: { ...config, mcpServers: {} } });
       console.log(`已生成检查点 ${name} @ ${at}（${await compactDataset(sources.datasets, name, at)} 个实体）`);
+      return;
+    }
+
+    case "connectors": {
+      const connectors = (await openWorkbench(loaded)).connectors;
+      const [sub, arg] = rest;
+      if (!sub || sub === "list") {
+        const sources = await openSources(loaded);
+        const mcp = Object.entries(config.mcpServers).map(([name, server]) => ({
+          name,
+          allowWrite: server.allowWrite === true,
+          error: sources.warnings.find((w) => w.startsWith(`MCP 服务 ${name} 接入失败`)),
+        }));
+        await sources.close();
+        for (const c of await connectors.list(mcp)) {
+          const extra = Object.entries(c.config).map(([k, v]) => `${k}=${v}`).join(" ");
+          console.log(`${c.status === "connected" ? "✓" : "✗"} ${c.id.padEnd(36)} ${c.name}  [${c.permission}]  ${c.detail}${extra ? `\n    ${extra}` : ""}`);
+        }
+      } else if (sub === "add") {
+        if (arg !== "feishu") throw new Error("目前只支持：connectors add feishu");
+        const env = (k: string) => process.env[k]?.trim() || undefined;
+        const mode = values.mode ?? (env("FEISHU_WEBHOOK_URL") && !env("FEISHU_APP_ID") ? "webhook" : "app");
+        const view = await connectors.install({
+          type: "feishu",
+          mode,
+          name: values.name,
+          permission: values.permission,
+          ...(mode === "webhook"
+            ? { webhookUrl: env("FEISHU_WEBHOOK_URL"), signSecret: env("FEISHU_SIGN_SECRET") }
+            : { appId: env("FEISHU_APP_ID"), appSecret: env("FEISHU_APP_SECRET"), receiveId: env("FEISHU_RECEIVE_ID"), receiveIdType: env("FEISHU_RECEIVE_ID_TYPE") }),
+        });
+        console.log(`✓ 已安装 ${view.id}  ${view.name}：${view.detail}`);
+      } else if (sub === "test") {
+        if (!arg) throw new Error("用法：npm run qdd -- connectors test <id> [--text \"<消息>\"]");
+        if (values.text) {
+          await connectors.send(arg, values.text);
+          console.log("✓ 已推送");
+        } else {
+          const view = await connectors.verify(arg);
+          console.log(`${view.status === "connected" ? "✓" : "✗"} ${view.name}：${view.detail}`);
+          if (view.status !== "connected") process.exitCode = 1;
+        }
+      } else if (sub === "rm") {
+        if (!arg) throw new Error("用法：npm run qdd -- connectors rm <id>");
+        await connectors.remove(arg);
+        console.log(`已删除 ${arg}`);
+      } else {
+        throw new Error(`未知子命令 connectors ${sub}`);
+      }
       return;
     }
 

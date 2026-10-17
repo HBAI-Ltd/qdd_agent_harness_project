@@ -2,11 +2,12 @@ import { watch } from "node:fs";
 import { mkdir, readFile, stat } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import path from "node:path";
-import type { AnswerBody, AskBody, BrowserStreamEvent, CreateWishBody, GatewayEvent, HarnessConfig, JsonObject, Overview, PageView, RecordInput, SendMessageBody, ToolInfo } from "@qdd/shared";
+import type { AnswerBody, AskBody, SelectModelBody, BrowserStreamEvent, CreateWishBody, GatewayEvent, HarnessConfig, JsonObject, Overview, PageView, RecordInput, SendMessageBody, ToolInfo } from "@qdd/shared";
 import { runAsk } from "../agent/ask.js";
 import { chatOptions } from "../agent/chat-options.js";
 import type { ChatFn } from "../agent/llm.js";
-import type { LoadedConfig } from "../config.js";
+import { AttachmentError, MAX_ATTACHMENT_BYTES } from "../attachments.js";
+import { hasModel, modelCatalog, resolveModel, type LoadedConfig } from "../config.js";
 import type { DataSources } from "../datasource/registry.js";
 import { addRecords, defineRecord, listRecordSets, parseRecordDefinition, queryRecords, RECORD_PREFIX, updateRecord, voidRecord } from "../datasets/records.js";
 import { refreshDatasets } from "../datasets/refresh.js";
@@ -16,6 +17,7 @@ import { pinPage, readPages, readPins, readStyle, unpinPage, resetStyle, toScrip
 import { Auth } from "./auth.js";
 import { handleMcp } from "./mcp-endpoint.js";
 import { buildComputeScript, SDK_JS } from "./sdk.js";
+import { CameraLogin } from "../workbench/cameras.js";
 import { CONNECTOR_CATALOG, type McpConnectorInfo } from "../workbench/connectors.js";
 import { openWorkbench, type Workbench } from "../workbench/index.js";
 import { Scheduler } from "../workbench/scheduler.js";
@@ -89,6 +91,7 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
   });
   if (options.scheduler !== false) scheduler.start();
 
+  const cameras = new CameraLogin(config);
   const mcpInfo = (): McpConnectorInfo[] =>
     Object.entries(config.mcpServers).map(([name, server]) => ({
       name,
@@ -128,7 +131,7 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
   const server = createServer((req, res) => {
     route(req, res).catch((error: Error) => {
       const tagged = (error as { status?: unknown }).status;
-      const status = error instanceof HttpError ? error.status : typeof tagged === "number" ? tagged : error.name === "ZodError" ? 400 : error instanceof NotFound || error instanceof Missing ? 404 : error instanceof Conflict ? 409 : error instanceof BadRequest || error instanceof InvalidInput ? 400 : 500;
+      const status = error instanceof HttpError ? error.status : typeof tagged === "number" ? tagged : error.name === "ZodError" ? 400 : error instanceof NotFound || error instanceof Missing ? 404 : error instanceof Conflict ? 409 : error instanceof BadRequest || error instanceof InvalidInput || error instanceof AttachmentError ? 400 : 500;
       if (res.headersSent) {
         res.end();
         return;
@@ -142,7 +145,7 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
     if (origin && config.gateway.corsOrigins.includes(origin)) {
       res.setHeader("Access-Control-Allow-Origin", origin);
       res.setHeader("Vary", "Origin");
-      res.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type, X-QDD-Page, X-QDD-Page-Token");
+      res.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type, X-QDD-Page, X-QDD-Page-Token, X-File-Name");
       res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
       res.setHeader("Access-Control-Expose-Headers", "Mcp-Session-Id");
     }
@@ -205,7 +208,7 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
       }
       const body = (await readJson(req)) as AskBody;
       if (typeof body?.question !== "string" || !body.question.trim()) throw new HttpError(400, "question 不能为空");
-      const chat = options.chat(config.llm);
+      const chat = options.chat(resolveModel(config.llm));
       const stream = openSse(req, res);
       const controller = new AbortController();
       req.on("close", () => controller.abort());
@@ -337,6 +340,27 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
       }
     }
     if (p === "/api/chat/options" && m === "GET") return json(res, 200, chatOptions(config.llm));
+    if (p === "/api/models" && m === "GET") return json(res, 200, modelCatalog(config.llm));
+    if (p === "/api/attachments" && m === "POST") {
+      // 原始字节上传，文件名（文件夹上传时为相对路径）经 X-File-Name 以 URI 编码传递
+      const header = req.headers["x-file-name"];
+      if (typeof header !== "string" || !header) throw new HttpError(400, "缺少 X-File-Name");
+      let name: string;
+      try {
+        name = decodeURIComponent(header);
+      } catch {
+        throw new HttpError(400, "X-File-Name 编码不合法");
+      }
+      const bytes = await readBuffer(req, MAX_ATTACHMENT_BYTES);
+      return json(res, 201, await hub.attachments.save(name, bytes, req.headers["content-type"]));
+    }
+    const attachment = /^\/api\/attachments\/([^/]+)$/.exec(p);
+    if (attachment && m === "GET") {
+      const { ref, bytes } = await hub.attachments.bytes(attachment[1]!);
+      res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(ref.name)}`);
+      res.writeHead(200, { "Content-Type": ref.mime, "Content-Length": bytes.length }).end(bytes);
+      return;
+    }
     if (p === "/api/wishes" && m === "POST") {
       const body = (await readJson(req)) as CreateWishBody;
       if (typeof body?.wish !== "string" || !body.wish.trim()) throw new HttpError(400, "wish 不能为空");
@@ -344,10 +368,13 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
         throw new HttpError(404, `页面 ${body.slug} 不存在`);
       }
       if (body.skillId !== undefined && typeof body.skillId !== "string") throw new HttpError(400, "skillId 必须是字符串");
+      const model = checkModel(body.model);
+      const attachments = await hub.attachments.resolve(body.attachments);
       return json(res, 201, await hub.create(body.wish.trim(), {
         slug: body.slug,
         skillId: body.skillId,
-        ...(body.model !== undefined ? { model: body.model } : {}),
+        attachments,
+        ...(model !== undefined ? { model } : {}),
         ...(body.reasoningEffort !== undefined ? { reasoningEffort: body.reasoningEffort } : {}),
       }));
     }
@@ -456,6 +483,21 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
         return json(res, 201, installed);
       }
     }
+    if (p === "/api/cameras" && m === "GET") return json(res, 200, await cameras.status());
+    const camera = /^\/api\/cameras\/(haik|tysl)\/(send-code|login|login-start|login-complete)$/.exec(p);
+    if (camera && m === "POST") {
+      const [, provider, step] = camera;
+      const body = step === "login-start" ? undefined : await readJson(req);
+      const result =
+        provider === "haik" && step === "send-code" ? await cameras.haikSendCode(body)
+        : provider === "haik" && step === "login" ? await cameras.haikLogin(body)
+        : provider === "tysl" && step === "login-start" ? await cameras.tyslStart()
+        : provider === "tysl" && step === "login-complete" ? await cameras.tyslComplete(body)
+        : undefined;
+      if (!result) throw new HttpError(404, "不支持的登录步骤");
+      if (step === "login" || step === "login-complete") broadcast({ type: "connectors_changed" });
+      return json(res, 200, result);
+    }
     const connector = /^\/api\/connectors\/([^/]+)(\/verify|\/test)?$/.exec(p);
     if (connector) {
       const id = decodeURIComponent(connector[1]!);
@@ -513,10 +555,19 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
       if (sub === "/messages" && m === "POST") {
         const body = (await readJson(req)) as SendMessageBody;
         if (typeof body?.text !== "string" || !body.text.trim()) throw new HttpError(400, "text 不能为空");
+        const model = checkModel(body.model);
+        const attachments = await hub.attachments.resolve(body.attachments);
         return json(res, 202, await hub.send(id, body.text.trim(), {
-          ...(body.model !== undefined ? { model: body.model } : {}),
+          attachments,
+          ...(model !== undefined ? { model } : {}),
           ...(body.reasoningEffort !== undefined ? { reasoningEffort: body.reasoningEffort } : {}),
         }));
+      }
+      if (sub === "/model" && m === "PUT") {
+        const body = (await readJson(req)) as SelectModelBody | undefined;
+        const model = checkModel(body?.model);
+        if (!model) throw new HttpError(400, "model 不能为空");
+        return json(res, 200, await hub.selectModel(id, model));
       }
       if (sub === "/cancel" && m === "POST") {
         hub.cancel(id);
@@ -538,6 +589,12 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
       }
     }
     throw new HttpError(404, "Not Found");
+  }
+
+  function checkModel(model: unknown): string | undefined {
+    if (model === undefined || model === null || model === "") return undefined;
+    if (typeof model !== "string" || !hasModel(config.llm, model)) throw new HttpError(400, `模型 ${String(model)} 不存在`);
+    return model;
   }
 
   async function servePage(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
@@ -698,15 +755,19 @@ function openSse(req: IncomingMessage, res: ServerResponse): (data: unknown) => 
   return (data) => res.write(`data: ${JSON.stringify(data)}\n\n`);
 }
 
-async function readBody(req: IncomingMessage): Promise<string> {
+async function readBuffer(req: IncomingMessage, limit = MAX_BODY): Promise<Buffer> {
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of req) {
     size += (chunk as Buffer).length;
-    if (size > MAX_BODY) throw new HttpError(413, "请求体过大");
+    if (size > limit) throw new HttpError(413, "请求体过大");
     chunks.push(chunk as Buffer);
   }
-  return Buffer.concat(chunks).toString("utf8");
+  return Buffer.concat(chunks);
+}
+
+async function readBody(req: IncomingMessage): Promise<string> {
+  return (await readBuffer(req)).toString("utf8");
 }
 
 async function readJson(req: IncomingMessage): Promise<unknown> {

@@ -25,6 +25,42 @@ export interface McpServerConfig {
   allowWrite?: boolean;
 }
 
+export interface ModelConfig extends ChatModelConfig {
+  /** 提供方分组名，如 DeepSeek */
+  provider?: string;
+  /** 实际请求的模型名；缺省使用 id，兼容原有模型配置。 */
+  model?: string;
+  baseUrl?: string;
+  apiKeyEnv?: string;
+  maxTokens?: number;
+  thinking?: "enabled" | "disabled";
+}
+
+/** 前端可选的模型目录（不含密钥与地址）。 */
+export interface ModelOption {
+  id: string;
+  label: string;
+  provider: string;
+  model: string;
+  /** 对应的 API Key 环境变量是否已配置 */
+  available: boolean;
+}
+
+export interface ModelCatalog {
+  models: ModelOption[];
+  default: string;
+}
+
+/** 会话附件引用（任意扩展名；文件夹上传时 path 保留目录结构）。 */
+export interface AttachmentRef {
+  id: string;
+  name: string;
+  /** 相对路径，如 报表/2026-09/销售.csv */
+  path: string;
+  size: number;
+  mime: string;
+}
+
 export interface HarnessConfig {
   /** 工作区目录（风格提示词、门店数据、页面、会话），相对仓库根目录。 */
   workspace: string;
@@ -41,8 +77,8 @@ export interface HarnessConfig {
     thinking: "enabled" | "disabled";
     /** 可选的思考强度默认值；default 沿用 thinking 与服务商默认强度。 */
     reasoningEffort?: ReasoningEffort;
-    /** 同一服务商提供给对话框的模型及各自支持的思考强度；默认模型始终可选。 */
-    models?: ChatModelConfig[];
+    /** 可切换的模型；缺省只有上面这一个。未填写的字段沿用上面的默认值。 */
+    models?: ModelConfig[];
   };
   /** 授权请求等待店长处理的时长（分钟），超时视为拒绝；工作台可集中处理。 */
   approvalTimeoutMin: number;
@@ -229,11 +265,12 @@ export interface SessionMeta {
   /** 会话产出的页面；首次发布前为 null。 */
   slug: string | null;
   status: SessionStatus;
-  /** 最近一轮使用的模型与思考强度；旧会话缺省时沿用网关配置。 */
-  model?: string;
+  /** 最近一轮使用的思考强度；旧会话缺省时沿用网关配置。 */
   reasoningEffort?: ReasoningEffort;
   /** 会话来源：缺省为店长发起；定时任务触发时记录任务 id。 */
   origin?: { kind: "schedule"; scheduleId: string; scheduleName: string };
+  /** 选择的模型 id；缺省用默认模型。下一轮起生效。 */
+  model?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -266,7 +303,7 @@ export type AssistantPart =
 
 export type SessionEvent = At &
   (
-    | { type: "user"; text: string }
+    | { type: "user"; text: string; attachments?: AttachmentRef[] }
     | { type: "status"; status: SessionStatus }
     | { type: "say"; text: string }
     | AssistantBlockEvent
@@ -322,10 +359,20 @@ export interface CreateWishBody extends Partial<ChatSelection> {
   slug?: string;
   /** 预先加载的技能（名称或 id） */
   skillId?: string;
+  /** 已上传附件的 id */
+  attachments?: string[];
+  /** 模型 id */
+  model?: string;
 }
 
 export interface SendMessageBody extends Partial<ChatSelection> {
   text: string;
+  attachments?: string[];
+  model?: string;
+}
+
+export interface SelectModelBody {
+  model: string;
 }
 
 export interface ApprovalBody {
@@ -502,6 +549,24 @@ export interface ConnectorView {
   config: Record<string, string | boolean>;
   lastVerifiedAt: string | null;
   createdAt: string | null;
+}
+
+// ---------------------------------------------------------------- 摄像头云账号
+
+/** haik：海康互联（短信 + 人机验证）；tysl：天翼视联（官方登录页授权） */
+export type CameraProvider = "haik" | "tysl";
+
+export interface CameraAccountStatus {
+  provider: CameraProvider;
+  name: string;
+  /** harness.config.json 的 mcpServers 中是否配置了同名服务 */
+  configured: boolean;
+  /** 本地服务是否可访问 */
+  reachable: boolean;
+  connected: boolean;
+  /** 脱敏后的账号，如 138****0000 */
+  account?: string;
+  detail?: string;
 }
 
 // ---------------------------------------------------------------- 浏览器（实时画面）

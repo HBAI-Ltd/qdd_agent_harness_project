@@ -1,9 +1,11 @@
 import type {
   AnswerBody,
+  AttachmentRef,
+  ModelCatalog,
+  SelectModelBody,
   ApprovalBody,
   ClarifyAnswers,
   ChatOptions,
-  ChatSelection,
   CreateWishBody,
   GatewayEvent,
   PageView,
@@ -13,6 +15,7 @@ import type {
   SessionMeta,
 } from "@qdd/shared";
 
+export type { AttachmentRef, ModelCatalog, ModelOption } from "@qdd/shared";
 export type { ClarifyAnswers, GatewayEvent, PageView, SessionDetail, SessionEvent, SessionMeta } from "@qdd/shared";
 
 declare const __QDD_GATEWAY_URL__: string;
@@ -89,9 +92,32 @@ export function getChatOptions(base: string, token: string, signal?: AbortSignal
   return json(base, token, "/api/chat/options", { signal: signal ?? null });
 }
 
-export function sendMessage(base: string, token: string, id: string, text: string, signal?: AbortSignal, options: Partial<ChatSelection> = {}): Promise<SessionMeta> {
-  const body: SendMessageBody = { text, ...options };
+export function sendMessage(base: string, token: string, id: string, text: string, signal?: AbortSignal, extra: Omit<SendMessageBody, "text"> = {}): Promise<SessionMeta> {
+  const body: SendMessageBody = { text, ...extra };
   return json(base, token, `/api/sessions/${encodeURIComponent(id)}/messages`, { method: "POST", body: JSON.stringify(body), signal: signal ?? null });
+}
+
+export function listModels(base: string, token: string, signal?: AbortSignal): Promise<ModelCatalog> {
+  return json(base, token, "/api/models", { signal: signal ?? null });
+}
+
+export function selectSessionModel(base: string, token: string, id: string, model: string, signal?: AbortSignal): Promise<SessionMeta> {
+  const body: SelectModelBody = { model };
+  return json(base, token, `/api/sessions/${encodeURIComponent(id)}/model`, { method: "PUT", body: JSON.stringify(body), signal: signal ?? null });
+}
+
+/** 上传一个附件；path 为文件名，文件夹上传时为含目录的相对路径。 */
+export function uploadAttachment(base: string, token: string, file: Blob, path: string, signal?: AbortSignal): Promise<AttachmentRef> {
+  return json(base, token, "/api/attachments", {
+    method: "POST",
+    headers: { "Content-Type": file.type || "application/octet-stream", "X-File-Name": encodeURIComponent(path) },
+    body: file,
+    signal: signal ?? null,
+  });
+}
+
+export async function downloadAttachment(base: string, token: string, id: string, signal?: AbortSignal): Promise<Blob> {
+  return (await request(base, token, `/api/attachments/${encodeURIComponent(id)}`, { signal: signal ?? null })).blob();
 }
 
 export async function answerQuestions(base: string, token: string, id: string, requestId: string, answers: ClarifyAnswers, signal?: AbortSignal): Promise<void> {

@@ -7,16 +7,18 @@ import { ElSelect } from "element-plus/es/components/select/index";
 import type { InputInstance } from "element-plus";
 import type { ReasoningEffort, SessionEvent } from "@qdd/shared";
 import AgentIcon from "@/components/AgentIcon.vue";
+import AttachmentList, { type AttachmentItem } from "@/components/AttachmentList.vue";
+import StringSelectOption from "@/components/StringSelectOption";
+import { downloadAttachment } from "@/api/workspace";
+import { filesFromDrop, filesFromInput } from "@/composables/useComposer";
 import MarkdownContent from "@/components/MarkdownContent.vue";
 import SessionActions from "@/components/SessionActions.vue";
-import StringSelectOption from "@/components/StringSelectOption";
 import { useWorkspaceContext } from "@/composables/workspaceContext";
 import { buildChatTimeline, toolStatus, toolTitle } from "@/utils/chatTimeline";
-import { ATTACHMENT_ACCEPT, MAX_ATTACHMENTS, composeMessage, fileToMarkdown } from "@/utils/attachmentMarkdown";
 
 const SessionBrowser = defineAsyncComponent(() => import("@/components/SessionBrowser.vue"));
 
-const { workspace, draft, attachments, convertingAttachments, addAttachments, submitMessage, notify, navigation } = useWorkspaceContext();
+const { workspace, draft, submitMessage, notify, navigation, composer: attach } = useWorkspaceContext();
 const {
   activeSession, activeSessionId, liveBlocks, revisionPageSlug, preferences, connected,
   loadingSession, sending, pendingMessage, responding, canCancel, cancelling,
@@ -26,6 +28,72 @@ const {
 const { openPage, openView } = navigation;
 const composer = ref<InputInstance>();
 const fileInput = ref<HTMLInputElement>();
+const folderInput = ref<HTMLInputElement>();
+const dragDepth = ref(0);
+const { attachments, uploading, catalog, currentModel } = attach;
+const composerItems = computed<AttachmentItem[]>(() => attachments.value.map((a) => ({
+  key: a.key, path: a.path, size: a.size, status: a.status, ...(a.error ? { error: a.error } : {}), ...(a.ref ? { id: a.ref.id } : {}),
+})));
+const canSend = computed(() => connected.value && !sending.value && !loadingSession.value && !uploading.value
+  && (Boolean(draft.value.trim()) || attach.ready.value.length > 0));
+const modelValue = computed({
+  get: () => currentModel.value?.id ?? "",
+  set: (id: string) => {
+    if (!id) return;
+    void attach.selectModel(id);
+  },
+});
+watch([() => currentModel.value?.id, chatOptions, () => chatSelection.value?.model], ([id]) => {
+  if (id && id !== chatSelection.value?.model) selectChatModel(id);
+}, { immediate: true });
+function historyItems(event: SessionEvent): AttachmentItem[] {
+  return event.type === "user" ? (event.attachments ?? []).map((a) => ({ key: a.id, id: a.id, path: a.path, size: a.size })) : [];
+}
+function pickFiles(event: Event) {
+  const input = event.target as HTMLInputElement;
+  attach.addFiles(filesFromInput(input.files));
+  input.value = "";
+  focusComposer();
+}
+function handlePaste(event: ClipboardEvent) {
+  if (!connected.value || !event.clipboardData?.files.length) return;
+  event.preventDefault();
+  attach.addFiles(filesFromInput(event.clipboardData.files));
+}
+function hasFiles(event: DragEvent) {
+  return [...(event.dataTransfer?.types ?? [])].includes("Files");
+}
+function dragEnter(event: DragEvent) {
+  if (!hasFiles(event)) return;
+  event.preventDefault();
+  dragDepth.value++;
+}
+function dragLeave(event: DragEvent) {
+  if (!hasFiles(event)) return;
+  dragDepth.value = Math.max(0, dragDepth.value - 1);
+}
+async function drop(event: DragEvent) {
+  if (!hasFiles(event) || !event.dataTransfer) return;
+  event.preventDefault();
+  dragDepth.value = 0;
+  if (!connected.value) return;
+  attach.addFiles(await filesFromDrop(event.dataTransfer));
+  focusComposer();
+}
+async function openAttachment(item: AttachmentItem) {
+  if (!item.id) return;
+  try {
+    const blob = await downloadAttachment(workspace.gatewayUrl.value, workspace.token.value, item.id);
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = item.path.split("/").pop() ?? "attachment";
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 10_000);
+  } catch {
+    notify("下载附件失败");
+  }
+}
 const messageList = ref<HTMLElement>();
 const browserPreview = ref<HTMLElement>();
 const browserOpen = ref(false);
@@ -35,7 +103,6 @@ const reasoningLabels: Record<ReasoningEffort, string> = {
   default: "默认", none: "关闭", minimal: "极低", low: "低", medium: "中", high: "高", xhigh: "很高", max: "最高", ultra: "超高",
 };
 const selectedModel = computed(() => chatOptions.value?.models.find((model) => model.id === chatSelection.value?.model));
-const hasMessage = computed(() => Boolean(draft.value.trim() || attachments.value.length));
 const gapLabels = { missing_data: "缺少数据", estimate: "估测说明", unsupported: "暂不支持", permission: "需要授权" };
 const showConversation = computed(() => Boolean(activeSession.value || pendingMessage.value || responding.value || cancelling.value));
 const waitingForConfirmation = computed(() => activeSession.value?.status === "waiting" && !responding.value && !cancelling.value);
@@ -115,54 +182,10 @@ function handleEnter(event: Event | KeyboardEvent) {
   }
 }
 async function sendMessage() {
-  if (sending.value || loadingSession.value || convertingAttachments.value || !connected.value || !hasMessage.value) return;
+  if (!canSend.value) return;
+  if (!draft.value.trim()) draft.value = "请查看我上传的附件。";
   try { await submitMessage(); }
   catch (cause) { notify(cause instanceof Error ? cause.message : "发送失败，请重试。"); }
-}
-async function attachFiles(files: File[]) {
-  if (!files.length || convertingAttachments.value) return;
-  const previous = [...attachments.value];
-  if (previous.length + files.length > MAX_ATTACHMENTS) {
-    notify(`每条消息最多添加 ${MAX_ATTACHMENTS} 个附件。`);
-    return;
-  }
-  await addAttachments(async () => {
-    const results = await Promise.allSettled(files.map(fileToMarkdown));
-    const converted = [];
-    for (const [index, result] of results.entries()) {
-      if (result.status === "fulfilled") converted.push(result.value);
-      else notify(`${files[index]?.name ?? "附件"}：${result.reason instanceof Error ? result.reason.message : "附件转换失败，请重试。"}`);
-    }
-    try {
-      composeMessage("", [...previous, ...converted]);
-      return converted;
-    } catch (cause) {
-      notify(cause instanceof Error ? cause.message : "附件内容过大，请减少附件。");
-      return [];
-    }
-  });
-}
-function handleFileChange(event: Event) {
-  const input = event.target as HTMLInputElement;
-  const files = Array.from(input.files ?? []);
-  input.value = "";
-  void attachFiles(files);
-}
-function handleDrop(event: DragEvent) {
-  void attachFiles(Array.from(event.dataTransfer?.files ?? []));
-}
-function handlePaste(event: ClipboardEvent) {
-  const files = Array.from(event.clipboardData?.files ?? []);
-  if (files.length) {
-    event.preventDefault();
-    void attachFiles(files);
-  }
-}
-function removeAttachment(id: string) {
-  attachments.value = attachments.value.filter((attachment) => attachment.id !== id);
-}
-function attachmentSize(size: number): string {
-  return size >= 1024 * 1024 ? `${(size / (1024 * 1024)).toFixed(1)} MB` : `${Math.max(1, Math.ceil(size / 1024))} KB`;
 }
 function useSuggestion(prompt: string) {
   draft.value = prompt;
@@ -212,7 +235,12 @@ onMounted(() => {
 </script>
 
 <template>
-  <section class="chat-view" aria-label="门店助手对话">
+  <section class="chat-view" aria-label="门店助手对话" @dragenter="dragEnter" @dragover="(e) => hasFiles(e) && e.preventDefault()" @dragleave="dragLeave" @drop="drop">
+    <div v-if="dragDepth > 0" class="chat-drop-overlay" aria-hidden="true">
+      <AgentIcon name="clip" :size="28" />
+      <strong>松开即可添加附件</strong>
+      <span>支持任意类型文件与整个文件夹，单个文件不超过 50 MB</span>
+    </div>
     <div v-if="loadingSession && !showConversation" class="chat-loading" role="status">正在加载对话…</div>
     <div v-else-if="!showConversation" class="chat-welcome-scroll">
       <div class="chat-welcome">
@@ -250,6 +278,7 @@ onMounted(() => {
           <div class="chat-message-main">
             <div v-if="entry.kind === 'user'" class="chat-bubble">
               <p class="chat-message-text">{{ entry.event.text }}</p>
+              <AttachmentList v-if="historyItems(entry.event).length" class="chat-bubble-attachments" :items="historyItems(entry.event)" @open="openAttachment" />
             </div>
             <template v-else>
               <div class="chat-message-meta">
@@ -357,15 +386,17 @@ onMounted(() => {
     <div class="chat-composer-area">
       <p v-if="!connected" class="chat-composer-note">先在 <ElButton link type="primary" @click="openView('settings')">设置</ElButton> 中填写网关地址和 token。</p>
       <p v-else-if="revisionPageSlug" class="chat-composer-note">正在修改页面：<ElButton link type="primary" @click="openPage(revisionPageSlug)">{{ revisionPageSlug }}</ElButton></p>
-      <form class="chat-composer" @submit.prevent="sendMessage" @dragover.prevent @drop.prevent="handleDrop">
-        <div v-if="attachments.length || convertingAttachments" class="chat-attachments" aria-label="待发送附件">
-          <div v-for="attachment in attachments" :key="attachment.id" class="chat-attachment">
-            <AgentIcon name="file" :size="18" />
-            <div class="chat-attachment-info"><strong :title="attachment.name">{{ attachment.name }}</strong><span>{{ attachmentSize(attachment.size) }} · Markdown</span></div>
-            <button type="button" class="chat-attachment-remove" :aria-label="`移除附件 ${attachment.name}`" @click="removeAttachment(attachment.id)"><AgentIcon name="close" :size="14" /></button>
-          </div>
-          <span v-if="convertingAttachments" class="chat-attachment-progress" role="status">正在转为 Markdown…</span>
-        </div>
+      <AttachmentList
+        v-if="composerItems.length"
+        class="chat-composer-attachments"
+        :items="composerItems"
+        removable
+        @remove="attach.removeAttachment"
+        @remove-folder="attach.removeFolder"
+        @open="openAttachment" />
+      <input ref="fileInput" type="file" multiple hidden aria-label="选择文件" @change="pickFiles" />
+      <input ref="folderInput" type="file" webkitdirectory multiple hidden aria-label="选择文件夹" @change="pickFiles" />
+      <form class="chat-composer" @submit.prevent="sendMessage">
         <ElInput
           id="message-input"
           ref="composer"
@@ -380,12 +411,8 @@ onMounted(() => {
           @paste="handlePaste" />
         <div class="chat-composer-toolbar">
           <details v-if="chatOptions && chatSelection && selectedModel" class="chat-model-picker">
-            <summary aria-label="选择模型和思考强度"><AgentIcon name="spark" :size="15" /><span class="chat-model-name">{{ selectedModel.label }}</span><span class="chat-model-effort">· {{ reasoningLabels[chatSelection.reasoningEffort] }}</span><AgentIcon name="down" :size="13" /></summary>
+            <summary aria-label="选择思考强度"><AgentIcon name="spark" :size="15" /><span class="chat-model-effort">思考强度 · {{ reasoningLabels[chatSelection.reasoningEffort] }}</span><AgentIcon name="down" :size="13" /></summary>
             <div class="chat-model-panel">
-              <label for="chat-model-select">模型</label>
-              <ElSelect id="chat-model-select" :model-value="chatSelection.model" aria-label="模型" filterable :disabled="!connected || chatOptionsLoading" @update:model-value="selectChatModel">
-                <StringSelectOption v-for="model in chatOptions.models" :key="model.id" :value="model.id" :label="model.label" />
-              </ElSelect>
               <fieldset class="chat-reasoning-options">
                 <legend>思考强度</legend>
                 <button v-for="effort in selectedModel.reasoningEfforts" :key="effort" type="button" :aria-pressed="chatSelection.reasoningEffort === effort" :disabled="!connected" @click="selectReasoningEffort(effort)">{{ reasoningLabels[effort] }}</button>
@@ -395,8 +422,10 @@ onMounted(() => {
           <button v-else-if="chatOptionsError && connected" type="button" class="chat-model-retry" :title="chatOptionsError" @click="loadChatOptions">重新加载模型</button>
           <span v-else class="chat-model-placeholder">{{ chatOptionsLoading ? "正在加载模型…" : "默认模型" }}</span>
           <div class="chat-composer-tools">
-            <input ref="fileInput" class="chat-file-input" type="file" multiple :accept="ATTACHMENT_ACCEPT" aria-label="选择附件" @change="handleFileChange" />
-            <button type="button" class="chat-attach-button" aria-label="添加附件" title="添加附件，自动转为 Markdown（PDF、DOCX、文本、代码、CSV）" :disabled="convertingAttachments || attachments.length >= MAX_ATTACHMENTS" @click="fileInput?.click()"><AgentIcon name="attachment" :size="20" /></button>
+            <div class="chat-attach-buttons">
+              <button type="button" class="chat-attach" title="添加文件（任意类型）" aria-label="添加文件" :disabled="!connected" @click="fileInput?.click()"><AgentIcon name="clip" :size="18" /></button>
+              <button type="button" class="chat-attach" title="添加文件夹" aria-label="添加文件夹" :disabled="!connected" @click="folderInput?.click()"><AgentIcon name="folder" :size="18" /></button>
+            </div>
             <button
           v-if="canCancel || cancelling"
           class="chat-send chat-stop"
@@ -414,7 +443,7 @@ onMounted(() => {
           native-type="submit"
           aria-label="发送消息"
           title="发送消息"
-          :disabled="!connected || !hasMessage || sending || loadingSession || convertingAttachments">
+          :disabled="!canSend">
           <AgentIcon name="arrow" :size="20" />
         </ElButton>
           </div>
@@ -422,6 +451,20 @@ onMounted(() => {
       </form>
       <div class="chat-composer-footer">
         <div class="chat-conversation-actions">
+          <ElSelect
+            v-if="catalog && catalog.models.length"
+            v-model="modelValue"
+            class="chat-model-select"
+            aria-label="切换模型"
+            title="切换模型（下一轮回复起生效）"
+            :disabled="!connected">
+            <StringSelectOption
+              v-for="model in catalog.models"
+              :key="model.id"
+              :value="model.id"
+              :label="`${model.provider} · ${model.label}${model.available ? '' : '（未配置 Key）'}`"
+              :disabled="!model.available" />
+          </ElSelect>
           <ElButton v-if="activeSession?.slug" link type="primary" @click="openPage(activeSession.slug)">查看生成页面</ElButton>
           <ElButton v-if="latestBrowser?.status === 'running' && activeSession?.id === activeSessionId" link @click="toggleBrowser">{{ browserOpen ? "收起浏览器" : "查看浏览器" }}</ElButton>
         </div>
@@ -432,7 +475,17 @@ onMounted(() => {
 </template>
 
 <style scoped>
-.chat-view { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
+
+.chat-drop-overlay { position: absolute; inset: 12px; z-index: 20; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; border: 2px dashed var(--qdd-primary); border-radius: 16px; background: color-mix(in srgb, var(--qdd-surface) 88%, transparent); color: var(--qdd-text); pointer-events: none; }
+.chat-drop-overlay span { color: var(--qdd-muted); font-size: 12px; }
+.chat-composer-attachments { margin-bottom: 10px; }
+.chat-bubble-attachments { margin-top: 8px; }
+.chat-attach-buttons { display: flex; flex: 0 0 auto; align-self: center; gap: 2px; }
+.chat-attach { display: grid; place-items: center; width: 32px; height: 32px; padding: 0; border: 0; border-radius: 8px; background: none; color: var(--qdd-muted); cursor: pointer; }
+.chat-attach:hover:not(:disabled) { background: var(--qdd-border); color: var(--qdd-text); }
+.chat-attach:disabled { cursor: not-allowed; opacity: .5; }
+.chat-model-select { width: 210px; }
+.chat-view { position: relative; display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
 .chat-loading { display: grid; flex: 1; place-items: center; color: var(--qdd-muted); font-size: 14px; }
 .chat-welcome-scroll { display: flex; flex: 1; flex-direction: column; min-height: 0; overflow-y: auto; padding: 32px; }
 .chat-welcome { width: min(100%, 760px); margin: auto; text-align: center; }

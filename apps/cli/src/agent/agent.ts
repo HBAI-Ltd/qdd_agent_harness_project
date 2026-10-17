@@ -1,7 +1,8 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { cp, mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
-import type { AgentToolCall, BrowserSessionState, CapabilityGap, ClarifyAnswers, ClarifyQuestion, GapKind, JsonObject, MetricCatalog, PageEntry } from "@qdd/shared";
+import type { AgentToolCall, AttachmentRef, BrowserSessionState, CapabilityGap, ClarifyAnswers, ClarifyQuestion, GapKind, JsonObject, MetricCatalog, PageEntry } from "@qdd/shared";
+import { attachmentPrompt, type AttachmentStore } from "../attachments.js";
 import type { LoadedConfig } from "../config.js";
 import type { Authorizer, DataSources, DataTool } from "../datasource/registry.js";
 import { RECORDS_METRIC, updateMetrics } from "../datasets/metrics.js";
@@ -53,7 +54,27 @@ export interface WishRequest {
   skillId?: string | undefined;
   /** 技能与连接器；缺省时不提供相关工具 */
   workbench?: Workbench | undefined;
+  /** 本条消息附带的附件 */
+  attachments?: AttachmentRef[] | undefined;
+  /** 附件存储；缺省时不提供 read_attachment */
+  attachmentStore?: AttachmentStore | undefined;
 }
+
+const ATTACHMENT_TOOL: LlmTool = {
+  type: "function",
+  function: {
+    name: "read_attachment",
+    description: "读取店长上传的附件内容（任意扩展名；文本按段返回，二进制只返回元信息）。id 见用户消息里的附件清单。",
+    parameters: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "附件 id" },
+        offset: { type: "number", description: "从第几个字符开始读，默认 0" },
+      },
+      required: ["id"],
+    },
+  },
+};
 
 /** 向店长提问；返回 null 表示未回答（超时或无人值守）。 */
 export type Clarifier = (questions: ClarifyQuestion[]) => Promise<ClarifyAnswers | null>;
@@ -488,10 +509,11 @@ export async function runWish(
     ...(workbench?.browser ? [BROWSER_TOOL] : []),
     RECORD_TOOL,
     ...(scheduler ? SCHEDULE_TOOLS : []),
+    ...(request.attachmentStore ? [ATTACHMENT_TOOL] : []),
   ];
   const skills = workbench ? await workbench.skills.list() : [];
   const notifiers = workbench ? (await workbench.connectors.list()).filter((c) => c.origin === "installed" && c.permission !== "read") : [];
-  let wish = request.wish;
+  let wish = request.wish + attachmentPrompt(request.attachments ?? []);
   if (request.skillId && workbench) {
     const skill = await workbench.skills.find(request.skillId);
     if (!skill) throw new Error("技能不存在");
@@ -892,6 +914,13 @@ export async function runWish(
       }
       case "recall":
         return JSON.stringify(await recall(paths, String(args.query ?? "")));
+      case "read_attachment":
+        if (!request.attachmentStore) return "错误：附件不可用";
+        try {
+          return await request.attachmentStore.readForModel(String(args.id ?? ""), Number(args.offset) || 0);
+        } catch (error) {
+          return `错误：${(error as Error).message}`;
+        }
       case "read_session":
         return readSessionDigest(paths, String(args.id ?? ""));
       case "read_artifact":

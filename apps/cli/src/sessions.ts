@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { appendFile, readdir, readFile } from "node:fs/promises";
 import path from "node:path";
-import type { ChatSelection, ClarifyAnswers, ClarifyQuestion, HarnessConfig, JsonObject, PendingItem, SessionDetail, SessionEvent, SessionMeta } from "@qdd/shared";
+import type { AttachmentRef, ChatSelection, ClarifyAnswers, ClarifyQuestion, HarnessConfig, JsonObject, PendingItem, SessionDetail, SessionEvent, SessionMeta } from "@qdd/shared";
 import { runWish, WishError, type AgentEvent } from "./agent/agent.js";
 import { resolveChatSelection } from "./agent/chat-options.js";
 import type { ChatFn, ChatMessage } from "./agent/llm.js";
-import type { LoadedConfig } from "./config.js";
+import { AttachmentStore } from "./attachments.js";
+import { resolveModel, type LoadedConfig } from "./config.js";
 import type { DataSources } from "./datasource/registry.js";
 import type { Workbench } from "./workbench/index.js";
 import { writeAtomic } from "./web/site.js";
@@ -33,11 +34,17 @@ export interface CreateOptions extends Partial<ChatSelection> {
   skillId?: string | undefined;
   /** 无人值守（定时任务）：不提问，授权仍进入工作台待办 */
   unattended?: boolean;
+  attachments?: AttachmentRef[] | undefined;
+}
+
+export interface SendOptions extends Partial<ChatSelection> {
+  attachments?: AttachmentRef[] | undefined;
 }
 
 export class SessionHub {
   private readonly directories = new Map<string, string>();
   private readonly running = new Map<string, AbortController>();
+  private readonly activeMetas = new Map<string, SessionMeta>();
   /** 页面 → 正在修改它的会话，同一页面同时只允许一个会话修改 */
   private readonly editing = new Map<string, string>();
   private readonly approvals = new Map<string, { detail: PendingDetail; resolve(approved: boolean): void }>();
@@ -50,13 +57,16 @@ export class SessionHub {
   private readonly rounds = new Map<string, number>();
   private readonly listeners = new Map<string, Set<(e: SessionEvent) => void>>();
   private readonly metaListeners = new Set<(meta: SessionMeta) => void>();
+  readonly attachments: AttachmentStore;
 
   constructor(
     private readonly loaded: LoadedConfig,
     private readonly sources: DataSources,
     private readonly chat: (llm: HarnessConfig["llm"]) => ChatFn,
     private readonly workbench?: Workbench,
-  ) {}
+  ) {
+    this.attachments = new AttachmentStore(loaded.paths.attachments);
+  }
 
   private file(id: string, kind: "meta.json" | "events.jsonl" | "messages.json") {
     if (!ID_RE.test(id)) throw new NotFound("会话不存在");
@@ -171,7 +181,7 @@ export class SessionHub {
     await this.saveMeta(meta);
     if (opts.unattended) this.unattended.add(meta.id);
     try {
-      await this.start(meta, wish, skill?.id);
+      await this.start(meta, wish, opts.attachments ?? [], skill?.id);
     } catch (error) {
       this.unattended.delete(meta.id);
       throw error;
@@ -180,11 +190,21 @@ export class SessionHub {
   }
 
   /** 许愿之后在同一会话里继续对话。 */
-  async send(id: string, text: string, selection: Partial<ChatSelection> = {}): Promise<SessionMeta> {
+  async send(id: string, text: string, options: SendOptions = {}): Promise<SessionMeta> {
     const meta = await this.meta(id);
     if (this.running.has(id)) throw new Conflict("会话正在运行，请等待完成");
-    await this.start(meta, text, undefined, selection);
+    await this.start(meta, text, options.attachments ?? [], undefined, options);
     return this.meta(id);
+  }
+
+  /** 切换会话模型；运行中的一轮保持原模型，下一轮起生效。 */
+  async selectModel(id: string, model: string): Promise<SessionMeta> {
+    const meta = this.activeMetas.get(id) ?? await this.meta(id);
+    Object.assign(meta, resolveChatSelection(this.loaded.config.llm, { model }, meta));
+    meta.updatedAt = new Date().toISOString();
+    await this.saveMeta(meta);
+    for (const l of this.metaListeners) l({ ...meta });
+    return meta;
   }
 
   approve(id: string, requestId: string, approved: boolean): void {
@@ -226,9 +246,9 @@ export class SessionHub {
     return this.meta(id);
   }
 
-  private async start(meta: SessionMeta, text: string, skillId?: string, input: Partial<ChatSelection> = {}): Promise<void> {
+  private async start(meta: SessionMeta, text: string, attachments: AttachmentRef[], skillId?: string, input: Partial<ChatSelection> = {}): Promise<void> {
     const selection = resolveChatSelection(this.loaded.config.llm, input, meta);
-    const chat = this.chat({ ...this.loaded.config.llm, ...selection }); // 缺少 API key 时在这里同步报错
+    const chat = this.chat({ ...resolveModel(this.loaded.config.llm, selection.model), reasoningEffort: selection.reasoningEffort }); // 缺少 API key 时在这里同步报错
     if (meta.slug) {
       const holder = this.editing.get(meta.slug);
       if (holder && holder !== meta.id) throw new Conflict(`页面 ${meta.slug} 正在被会话 ${holder} 修改`);
@@ -236,13 +256,14 @@ export class SessionHub {
     }
     const controller = new AbortController();
     this.running.set(meta.id, controller);
+    this.activeMetas.set(meta.id, meta);
     Object.assign(meta, selection);
-    await this.emit(meta.id, { type: "user", text });
+    await this.emit(meta.id, { type: "user", text, ...(attachments.length ? { attachments } : {}) });
     await this.setStatus(meta, "running");
-    void this.run(meta, text, chat, controller, skillId);
+    void this.run(meta, text, attachments, chat, controller, skillId);
   }
 
-  private async run(meta: SessionMeta, text: string, chat: ChatFn, controller: AbortController, skillId?: string): Promise<void> {
+  private async run(meta: SessionMeta, text: string, attachments: AttachmentRef[], chat: ChatFn, controller: AbortController, skillId?: string): Promise<void> {
     const id = meta.id;
     try {
       let history: ChatMessage[] = [];
@@ -255,7 +276,7 @@ export class SessionHub {
         this.loaded,
         this.sources,
         chat,
-        { wish: text, sessionId: id, slug: meta.slug ?? undefined, history, skillId, workbench: this.workbench },
+        { wish: text, sessionId: id, slug: meta.slug ?? undefined, history, skillId, workbench: this.workbench, attachments, attachmentStore: this.attachments },
         {
           signal: controller.signal,
           onEvent: (e: AgentEvent) => {
@@ -291,6 +312,7 @@ export class SessionHub {
       await this.setStatus(meta, "error");
     } finally {
       this.running.delete(id);
+      this.activeMetas.delete(id);
       for (const [slug, holder] of this.editing) if (holder === id) this.editing.delete(slug);
       for (const q of this.questions.values()) if (q.detail.sessionId === id) q.resolve(null);
       for (const a of this.approvals.values()) if (a.detail.sessionId === id) a.resolve(false);

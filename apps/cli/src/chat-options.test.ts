@@ -3,7 +3,7 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import type { ChatOptions, HarnessConfig, SessionMeta } from "@qdd/shared";
+import type { AttachmentRef, ChatOptions, HarnessConfig, ModelCatalog, SessionMeta } from "@qdd/shared";
 import { chatOptions, resolveChatSelection } from "./agent/chat-options.js";
 import { createChat, type ChatFn } from "./agent/llm.js";
 import { DEFAULT_CONFIG, loadConfig } from "./config.js";
@@ -133,4 +133,135 @@ test("网关校验模型与强度，续聊切换真实生效并跨会话重载�
   assert.equal((await api("/health")).status, 200);
   assert.deepEqual(await (await api("/health")).json(), { status: "ok" });
   assert.equal((await api("/api/unknown-route")).status, 404);
+});
+
+test("传入模型目录的别名、服务商配置与默认值一致，运行中切换及重载后仍生效", { timeout: 15_000 }, async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "qdd-provider-options-"));
+  await writeFile(path.join(root, "harness.config.json"), JSON.stringify({
+    llm: {
+      model: "unused-global-model",
+      models: [
+        {
+          id: "store-reasoner",
+          label: "门店推理",
+          model: "deepseek-provider-model",
+          provider: "DeepSeek",
+          baseUrl: "https://api.deepseek.com",
+          apiKeyEnv: "QDD_PROVIDER_DEEPSEEK_KEY",
+          maxTokens: 1024,
+          thinking: "enabled",
+          reasoningEfforts: ["default", "none", "low", "high"],
+          defaultReasoningEffort: "high",
+        },
+        {
+          id: "store-compatible",
+          label: "门店轻量",
+          model: "compatible-provider-model",
+          provider: "兼容服务",
+          baseUrl: "https://compatible.example/v1",
+          apiKeyEnv: "QDD_PROVIDER_COMPATIBLE_KEY",
+          maxTokens: 2048,
+          thinking: "disabled",
+        },
+      ],
+    },
+  }));
+  const loaded = await loadConfig(root);
+  loaded.config.gateway.port = 0;
+  await ensureWorkspace(loaded.paths);
+  const sources = await DataSources.open(loaded);
+  const calls: HarnessConfig["llm"][] = [];
+  const histories: string[][] = [];
+  let releaseFirst!: () => void;
+  const firstReply = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  const factory = (llm: HarnessConfig["llm"]): ChatFn => {
+    calls.push({ ...llm });
+    const first = calls.length === 1;
+    return async (messages) => {
+      histories.push(messages.filter((message) => message.role === "user").map((message) => message.content ?? ""));
+      if (first) await firstReply;
+      return { role: "assistant", content: null, tool_calls: [{ id: "reply", type: "function", function: { name: "reply", arguments: JSON.stringify({ text: "完成", gaps: [] }) } }] };
+    };
+  };
+  const token = "provider-options-gateway-token-0123456789";
+  const gateway = await startGateway(loaded, sources, { token, chat: factory, scheduler: false });
+  t.after(async () => { releaseFirst(); await gateway.close(); await sources.close(); });
+  const api = (endpoint: string, body?: unknown, method = body === undefined ? "GET" : "POST") => fetch(`${gateway.url}${endpoint}`, {
+    method,
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+  const catalog = await (await api("/api/models")).json() as ModelCatalog;
+  const options = await (await api("/api/chat/options")).json() as ChatOptions;
+  assert.deepEqual(catalog.models.map((model) => model.id), ["store-reasoner", "store-compatible"]);
+  assert.deepEqual(options.models.map((model) => model.id), catalog.models.map((model) => model.id));
+  assert.equal(catalog.default, "store-reasoner");
+  assert.deepEqual(options.defaults, { model: catalog.default, reasoningEffort: "high" });
+  assert.deepEqual(options.models[1]?.reasoningEfforts, ["default"], "兼容服务不能继承全局 DeepSeek 的强度");
+  assert.equal(options.models[1]?.defaultReasoningEffort, "default");
+  for (const response of [catalog, options]) {
+    assert.equal(JSON.stringify(response).includes("apiKeyEnv"), false);
+    assert.equal(JSON.stringify(response).includes("baseUrl"), false);
+  }
+  assert.equal((await api("/api/wishes", { wish: "无效别名", model: "deepseek-provider-model" })).status, 400);
+  assert.equal((await gateway.hub.list()).length, 0);
+
+  const upload = await fetch(`${gateway.url}/api/attachments`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/octet-stream", "X-File-Name": encodeURIComponent("报表/销售.csv") },
+    body: "日期,销售额\n2026-10-17,1200\n",
+  });
+  assert.equal(upload.status, 201);
+  const attachment = await upload.json() as AttachmentRef;
+  const createdResponse = await api("/api/wishes", { wish: "首轮看看报表", attachments: [attachment.id] });
+  assert.equal(createdResponse.status, 201);
+  const created = await createdResponse.json() as SessionMeta;
+  assert.equal(created.model, "store-reasoner");
+  assert.equal(created.reasoningEffort, "high");
+  assert.equal(gateway.hub.isRunning(created.id), true);
+  const providerFields = (llm: HarnessConfig["llm"] | undefined) => llm && ({
+    model: llm.model,
+    baseUrl: llm.baseUrl,
+    apiKeyEnv: llm.apiKeyEnv,
+    maxTokens: llm.maxTokens,
+    thinking: llm.thinking,
+    reasoningEffort: llm.reasoningEffort,
+  });
+  const reasoner = {
+    model: "deepseek-provider-model", baseUrl: "https://api.deepseek.com", apiKeyEnv: "QDD_PROVIDER_DEEPSEEK_KEY",
+    maxTokens: 1024, thinking: "enabled", reasoningEffort: "high",
+  };
+  const compatible = {
+    model: "compatible-provider-model", baseUrl: "https://compatible.example/v1", apiKeyEnv: "QDD_PROVIDER_COMPATIBLE_KEY",
+    maxTokens: 2048, thinking: "disabled", reasoningEffort: "default",
+  };
+  assert.deepEqual(providerFields(calls[0]), reasoner);
+
+  const switchedResponse = await api(`/api/sessions/${created.id}/model`, { model: "store-compatible" }, "PUT");
+  assert.equal(switchedResponse.status, 200);
+  const switched = await switchedResponse.json() as SessionMeta;
+  assert.equal(switched.model, "store-compatible");
+  assert.equal(switched.reasoningEffort, "default");
+  assert.equal(calls.length, 1, "切换不改变已启动的模型请求");
+  releaseFirst();
+  await gateway.hub.wait(created.id);
+  assert.equal((await gateway.hub.meta(created.id)).model, "store-compatible", "本轮完成不能覆盖下一轮选定的模型");
+  assert.ok(histories[0]?.[0]?.includes(`id=${attachment.id}`));
+  const user = (await gateway.hub.detail(created.id)).events.find((event) => event.type === "user");
+  assert.deepEqual(user?.type === "user" ? user.attachments : undefined, [attachment]);
+
+  assert.equal((await api(`/api/sessions/${created.id}/messages`, { text: "下一轮" })).status, 202);
+  await gateway.hub.wait(created.id);
+  assert.deepEqual(providerFields(calls[1]), compatible);
+  assert.equal((await api(`/api/sessions/${created.id}/messages`, { text: "换回推理模型", model: "store-reasoner", reasoningEffort: "low" })).status, 202);
+  await gateway.hub.wait(created.id);
+  assert.deepEqual(providerFields(calls[2]), { ...reasoner, reasoningEffort: "low" });
+  assert.equal((await api(`/api/sessions/${created.id}/model`, { model: "store-compatible" }, "PUT")).status, 200);
+
+  const reopened = new SessionHub(loaded, sources, factory);
+  await reopened.send(created.id, "重载后继续");
+  await reopened.wait(created.id);
+  assert.deepEqual(providerFields(calls[3]), compatible);
+  assert.equal((await reopened.meta(created.id)).model, "store-compatible");
+  assert.deepEqual(histories.at(-1)?.map((text) => text.replace(/\n\n[\s\S]*$/, "")), ["首轮看看报表", "下一轮", "换回推理模型", "重载后继续"]);
 });

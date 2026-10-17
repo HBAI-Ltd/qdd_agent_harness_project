@@ -13,6 +13,8 @@ import { ElSkeleton } from "element-plus/es/components/skeleton/index";
 import { ElTag } from "element-plus/es/components/tag/index";
 import type { ConnectorCatalogEntry, ConnectorPermission, ConnectorView, FeishuConnectorInput } from "@qdd/shared";
 import AgentIcon from "@/components/AgentIcon.vue";
+import CameraLoginDialog from "@/components/CameraLoginDialog.vue";
+import * as cameraApi from "@/api/cameras";
 import StringSelectOption from "@/components/StringSelectOption";
 import * as api from "@/api/connectors";
 import { useGatewayResource } from "@/composables/useGatewayResource";
@@ -39,6 +41,41 @@ const receiveTypes: { value: ReceiveIdType; label: string }[] = [
   { value: "union_id", label: "Union ID" },
   { value: "email", label: "邮箱" },
 ];
+const cameraAccounts = ref<cameraApi.CameraAccountStatus[]>([]);
+const cameraLoginOpen = ref(false);
+const cameraProvider = ref<cameraApi.CameraProvider>();
+let cameraVersion = 0;
+async function loadCameraAccounts() {
+  const version = ++cameraVersion;
+  if (!connected.value) {
+    cameraAccounts.value = [];
+    return;
+  }
+  try {
+    const list = await cameraApi.listCameraAccounts(gatewayUrl.value, token.value);
+    if (version === cameraVersion && !disposed) cameraAccounts.value = list;
+  } catch {
+    if (version === cameraVersion && !disposed) cameraAccounts.value = [];
+  }
+}
+function cameraAccount(connector: ConnectorView): cameraApi.CameraAccountStatus | undefined {
+  const provider = cameraApi.providerOf(connector.id);
+  return provider ? cameraAccounts.value.find((entry) => entry.provider === provider) : undefined;
+}
+function cameraAccountText(account: cameraApi.CameraAccountStatus): string {
+  if (!account.reachable) return account.detail || "本地服务未启动";
+  if (!account.connected) return account.detail || "未登录云端账号";
+  return ["已登录", account.account, account.detail].filter(Boolean).join(" · ");
+}
+function openCameraLogin(connector: ConnectorView) {
+  cameraProvider.value = cameraApi.providerOf(connector.id);
+  if (cameraProvider.value && connected.value) cameraLoginOpen.value = true;
+}
+async function onCameraConnected() {
+  notify("摄像头账号已登录");
+  await Promise.all([loadCameraAccounts(), refresh()]);
+}
+watch(data, () => void loadCameraAccounts(), { immediate: true });
 const formOpen = ref(false);
 const editing = ref<ConnectorView>();
 const formBusy = ref(false);
@@ -397,6 +434,18 @@ onBeforeUnmount(() => {
                 <ElButton link type="danger" @click="openAction(connector, 'delete')">删除</ElButton>
               </div>
             </div>
+            <div v-else-if="cameraAccount(connector)" class="installed-footer">
+              <small>
+                <ElTag :type="cameraAccount(connector)!.connected ? 'success' : 'warning'" size="small" effect="plain">
+                  {{ cameraAccountText(cameraAccount(connector)!) }}
+                </ElTag>
+              </small>
+              <div class="connector-actions">
+                <ElButton link type="primary" :disabled="!cameraAccount(connector)!.reachable" @click="openCameraLogin(connector)">
+                  {{ cameraAccount(connector)!.connected ? "更换账号" : "登录账号" }}
+                </ElButton>
+              </div>
+            </div>
             <p v-else class="readonly-note">{{ connector.origin === "mcp" ? "在网关配置文件中管理此来源。" : "内置只读数据，无需安装。" }}</p>
           </ElCard>
         </div>
@@ -429,6 +478,13 @@ onBeforeUnmount(() => {
         </div>
       </section>
     </template>
+
+    <CameraLoginDialog
+      v-model="cameraLoginOpen"
+      :provider="cameraProvider"
+      :gateway-url="gatewayUrl"
+      :token="token"
+      @connected="onCameraConnected" />
 
     <ElDialog
       v-model="formOpen"

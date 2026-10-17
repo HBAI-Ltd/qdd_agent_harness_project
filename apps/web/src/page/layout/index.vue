@@ -10,6 +10,7 @@ import AgentIcon from "@/components/AgentIcon.vue";
 import WorkspaceSidebar from "@/components/WorkspaceSidebar.vue";
 import { useWorkspace } from "@/composables/useWorkspace";
 import { useConversationDrafts } from "@/composables/useConversationDrafts";
+import { useComposer } from "@/composables/useComposer";
 import { useGatewayResource } from "@/composables/useGatewayResource";
 import { getOverview, listPending } from "@/api/dashboard";
 import type { Skill } from "@qdd/shared";
@@ -40,8 +41,19 @@ const sidebarCollapsed = ref(false);
 const mediaQuery = window.matchMedia("(max-width: 760px)");
 const isMobile = ref(mediaQuery.matches);
 const pendingSkillId = ref<string | null>(null);
+const composer = useComposer(workspace);
 const { draft, attachments, convertingAttachments, addAttachments, submitMessage, beginSelection, startNewDraft, clear: clearDrafts } = useConversationDrafts(
-  gatewayUrl, activeSessionId, (text) => workspace.sendMessage(text, pendingSkillId.value ? { skillId: pendingSkillId.value } : {}),
+  gatewayUrl, activeSessionId, async (text) => {
+    const attachments = composer.ready.value;
+    const model = composer.currentModel.value?.id;
+    const sent = await workspace.sendMessage(text, {
+      ...(pendingSkillId.value ? { skillId: pendingSkillId.value } : {}),
+      ...(attachments.length ? { attachments } : {}),
+      ...(model ? { model } : {}),
+    });
+    if (sent) composer.clearAttachments(attachments);
+    return sent;
+  },
 );
 const overview = useGatewayResource("overview", getOverview, workspace);
 const pending = useGatewayResource("pending", listPending, workspace);
@@ -145,7 +157,7 @@ function shortcut(event: KeyboardEvent) {
 }
 
 provide(WORKSPACE_CONTEXT, {
-  workspace, overview, pending, draft, attachments, convertingAttachments, addAttachments, submitMessage, notify,
+  workspace, overview, pending, draft, attachments, convertingAttachments, addAttachments, submitMessage, notify, composer,
   navigation: { openConversation, openSession: selectConversation, newConversation, runSkill, openPage, openRecords, openView, editPage },
 });
 onMounted(() => {

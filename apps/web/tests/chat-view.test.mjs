@@ -4,7 +4,7 @@ import { registerHooks, stripTypeScriptTypes } from "node:module";
 import { afterEach, test } from "node:test";
 import { setImmediate } from "node:timers/promises";
 import { compileScript, parse } from "@vue/compiler-sfc";
-import { createRenderer, effectScope, nextTick, ref } from "vue";
+import { computed, createRenderer, effectScope, nextTick, ref } from "vue";
 import { useConversationDrafts } from "../src/composables/useConversationDrafts.ts";
 
 const vueUrl = import.meta.resolve("vue");
@@ -40,6 +40,7 @@ const childUrl = "data:text/javascript," + encodeURIComponent('import { h } from
 const markdownUrl = new URL("../src/utils/markdown.ts", import.meta.url).href;
 const timelineUrl = new URL("../src/utils/chatTimeline.ts", import.meta.url).href;
 let markdownComponentUrl;
+let attachmentComponentUrl;
 const browserUrl = "data:text/javascript," + encodeURIComponent(`
   import { h } from "vue";
   export default {
@@ -52,18 +53,28 @@ const browserUrl = "data:text/javascript," + encodeURIComponent(`
     }, [h("button", { "aria-label": "关闭实时浏览器画面", onClick: () => emit("close") }, "关闭")]),
   };
 `);
+const workspaceApiUrl = "data:text/javascript," + encodeURIComponent(`
+  export async function downloadAttachment() { return new Blob(); }
+`);
+const composerUrl = "data:text/javascript," + encodeURIComponent(`
+  export async function filesFromDrop(data) { return filesFromInput(data.files); }
+  export function filesFromInput(list) { return [...(list ?? [])].map((file) => ({ file, path: file.webkitRelativePath || file.name })); }
+  export function formatSize(size) { return size + " B"; }
+`);
 registerHooks({
   resolve(specifier, context, nextResolve) {
     if (context.parentURL?.startsWith("data:text/javascript,")) {
       if (specifier === "vue") return { url: vueUrl, shortCircuit: true };
       if (specifier.startsWith("element-plus/es/components/")) return { url: controlsUrl, shortCircuit: true };
       if (specifier === "@/composables/workspaceContext") return { url: contextUrl, shortCircuit: true };
+      if (specifier === "@/api/workspace") return { url: workspaceApiUrl, shortCircuit: true };
+      if (specifier === "@/composables/useComposer") return { url: composerUrl, shortCircuit: true };
       if (specifier === "@/utils/markdown") return { url: markdownUrl, shortCircuit: true };
       if (specifier === "@/utils/chatTimeline") return { url: timelineUrl, shortCircuit: true };
-      if (specifier === "@/utils/attachmentMarkdown") return { url: new URL("../src/utils/attachmentMarkdown.ts", import.meta.url).href, shortCircuit: true };
       if (specifier === "@/components/StringSelectOption") return { url: optionUrl, shortCircuit: true };
       if (specifier === "@/components/SessionBrowser.vue") return { url: browserUrl, shortCircuit: true };
       if (specifier === "@/components/MarkdownContent.vue") return { url: markdownComponentUrl, shortCircuit: true };
+      if (specifier === "@/components/AttachmentList.vue") return { url: attachmentComponentUrl, shortCircuit: true };
       if (specifier.startsWith("@/components/")) return { url: childUrl, shortCircuit: true };
     }
     return nextResolve(specifier, context);
@@ -79,6 +90,7 @@ async function compileComponent(path, id) {
   return "data:text/javascript," + encodeURIComponent(stripTypeScriptTypes(script.content, { mode: "strip" }));
 }
 markdownComponentUrl = await compileComponent("../src/components/MarkdownContent.vue", "markdown-content-test");
+attachmentComponentUrl = await compileComponent("../src/components/AttachmentList.vue", "attachment-list-test");
 const { default: ChatView } = await import(await compileComponent("../src/views/chat/index.vue", "chat-view-test"));
 const { setContext } = await import(contextUrl);
 const mounted = [];
@@ -100,7 +112,7 @@ function remove(node) {
 
 async function mount(initialSession, sendResult = async () => true) {
   const root = { children: [] };
-  const calls = { submit: [], selections: [], notifications: [], cancel: 0 };
+  const calls = { submit: [], selections: [], attachments: [], notifications: [], cancel: 0 };
   const workspace = {
     activeSession: ref(initialSession),
     activeSessionId: ref(initialSession?.id ?? null),
@@ -132,11 +144,29 @@ async function mount(initialSession, sendResult = async () => true) {
     async cancel() { calls.cancel++; workspace.cancelling.value = true; },
   };
   const scope = effectScope();
-  const { draft, attachments, convertingAttachments, addAttachments, submitMessage } = scope.run(() => useConversationDrafts(
+  const attachments = ref([]);
+  const catalog = ref({ models: workspace.chatOptions.value.models.map((model) => ({ ...model, provider: "openai", available: true })), default: "model-a" });
+  const currentModel = ref(catalog.value.models[0]);
+  const composer = {
+    attachments, catalog, currentModel,
+    uploading: computed(() => attachments.value.some((item) => item.status === "uploading")),
+    ready: computed(() => attachments.value.filter((item) => item.status === "done").map((item) => item.ref)),
+    selectModel(id) { currentModel.value = catalog.value.models.find((model) => model.id === id); },
+    addFiles(files) {
+      for (const { file, path } of files) attachments.value.push({
+        key: path, path, size: file.size, status: "done", ref: { id: path, path, size: file.size, mime: file.type || "application/octet-stream" },
+      });
+    },
+    removeAttachment(key) { attachments.value = attachments.value.filter((item) => item.key !== key); },
+    removeFolder(folder) { attachments.value = attachments.value.filter((item) => !item.path.startsWith(folder + "/")); },
+  };
+  const { draft, submitMessage } = scope.run(() => useConversationDrafts(
     ref("http://127.0.0.1:3000"), workspace.activeSessionId,
     async (text) => {
       calls.submit.push(text);
       calls.selections.push({ ...workspace.chatSelection.value });
+      const sentAttachments = [...composer.ready.value];
+      calls.attachments.push(sentAttachments.map((item) => item.id));
       workspace.pendingMessage.value = user(text);
       workspace.responding.value = true;
       workspace.canCancel.value = true;
@@ -147,6 +177,9 @@ async function mount(initialSession, sendResult = async () => true) {
         workspace.responding.value = false;
         workspace.canCancel.value = false;
         workspace.sending.value = false;
+      } else {
+        const ids = new Set(sentAttachments.map((item) => item.id));
+        attachments.value = attachments.value.filter((item) => !ids.has(item.ref?.id));
       }
       return sent;
     },
@@ -154,8 +187,8 @@ async function mount(initialSession, sendResult = async () => true) {
   setContext({
     workspace,
     draft,
-    attachments, convertingAttachments, addAttachments,
     submitMessage,
+    composer,
     notify(message) { calls.notifications.push(message); },
     navigation: { openPage() {}, openView() {} },
   });
@@ -182,7 +215,7 @@ async function mount(initialSession, sendResult = async () => true) {
   app.mount(root);
   mounted.push({ app, scope });
   await nextTick();
-  return { root, workspace, draft, attachments, convertingAttachments, addAttachments, calls };
+  return { root, workspace, draft, attachments, composer, calls };
 }
 
 function findAll(root, predicate) {
@@ -197,69 +230,78 @@ const input = (root) => findAll(root, (node) => node.tag === "textarea")[0];
 const form = (root) => findAll(root, (node) => node.tag === "form")[0];
 const submit = (root) => form(root).props.onSubmit({ preventDefault() {} });
 
-test("attachment picker converts multiple files, allows attachment-only sends, and clears on submit", async () => {
+test("attachment picker accepts arbitrary file types, allows attachment-only sends, and clears sent refs", async () => {
   const { root, attachments, calls } = await mount(undefined);
   const picker = findAll(root, (node) => node.tag === "input" && node.props.type === "file")[0];
   assert.equal(picker.props.multiple, "");
-  const target = { files: [new File(["# 库存\n\n120 件"], "库存.md"), new File(["sku,qty\nA,120"], "库存.csv")], value: "selection" };
+  assert.equal(picker.props.accept, undefined);
+  const target = { files: [new File(["binary"], "photo.png"), new File(["sku,qty\nA,120"], "库存.csv")], value: "selection" };
   picker.props.onChange({ target });
   assert.equal(target.value, "");
   await setImmediate();
   await nextTick();
   assert.equal(attachments.value.length, 2);
-  assert.equal(findAll(root, hasClass("chat-attachment")).length, 2);
+  assert.equal(findAll(root, hasClass("attachment-chip")).length, 2);
   assert.equal(button(root, "发送消息").props.disabled, false);
   await submit(root);
   assert.equal(calls.submit.length, 1);
-  assert.ok(calls.submit[0].includes("库存\\.md"));
-  assert.match(calls.submit[0], /120 件/);
-  assert.match(calls.submit[0], /\| sku \| qty \|/);
+  assert.equal(calls.submit[0], "请查看我上传的附件。");
+  assert.deepEqual(calls.attachments, [["photo.png", "库存.csv"]]);
   assert.equal(attachments.value.length, 0);
 });
 
-test("removing an attachment prevents it from entering the message and failed sends restore remaining files", async () => {
-  const { root, draft, attachments, calls } = await mount(undefined, async () => false);
-  attachments.value = [
-    { id: "a", name: "a.md", size: 8, markdown: "Keep this" },
-    { id: "b", name: "b.md", size: 8, markdown: "Remove this" },
-  ];
+test("removing an attachment excludes its ref and failed sends preserve the remaining files", async () => {
+  const { root, draft, attachments, composer, calls } = await mount(undefined, async () => false);
+  composer.addFiles([
+    { file: new File(["Keep this"], "a.md"), path: "a.md" },
+    { file: new File(["Remove this"], "b.md"), path: "b.md" },
+  ]);
   draft.value = "总结附件";
   await nextTick();
-  button(root, "移除附件 b.md").props.onClick();
+  findAll(root, (node) => node.tag === "button" && node.props["aria-label"] === "移除附件")[1].props.onClick();
   await nextTick();
   await submit(root);
   await nextTick();
-  assert.match(calls.submit[0], /Keep this/);
-  assert.doesNotMatch(calls.submit[0], /Remove this/);
+  assert.equal(calls.submit[0], "总结附件");
+  assert.deepEqual(calls.attachments, [["a.md"]]);
   assert.equal(draft.value, "总结附件");
-  assert.deepEqual(attachments.value.map((entry) => entry.name), ["a.md"]);
+  assert.deepEqual(attachments.value.map((entry) => entry.path), ["a.md"]);
 });
 
-test("conversion blocks Enter and submit, invalid files report errors, and dropped files use the same path", async () => {
-  const { root, draft, convertingAttachments, addAttachments, attachments, calls } = await mount(undefined);
-  let finish;
-  const conversion = addAttachments(() => new Promise((resolve) => { finish = resolve; }));
+test("uploads block Enter and submit, upload errors stay visible, and dropped files use uploaded refs", async () => {
+  const { root, draft, attachments, composer, calls } = await mount(undefined);
+  attachments.value = [{ key: "pending", path: "pending.png", size: 8, status: "uploading" }];
   draft.value = "等待附件";
   await nextTick();
-  assert.equal(convertingAttachments.value, true);
+  assert.equal(composer.uploading.value, true);
   assert.equal(button(root, "发送消息").props.disabled, true);
+  input(root).props.onKeydown({ key: "Enter", shiftKey: false, isComposing: false, preventDefault() {} });
   await submit(root);
   assert.equal(calls.submit.length, 0);
-  finish([]);
-  await conversion;
+  attachments.value[0].status = "error";
+  attachments.value[0].error = "上传失败";
   await nextTick();
-  form(root).props.onDrop({ preventDefault() {}, dataTransfer: { files: [new File(["binary"], "photo.png"), new File(["ok"], "ok.txt")] } });
+  assert.match(textContent(root), /上传失败/);
+  const view = findAll(root, hasClass("chat-view"))[0];
+  await view.props.onDrop({ preventDefault() {}, dataTransfer: { types: ["Files"], files: [new File(["binary"], "photo.png"), new File(["ok"], "ok.txt")] } });
   await setImmediate();
   await nextTick();
-  assert.deepEqual(attachments.value.map((entry) => entry.name), ["ok.txt"]);
-  assert.equal(calls.notifications.length, 1);
+  await submit(root);
+  assert.deepEqual(calls.attachments, [["photo.png", "ok.txt"]]);
+  assert.deepEqual(attachments.value.map((entry) => entry.path), ["pending.png"]);
 });
 
 test("model selection resets effort, only supported levels render, and the submission snapshots the choice", async () => {
   const { root, workspace, draft, calls } = await mount(undefined);
-  const select = findAll(root, (node) => node.tag === "select" && node.props["aria-label"] === "模型")[0];
+  const selects = findAll(root, (node) => node.tag === "select");
+  assert.equal(selects.length, 1);
+  const select = selects[0];
+  assert.equal(select.props["aria-label"], "切换模型");
   select.props.onChange({ target: { value: "model-b" } });
   await nextTick();
+  workspace.chatSelection.value = { model: "model-a", reasoningEffort: "low" };
+  await nextTick();
+  assert.equal(workspace.chatSelection.value.model, "model-b");
   const levels = findAll(root, (node) => node.tag === "button" && node.props["aria-pressed"] !== undefined);
   assert.deepEqual(levels.map(textContent), ["默认", "中", "高"]);
   assert.equal(levels[1].props["aria-pressed"], true);

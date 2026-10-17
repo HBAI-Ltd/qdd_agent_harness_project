@@ -1,5 +1,6 @@
 import { inject, type InjectionKey, type Ref } from "vue";
 import type { useWorkspace } from "./useWorkspace";
+import type { useComposer } from "./useComposer";
 import type { Overview, PendingItem, Skill } from "@qdd/shared";
 import type { GatewayResource } from "./useGatewayResource";
 import type { useConversationDrafts } from "./useConversationDrafts";
@@ -15,6 +16,7 @@ export interface WorkspaceContext {
   convertingAttachments: Ref<boolean>;
   addAttachments: ReturnType<typeof useConversationDrafts>["addAttachments"];
   submitMessage: () => Promise<boolean>;
+  composer: ReturnType<typeof useComposer>;
   notify: (message: string) => void;
   navigation: {
     openConversation: () => Promise<void>;

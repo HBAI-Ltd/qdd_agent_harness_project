@@ -229,6 +229,35 @@ test("pause aborts streams and pending input, releases keys, and ignores late em
   assert.equal(f.state.inputBusy, false);
 });
 
+test("a missing browser returned by the initial GET is closed rather than paused for reconnect", async () => {
+  globalThis.fetch = async () => new Response(JSON.stringify({ error: "浏览器会话不存在或已关闭" }), { status: 404 });
+  const state = emptyBrowserViewer();
+  const viewer = createBrowserViewer(state, () => ({ base: "https://gateway.example", token: "browser-token" }));
+  active.push(viewer);
+  await viewer.start(stateFor());
+  assert.equal(state.session.status, "closed");
+  assert.equal(state.online, false);
+  assert.equal(state.connecting, false);
+  assert.equal(state.error, "");
+});
+
+test("404 during input closes the browser and discards buffered actions", async () => {
+  const f = fixture();
+  await f.start();
+  f.viewer.setManual(true);
+  const held = f.hold();
+  const input = f.viewer.queueKeyboard({ type: "text", text: "一次输入" });
+  const queued = f.viewer.queueKeyboard({ type: "text", text: "不应重放" });
+  held.reject(Object.assign(new Error("浏览器已关闭"), { status: 404 }));
+  assert.equal(await input, false);
+  assert.equal(await queued, false);
+  assert.equal(f.state.session.status, "closed");
+  assert.equal(f.state.error, "");
+  assert.equal(f.state.manual, false);
+  assert.equal(f.streams[0].signal.aborted, true);
+  assert.equal(f.calls.filter((call) => call.input.type === "text").length, 1);
+});
+
 test("409 stops manual control and invalidates the frame without retrying the input", async () => {
   const f = fixture();
   await f.start();

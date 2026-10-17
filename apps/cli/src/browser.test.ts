@@ -16,6 +16,7 @@ import { ensureWorkspace } from "./web/site.js";
 /** 需要本机 Chrome / Edge / Chromium；找不到时跳过。 */
 const browserEnv = Object.fromEntries(Object.entries(process.env).map(([key, value]) => [key.toUpperCase(), value]));
 const CHROME = [
+  ...(process.env.CHROME_PATH ? [process.env.CHROME_PATH] : []),
   ...(process.platform === "win32"
     ? [browserEnv["PROGRAMFILES(X86)"], browserEnv.PROGRAMFILES, browserEnv.LOCALAPPDATA]
       .filter((root): root is string => !!root)
@@ -267,6 +268,10 @@ describe("浏览器工具（本机 Chrome）", { skip: CHROME ? false : "未找�
     assert.equal(liveClosed.type, "browser");
     assert.equal((await api(route)).status, 404);
     assert.equal((await api(route + "/input", { method: "POST", body: JSON.stringify({ tabId: state.tabId, type: "reload" }) })).status, 404);
+    const lateStream = await watchStream<BrowserStreamEvent>(route + "/stream");
+    t.after(lateStream.stop);
+    await lateStream.finished;
+    assert.deepEqual(lateStream.events, [{ type: "closed", sessionId: state.browserSessionId }], "已关闭后才到达的画面订阅也必须获得终止事件");
     const persisted = await gateway.hub.detail(session.id);
     assert.deepEqual(persisted.events.findLast((event) => event.type === "browser")?.browser, closed);
     assert.equal(persisted.events.filter((event) => event.type === "user").length, detail.events.filter((event) => event.type === "user").length, "按钮关闭不应合成用户消息");
@@ -347,6 +352,30 @@ describe("浏览器工具（本机 Chrome）", { skip: CHROME ? false : "未找�
     await gateway.hub.wait(session.id);
     assert.equal((await api(`/api/browser/${state.browserSessionId}`)).status, 404);
     assert.equal((await gateway.hub.detail(session.id)).events.findLast((event) => event.type === "browser")?.browser.status, "closed");
+  });
+
+  test("关闭后反复重新打开，首次导航期间订阅的画面持续可用", { timeout: 40_000 }, async (t) => {
+    const service = gateway.workbench.browser!;
+    const owner = "00000000-0000-0000-0000-0000000000b2";
+    t.after(() => service.closeSession(owner));
+    let previousId = "";
+    for (let round = 0; round < 8; round++) {
+      const events: BrowserStreamEvent[] = [];
+      let unsubscribe: (() => void) | undefined;
+      try {
+        const opened = await service.execute(owner, { action: "open", url: siteUrl }, undefined, (update) => {
+          const id = String(update.details.browserSessionId);
+          if (!unsubscribe) unsubscribe = service.runtime.subscribe(service.cwd, id, (event) => events.push(event));
+        });
+        const id = String(opened.details.browserSessionId);
+        assert.notEqual(id, previousId);
+        const frame = await until(async () => events.find((event) => event.type === "frame"), 3_000);
+        assert.ok(frame.type === "frame" && frame.data.length > 1000, `第 ${round + 1} 次重新打开必须获得画面`);
+        await service.closeBrowser(owner, id);
+        assert.ok(events.some((event) => event.type === "closed"));
+        previousId = id;
+      } finally { unsubscribe?.(); }
+    }
   });
 
   test("回归：点击下拉选项会选中；不可点击（零尺寸）的元素限时报错且不关闭会话；参数错误给出可读提示", { timeout: 60_000 }, async () => {

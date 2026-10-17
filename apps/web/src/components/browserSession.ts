@@ -80,6 +80,12 @@ export function createBrowserViewer(state: BrowserViewerState, credentials: () =
     state.manual = false;
     state.inputBusy = false;
   }
+  function markClosed() {
+    const session = state.session;
+    stop();
+    if (session) state.session = { ...session, status: "closed" };
+    state.error = "";
+  }
   function applyState(session: BrowserSessionState): boolean {
     if (!connection || session.browserSessionId !== connection.id) return false;
     if (state.session?.tabId !== session.tabId || state.session?.url !== session.url) {
@@ -140,6 +146,10 @@ export function createBrowserViewer(state: BrowserViewerState, credentials: () =
       if (current === version && !controller.signal.aborted) throw new Error("实时画面连接已中断，请重新连接。");
     } catch (cause) {
       if (current !== version || controller.signal.aborted) return;
+      if (cause && typeof cause === "object" && "status" in cause && cause.status === 404) {
+        markClosed();
+        return;
+      }
       stop();
       state.error = cause instanceof Error ? cause.message : "无法连接浏览器画面。";
     }
@@ -174,6 +184,10 @@ export function createBrowserViewer(state: BrowserViewerState, credentials: () =
       return true;
     } catch (cause) {
       if (current !== version || controller.signal.aborted) return false;
+      if (cause && typeof cause === "object" && "status" in cause && cause.status === 404) {
+        markClosed();
+        return false;
+      }
       clearInputQueue();
       release(tabId);
       state.error = cause instanceof Error ? cause.message : "浏览器操作失败。";

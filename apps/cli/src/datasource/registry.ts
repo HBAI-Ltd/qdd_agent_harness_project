@@ -1,7 +1,6 @@
 import type { JsonObject, MetricCatalog, ToolSpec } from "@qdd/shared";
 import type { LoadedConfig } from "../config.js";
 import { loadMetrics } from "../datasets/metrics.js";
-import { seedBuiltinDatasets } from "../datasets/seed.js";
 import { JsonlDatasetStore, type DatasetStore } from "../datasets/store.js";
 import { createStoreTools } from "./builtin.js";
 import { McpClient } from "./mcp-client.js";
@@ -42,7 +41,6 @@ export class DataSources {
     const load = async () => (cache ??= await loadStoreData(paths.store));
     const datasets = new JsonlDatasetStore(paths.datasets);
     const metrics = () => loadMetrics(paths);
-    await seedBuiltinDatasets(datasets, load);
     const tools: DataTool[] = createStoreTools({ load, store: datasets, metrics }).map((t) => ({
       name: `store__${t.name}`,
       description: t.description,

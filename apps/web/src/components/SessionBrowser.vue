@@ -66,6 +66,12 @@ watch(() => props.browser.status, (status) => {
     state.session = props.browser;
   }
 });
+watch([() => state.session?.browserSessionId, () => state.session?.status], () => {
+  if (unmounted || state.session?.status !== "closed" || state.session.browserSessionId !== props.browser.browserSessionId) return;
+  pausedForVisibility = false;
+  expanded.value = false;
+  emit("close", state.session);
+}, { immediate: true });
 
 watch(() => state.manual, (manual) => { if (!manual) pressedButtons.clear(); }, { flush: "sync" });
 watch(expanded, () => viewer.setManual(false));
@@ -161,7 +167,6 @@ async function closeBrowser() {
     viewer.stop();
     state.session = closed;
     expanded.value = false;
-    emit("close", closed);
   };
   const current = () => !unmounted && !controller.signal.aborted && props.sessionId === sessionId
     && props.browser.browserSessionId === browser.browserSessionId && workspace.gatewayUrl.value === base && workspace.token.value === token;

@@ -121,6 +121,14 @@ try {
   });
   const page = await browser.newPage();
   await page.setViewport({ width: 1365, height: 1000, deviceScaleFactor: 1 });
+  const settleUi = () => page.waitForFunction(() => document.getAnimations().every((animation) =>
+    animation.playState !== "running" || animation.effect?.getTiming().iterations === Infinity)
+    && [...document.querySelectorAll('.el-select__popper[aria-hidden="false"]')].every((popper) =>
+      getComputedStyle(popper).opacity === "1" && !/(?:enter|leave)-(?:active|from|to)/.test(popper.className)), { timeout: 5000 });
+  const screenshot = async (name) => {
+    await settleUi();
+    await page.screenshot({ path: path.join(root, name), fullPage: true });
+  };
   const errors = [];
   const sentRequests = [];
   const modelUpdates = [];
@@ -157,7 +165,7 @@ try {
   await (await csvChip.evaluateHandle((button) => button.closest(".attachment-chip").querySelector('[aria-label="移除附件"]'))).click();
   assert.equal(await page.$$eval(".chat-composer-attachments .attachment-chip", (chips) => chips.length), 3);
   await chooseFiles([files[1]], 4);
-  await page.screenshot({ path: path.join(root, "desktop-attachments.png"), fullPage: true });
+  await screenshot("desktop-attachments.png");
 
   await page.click('[aria-label="发送消息"]');
   await until(() => histories.length === 1, "Attachment-only message never reached the fake chat");
@@ -196,7 +204,7 @@ try {
     const groups = [...document.querySelectorAll(".el-select-group__wrap")].filter((group) => getComputedStyle(group).display !== "none");
     return groups.length === 1 && groups[0].querySelector(".el-select-group__title")?.textContent === "推理服务";
   }, { timeout: 5000 });
-  await page.screenshot({ path: path.join(root, "desktop-model-search.png"), fullPage: true });
+  await screenshot("desktop-model-search.png");
   await page.focus('.chat-model-panel input[role="combobox"]');
   await page.keyboard.down("Control");
   await page.keyboard.press("KeyA");
@@ -209,7 +217,7 @@ try {
   await unavailable.click();
   assert.equal(await page.$eval(".chat-model-name", (label) => label.textContent), "基础模型");
   assert.equal(modelUpdates.length, 0, "Disabled choices must never update the session model");
-  await page.screenshot({ path: path.join(root, "desktop-model-catalog.png"), fullPage: true });
+  await screenshot("desktop-model-catalog.png");
   const options = await page.$$(".el-select-dropdown__item");
   let chosen = false;
   for (const option of options) {
@@ -223,12 +231,13 @@ try {
   await page.waitForFunction(() => document.querySelector(".chat-model-name")?.textContent === "深度推理模型");
   await until(async () => (await gateway.hub.meta(sessionId)).model === "browser-reasoning", "The model selector must PUT the chosen model to the current session");
   await page.waitForFunction(() => !!document.querySelector('.chat-reasoning-options button:not([disabled])'));
+  await page.waitForSelector(".el-select__popper", { hidden: true, timeout: 5000 });
   assert.deepEqual(modelUpdates, [{ model: "browser-reasoning" }]);
   const high = await page.$$(".chat-reasoning-options button");
-  for (const button of high) if (await button.evaluate((element) => element.textContent === "高")) await button.click();
-  await page.waitForFunction(() => document.querySelector(".chat-model-effort")?.textContent.includes("高"));
-  assert.equal(await page.$eval('.chat-reasoning-options button[aria-pressed="true"]', (button) => button.textContent), "高");
-  await page.screenshot({ path: path.join(root, "desktop-model-popover.png"), fullPage: true });
+  for (const button of high) if (await button.evaluate((element) => element.textContent.trim() === "高")) await button.click();
+  await page.waitForFunction(() => document.querySelector(".chat-model-effort")?.textContent.includes("高"), { timeout: 5000 });
+  assert.equal(await page.$eval('.chat-reasoning-options button[aria-pressed="true"]', (button) => button.textContent.trim()), "高");
+  await screenshot("desktop-model-popover.png");
   await page.click('.chat-model-picker summary');
   await page.type("#message-input", "按高强度继续分析附件");
   await page.click('[aria-label="发送消息"]');
@@ -246,25 +255,29 @@ try {
     && document.body.innerText.includes("浏览器验证完成 2"));
   assert.equal(selections.length, 2, "Reload must restore the conversation without contacting a model");
   await page.setViewport({ width: 390, height: 844, deviceScaleFactor: 1 });
+  await page.waitForFunction(() => document.querySelector("aside.sidebar")?.getBoundingClientRect().right <= 0, { timeout: 5000 });
+  await settleUi();
   await page.click('.chat-model-picker summary');
   await page.waitForSelector(".chat-model-panel", { visible: true });
   const geometry = await page.evaluate(() => {
     const panel = document.querySelector(".chat-model-panel");
     const rect = panel.getBoundingClientRect();
-    const point = document.elementFromPoint(rect.left + rect.width / 2, rect.top + 20);
+    const visible = [rect.left + 8, rect.left + rect.width / 2, rect.right - 8].every((x) =>
+      document.elementFromPoint(x, rect.top + 20)?.closest(".chat-model-panel"));
     return {
       viewport: innerWidth, documentWidth: document.documentElement.scrollWidth,
       left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom,
-      visible: !!point?.closest(".chat-model-panel"),
+      sidebarRight: document.querySelector("aside.sidebar")?.getBoundingClientRect().right,
+      visible,
     };
   });
   assert.ok(geometry.documentWidth <= geometry.viewport, `Mobile page overflows horizontally: ${JSON.stringify(geometry)}`);
   assert.ok(geometry.left >= 0 && geometry.right <= 390 && geometry.top >= 0 && geometry.bottom <= 844, `Mobile selector leaves the viewport: ${JSON.stringify(geometry)}`);
   assert.equal(geometry.visible, true, "Mobile model popover must not be clipped or covered");
-  await page.screenshot({ path: path.join(root, "mobile-model-popover.png"), fullPage: true });
+  await screenshot("mobile-model-popover.png");
   await page.click('.chat-model-picker summary');
   await chooseFiles([files[0], files[1]], 2);
-  await page.screenshot({ path: path.join(root, "mobile-attachments.png"), fullPage: true });
+  await screenshot("mobile-attachments.png");
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "Mobile attachment chips must not cause horizontal overflow");
   assert.deepEqual(errors, [], "The production chat page must have no uncaught browser exceptions");
   console.log(JSON.stringify({ passed: true, root, sessionId, models: selections, modelUpdates, attachmentFormats: ["TXT", "CSV", "DOCX", "PDF"], attachmentMode: "gateway references with on-demand read_attachment", unavailableModelDisabled: true, providerGroups: ["基础服务", "推理服务", "未配置服务"], searchableProviderGroups: true, mobile: geometry, screenshots: ["desktop-attachments.png", "desktop-model-search.png", "desktop-model-catalog.png", "desktop-model-popover.png", "mobile-model-popover.png", "mobile-attachments.png"] }, null, 2));

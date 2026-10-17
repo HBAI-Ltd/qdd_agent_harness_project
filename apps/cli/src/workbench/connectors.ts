@@ -88,18 +88,6 @@ export class ConnectorStore {
   }
 
   async list(mcp: McpConnectorInfo[] = []): Promise<ConnectorView[]> {
-    const builtin: ConnectorView = {
-      id: "store",
-      type: "store",
-      name: "门店内置数据",
-      origin: "builtin",
-      permission: "read",
-      status: "connected",
-      detail: "store__* 只读工具",
-      config: {},
-      lastVerifiedAt: null,
-      createdAt: null,
-    };
     const servers = mcp.map(
       (s): ConnectorView => ({
         id: `mcp:${s.name}`,
@@ -114,7 +102,7 @@ export class ConnectorStore {
         createdAt: null,
       }),
     );
-    return [builtin, ...servers, ...(await this.readAll()).map((c) => this.view(c))];
+    return [...servers, ...(await this.readAll()).map((c) => this.view(c))];
   }
 
   async get(id: string): Promise<ConnectorView> {

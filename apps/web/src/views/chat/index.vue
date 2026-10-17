@@ -145,6 +145,8 @@ let revealBrowserRequested = false;
 let followBrowserOnMount = false;
 const reasoningLabels: Record<ReasoningEffort, string> = {
   default: "默认",
+  none: "关闭",
+  minimal: "极低",
   low: "低",
   medium: "中",
   high: "高",
@@ -223,6 +225,7 @@ function toggleBrowser() {
   if (browserOpen.value) void nextTick(() => focusBrowserPreview(browserPreview.value ?? null));
 }
 function browserMounted() {
+  if (!browserOpen.value || latestBrowser.value?.status !== "running") return;
   if (revealBrowserRequested) focusBrowserPreview(browserPreview.value ?? null);
   else if (followBrowserOnMount) void scrollToLatest();
   revealBrowserRequested = false;
@@ -232,6 +235,8 @@ function browserClosed(browser: BrowserSessionState) {
   if (browser.browserSessionId !== latestBrowser.value?.browserSessionId) return;
   closedBrowserId.value = browser.browserSessionId;
   browserOpen.value = false;
+  revealBrowserRequested = false;
+  followBrowserOnMount = false;
 }
 function handleEnter(event: Event | KeyboardEvent) {
   if (!("key" in event)) return;
@@ -793,7 +798,6 @@ onMounted(() => {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  scroll-behavior: smooth;
 }
 .chat-messages {
   display: flex;

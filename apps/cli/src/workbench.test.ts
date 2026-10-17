@@ -171,7 +171,7 @@ describe("workbench gateway", () => {
 
     const list = (await (await api("/api/connectors")).json()) as { catalog: { type: string; available: boolean }[]; connectors: ConnectorView[] };
     assert.ok(list.catalog.find((c) => c.type === "feishu")?.available);
-    assert.deepEqual(list.connectors.map((c) => c.origin), ["builtin", "installed"]);
+    assert.deepEqual(list.connectors.map((c) => c.origin), ["installed"]);
     assert.equal((await post(`/api/connectors/${webhookId}/verify`, {})).status, 200);
     assert.equal((await post(`/api/connectors/${webhookId}/test`, { text: "你好" })).status, 200);
     assert.equal(feishu.messages.at(-1)!.text, "你好");

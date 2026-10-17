@@ -223,7 +223,7 @@ export function createBrowserRuntime() {
     await stream.client.detach().catch(() => {});
   }
 
-  function refreshStream(session: BrowserSession) {
+  function refreshStream(session: BrowserSession, retry = 0) {
     session.streamQueue = session.streamQueue.catch(() => {}).then(async () => {
       const tab = session.tabs.get(session.state.tabId);
       if (!session.closed && session.subscribers.size && tab && !tab.page.isClosed() && session.stream?.tabId === tab.id) return;
@@ -246,6 +246,13 @@ export function createBrowserRuntime() {
       await client.send("Page.startScreencast", { format: "jpeg", quality: 65, maxWidth: 1280, maxHeight: 800, everyNthFrame: 1 });
     }).catch(async error => {
       await stopStream(session);
+      // 首次导航会切换 Chromium 的活动页面；过早建立的 CDP 会话可能尚未附着。
+      // 重新附着后启动画面，避免新建浏览器的首次订阅永久停留在空白页。
+      if (!session.closed && session.subscribers.size && retry < 2 && error instanceof Error && error.message.includes("Not attached to an active page")) {
+        await new Promise<void>(resolve => setTimeout(resolve, 100));
+        if (!session.closed && session.subscribers.size) refreshStream(session, retry + 1);
+        return;
+      }
       if (!session.closed) emit(session, { type: "error", message: error instanceof Error ? error.message : "浏览器画面连接失败" });
     });
   }

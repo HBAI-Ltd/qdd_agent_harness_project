@@ -77,6 +77,7 @@ const firstReply = "已打开网页，实时画面显示在对话最下面。";
 const continuedReply = "可以继续对话，浏览器仍在最新消息下面。";
 const reopenedReply = "已重新打开浏览器。";
 const closedReply = "已按你的要求关闭浏览器。";
+const staleBrowserReply = "已再次打开浏览器，准备验证运行时关闭。";
 const call = (name, args) => ({
   role: "assistant", content: null,
   tool_calls: [{ id: `preview-${step}`, type: "function", function: { name, arguments: JSON.stringify(args) } }],
@@ -96,6 +97,8 @@ const gateway = await startGateway(loaded, sources, {
     if (step === 6) return call("reply", { text: reopenedReply, gaps: [] });
     if (step === 7) return call("browser", { action: "close" });
     if (step === 8) return call("reply", { text: closedReply, gaps: [] });
+    if (step === 9) return call("browser", { action: "open", url: fixture });
+    if (step === 10) return call("reply", { text: staleBrowserReply, gaps: [] });
     assert.fail(`Unexpected model step: ${step}`);
   },
 });
@@ -161,17 +164,24 @@ try {
       insideMessages: Boolean(element.closest(".chat-messages-scroll")),
       lastMessageChild: preview?.parentElement === messages && messages.lastElementChild === preview,
       followsMessages: Boolean(preview?.previousElementSibling),
-      beforeComposer: scroller.nextElementSibling?.classList.contains("chat-composer-area") && bounds.bottom <= composer.top,
+      beforeComposer: scroller.nextElementSibling?.classList.contains("chat-composer-area") && bounds.bottom <= composer.top + 0.5,
+      bottom: bounds.bottom, composerTop: composer.top,
       width: bounds.width, height: bounds.height,
     };
   });
   const assertBottomBrowser = async () => {
+    // Native smooth scrolling is not included in document.getAnimations().
+    await page.waitForFunction(() => {
+      const browser = document.querySelector(".session-browser");
+      const composer = document.querySelector(".chat-composer-area");
+      return browser && composer && browser.getBoundingClientRect().bottom <= composer.getBoundingClientRect().top + 0.5;
+    }, { timeout: 5_000 }).catch(() => {});
     const geometry = await bottomBrowserGeometry();
     assert.equal(geometry.insideAssistant, false, "The live browser must stay below all turns instead of inside a historical reply");
     assert.equal(geometry.insideMessages, true, "The live browser must scroll with the conversation");
     assert.equal(geometry.lastMessageChild, true, "The browser must be the last child after messages and session actions");
     assert.equal(geometry.followsMessages, true, "The browser must appear after the conversation messages");
-    assert.equal(geometry.beforeComposer, true, "The default browser must be visible above the composer");
+    assert.equal(geometry.beforeComposer, true, `The default browser must be visible above the composer: ${JSON.stringify(geometry)}`);
     return geometry;
   };
   await settleUi(page);
@@ -355,6 +365,11 @@ try {
   const assertClosedBrowser = async (id) => {
     assert.equal((await fetch(`${gateway.url}/api/browser/${id}`, { headers })).status, 404,
       "A real close must remove the running browser from the backend");
+    // The browser stream closes before context teardown and history persistence finish.
+    await until(async () => {
+      const latest = (await gateway.hub.detail(sessionId)).events.findLast((event) => event.type === "browser").browser;
+      return latest.browserSessionId === id && latest.status === "closed";
+    }, "Closing must persist the final browser state after runtime teardown");
     const detail = await gateway.hub.detail(sessionId);
     const latest = detail.events.findLast((event) => event.type === "browser").browser;
     assert.equal(latest.browserSessionId, id);
@@ -402,10 +417,51 @@ try {
   const chatCloseTool = (await gateway.hub.detail(sessionId)).events.findLast((event) => event.type === "tool"
     && event.tool.name === "browser" && event.tool.args?.action === "close");
   assert.equal(chatCloseTool?.tool.status, "success", "A conversational close request must complete the browser close tool");
-  assert.equal(step, 8, "All scripted conversation turns must finish");
+
+  await sendMessage("再次打开浏览器", staleBrowserReply);
+  await waitForImage();
+  await assertBottomBrowser();
+  const staleBrowser = (await gateway.hub.detail(sessionId)).events.findLast((event) => event.type === "browser").browser;
+  assert.equal(staleBrowser.status, "running");
+  assert.equal((await streams()).length, 5, "Opening after a conversational close must start one new stream");
+  const runtimeCloseStream = await observeBrowserClose(staleBrowser.browserSessionId);
+  await gateway.workbench.browser.runtime.closeOwnedSession(gateway.workbench.browser.cwd, sessionId, staleBrowser.browserSessionId);
+  await runtimeCloseStream.finished;
+  await page.waitForSelector(".session-browser", { hidden: true });
+  await page.waitForFunction(() => ![...document.querySelectorAll(".chat-conversation-actions button")]
+    .some((button) => ["查看浏览器", "收起浏览器"].includes(button.textContent.trim())));
+  await until(async () => (await streams()).every((stream) => stream.aborted), "A runtime closed event must release the UI stream");
+  const staleHistory = (await gateway.hub.detail(sessionId)).events.findLast((event) => event.type === "browser").browser;
+  assert.deepEqual(staleHistory, staleBrowser, "Runtime-only closure must leave stale running history for the GET 404 regression");
+  const streamsBeforeRefresh = (await streams()).length;
+
+  const waitForStaleState = () => page.waitForResponse((response) => response.request().method() === "GET"
+    && response.url() === `${gateway.url}/api/browser/${staleBrowser.browserSessionId}` && response.status() === 404);
+  const assertStaleBrowserHidden = async () => {
+    await page.waitForSelector(".session-browser", { hidden: true });
+    await page.waitForFunction(() => ![...document.querySelectorAll(".chat-conversation-actions button")]
+      .some((button) => ["查看浏览器", "收起浏览器"].includes(button.textContent.trim())));
+    await settleUi(page);
+    assert.equal(await page.$$eval('.session-browser, [aria-label="重新连接浏览器画面"]', (elements) => elements.length), 0,
+      "A missing browser must disappear instead of showing stale errors or a reconnect action");
+    assert.equal((await streams()).length, 0, "Authoritative GET 404 must not start a stale browser stream");
+  };
+  const refreshedStaleState = waitForStaleState();
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await refreshedStaleState;
+  await page.waitForFunction((reply) => document.body.innerText.includes(reply)
+    && document.body.innerText.includes("网关已连接"), {}, staleBrowserReply);
+  await assertStaleBrowserHidden();
+  await page.click('[aria-label="新建对话"]');
+  await page.waitForSelector(".conversation-select", { visible: true });
+  const revisitedStaleState = waitForStaleState();
+  await page.click(".conversation-select");
+  await revisitedStaleState;
+  await assertStaleBrowserHidden();
+  assert.equal(step, 10, "All scripted conversation turns must finish");
   assert.deepEqual(errors, [], "The production chat page must have no uncaught exceptions");
   console.log(JSON.stringify({ passed: true, root, sessionId, browserSessionId: browserState.browserSessionId,
-    streams: (await streams()).length, inlineGeometry, mobile, mobileExpanded,
+    streamsBeforeRefresh, streamsAfterRefresh: (await streams()).length, inlineGeometry, mobile, mobileExpanded,
     screenshots: ["desktop-inline-browser.png", "desktop-browser-expanded.png", "mobile-inline-browser.png", "mobile-browser-expanded.png"],
   }, null, 2));
 } catch (error) {

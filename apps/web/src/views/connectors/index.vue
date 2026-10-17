@@ -378,7 +378,7 @@ onBeforeUnmount(() => {
         <div class="section-heading">
           <div>
             <h2 id="installed-connectors-title">工作空间连接器</h2>
-            <p>内置数据与配置文件来源只读展示；已安装的连接器可单独管理。</p>
+            <p>配置文件来源只读展示；已安装的连接器可单独管理。</p>
           </div>
           <ElButton :loading="loading" @click="refresh">
             <AgentIcon name="refresh" :size="15" />

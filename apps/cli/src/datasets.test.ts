@@ -5,10 +5,8 @@ import path from "node:path";
 import { before, describe, test } from "node:test";
 import vm from "node:vm";
 import { aggregate, bucketRange, classify, segments, timeline, type Row } from "@qdd/shared";
-import { generateStoreData, type StoreData } from "./datasource/store.js";
 import { DEFAULT_METRICS } from "./datasets/metrics.js";
 import { compactDataset, queryAggregate, querySegments, queryTimeline } from "./datasets/query.js";
-import { seedBuiltinDatasets } from "./datasets/seed.js";
 import { JsonlDatasetStore, readAll } from "./datasets/store.js";
 import { buildComputeScript } from "./gateway/sdk.js";
 
@@ -89,13 +87,21 @@ describe("计算引擎", () => {
 
 describe("数据集", () => {
   let store: JsonlDatasetStore;
-  let data: StoreData;
   const ctx = () => ({ store, metrics: async () => M });
 
   before(async () => {
     store = new JsonlDatasetStore(path.join(await mkdtemp(path.join(tmpdir(), "qdd-ds-")), "datasets"));
-    data = generateStoreData(new Date(2026, 9, 16), 45);
-    await seedBuiltinDatasets(store, async () => data);
+    await store.define({ name: "products", description: "关联字段校验", kind: "dimension", key: ["sku"], fields: { sku: "string", category: "string", safetyStock: "number" } });
+    await store.replace("products", [{ sku: "SKU001", category: "饮料", safetyStock: 2 }]);
+    await store.define({ name: "order_items", description: "分区聚合校验", kind: "fact", key: ["orderId"], timeField: "time", fields: { orderId: "string", time: "string", date: "string", category: "string", revenue: "number" } });
+    await store.append("order_items", [
+      { orderId: "a", time: "2026-09-30 10:00", date: "2026-09-30", category: "A", revenue: 1 },
+      { orderId: "b", time: "2026-10-10 10:00", date: "2026-10-10", category: "A", revenue: 3 },
+      { orderId: "c", time: "2026-10-11 10:00", date: "2026-10-11", category: "B", revenue: 2 },
+    ]);
+    await store.define({ name: "inventory_moves", description: "库存回放校验", kind: "event_log", key: ["id"], timeField: "time", replay: { key: "sku", delta: "delta", op: "op", value: "stock" }, fields: { id: "string", time: "string", sku: "string", type: "string", op: "string", delta: "number", stock: "number" } });
+    await store.putCheckpoint("inventory_moves", { at: "2026-10-01 00:00", rows: [{ sku: "SKU001", stock: 5 }] });
+    await store.append("inventory_moves", [{ id: "a", time: "2026-10-02 10:00", sku: "SKU001", type: "sale", op: "delta", delta: -3, stock: null }]);
   });
 
   test("跨分区读取 = 全量计算；只读范围内的分区", async () => {
@@ -107,11 +113,11 @@ describe("数据集", () => {
     assert.ok(ranged.length > 0 && ranged.every((r) => String(r.date) >= "2026-10-10" && String(r.date) <= "2026-10-11"));
   });
 
-  test("回放结果与生成器的最终库存一致；检查点前后结果相同", async () => {
+  test("回放库存符合预期；检查点前后结果相同", async () => {
     const args = { dataset: "inventory_moves", from: "2026-10-05", to: "2026-10-16", bucket: "day" as const };
     const before = await queryTimeline(ctx(), args);
     const final = new Map(before.filter((r) => r.bucket === "2026-10-16").map((r) => [r.sku, r.stock]));
-    for (const i of data.inventory) assert.equal(final.get(i.sku), i.stock, i.sku);
+    assert.deepEqual([...final], [["SKU001", 2]]);
 
     await compactDataset(store, "inventory_moves", "2026-10-03 00:00");
     assert.equal((await store.checkpoint("inventory_moves", "2026-10-05 00:00"))?.at, "2026-10-03 00:00");

@@ -126,7 +126,7 @@ apps/android-screen/ 安卓内网投屏 App（MediaProjection）
 apps/android-mcp/    手机内网画面与 ESP32 BLE 键鼠 MCP（电脑运行）
 packages/shared/     共享类型（含前端 API 契约）
 docs/api.md          前端对接文档
-workspace/           运行时生成（已 gitignore）：style.md、metrics.json、datasets/、store.json 示例数据、site/、sessions/、schedule-sessions/、state/、.gateway-token
+workspace/           运行时生成（已 gitignore）：style.md、metrics.json、datasets/、store.json 门店数据（初始为空，不自动填充示例）、site/、sessions/、schedule-sessions/、state/、.gateway-token
 ```
 
 AI Passport 环境配置与命令见 [apps/esp/README.zh_CN.md](apps/esp/README.zh_CN.md)。

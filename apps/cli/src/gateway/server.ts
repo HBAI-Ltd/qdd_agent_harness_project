@@ -468,7 +468,8 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
         try {
           off = browser.runtime.subscribe(browser.cwd, id, listener);
         } catch (error) {
-          stream({ type: "error", message: (error as Error).message });
+          if (!browser.state(id)) stream({ type: "closed", sessionId: id });
+          else stream({ type: "error", message: (error as Error).message });
           res.end();
           return;
         }

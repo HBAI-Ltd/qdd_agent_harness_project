@@ -103,6 +103,7 @@ async function mountBrowser(t, visibilityState = "visible") {
     sessionId: "conversation-1",
   });
   const inputs = [];
+  const closed = [];
   const requests = [];
   const streams = [];
   let heldInput;
@@ -139,7 +140,7 @@ async function mountBrowser(t, visibilityState = "visible") {
     createElement: (tag) => ({ tag }), createText: (text) => ({ text }), createComment: (text) => ({ text }),
     parentNode: () => null, nextSibling: () => null,
   });
-  const app = renderer.createApp({ render: () => h(SessionBrowser, props) });
+  const app = renderer.createApp({ render: () => h(SessionBrowser, { ...props, onClose: (browser) => closed.push(browser) }) });
   let mounted = true;
   app.mount({});
   const setup = app._instance.subTree.component.setupState;
@@ -155,7 +156,7 @@ async function mountBrowser(t, visibilityState = "visible") {
   });
   await settle();
   return {
-    setup, props, inputs, requests, streams, frame, settle, unmount,
+    setup, props, inputs, closed, requests, streams, frame, settle, unmount,
     hold() {
       const held = {};
       heldInput = held;
@@ -170,6 +171,76 @@ async function mountBrowser(t, visibilityState = "visible") {
     },
   };
 }
+
+test("close sends one DELETE for this conversation and ends the viewer only after success", async (t) => {
+  const fixture = await mountBrowser(t);
+  const original = globalThis.fetch;
+  const requests = [];
+  let finish;
+  globalThis.fetch = (url, init = {}) => {
+    if (init.method !== "DELETE") return original(url, init);
+    requests.push({ url: String(url), init });
+    return new Promise((resolve) => { finish = () => resolve(new Response(JSON.stringify({ ...fixture.props.browser, status: "closed" }))); });
+  };
+  fixture.setup.viewer.setManual(true);
+  const closing = fixture.setup.closeBrowser();
+  await fixture.setup.closeBrowser();
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].url, "https://gateway.example/api/browser/browser-1");
+  assert.deepEqual(JSON.parse(requests[0].init.body), { sessionId: "conversation-1" });
+  assert.equal(fixture.setup.closing, true);
+  assert.equal(fixture.setup.state.manual, false);
+  assert.equal(fixture.streams[0].signal.aborted, false);
+  finish();
+  await closing;
+  assert.equal(fixture.setup.closing, false);
+  assert.equal(fixture.setup.state.session.status, "closed");
+  assert.equal(fixture.streams[0].signal.aborted, true);
+  assert.equal(fixture.closed.length, 1);
+  assert.equal(fixture.closed[0].browserSessionId, "browser-1");
+});
+
+test("close failures keep the live browser available and allow retrying", async (t) => {
+  const fixture = await mountBrowser(t);
+  const original = globalThis.fetch;
+  let count = 0;
+  globalThis.fetch = (url, init = {}) => {
+    if (init.method !== "DELETE") return original(url, init);
+    count++;
+    return Promise.resolve(count === 1
+      ? new Response(JSON.stringify({ error: "关闭失败，请重试" }), { status: 500 })
+      : new Response(JSON.stringify({ ...fixture.props.browser, status: "closed" })));
+  };
+  await fixture.setup.closeBrowser();
+  assert.match(fixture.setup.state.error, /关闭失败/);
+  assert.equal(fixture.setup.closing, false);
+  assert.equal(fixture.setup.state.online, true);
+  assert.equal(fixture.closed.length, 0);
+  await fixture.setup.closeBrowser();
+  assert.equal(fixture.closed.length, 1);
+  assert.equal(fixture.setup.state.session.status, "closed");
+});
+
+test("a delayed close response cannot hide the next conversation's browser", async (t) => {
+  const fixture = await mountBrowser(t);
+  const original = globalThis.fetch;
+  let finish;
+  const old = { ...fixture.props.browser, status: "closed" };
+  globalThis.fetch = (url, init = {}) => init.method === "DELETE"
+    ? new Promise((resolve) => { finish = () => resolve(new Response(JSON.stringify(old))); })
+    : original(url, init);
+  const closing = fixture.setup.closeBrowser();
+  fixture.props.sessionId = "conversation-2";
+  fixture.props.browser = { ...fixture.props.browser, browserSessionId: "browser-2", tabId: "tab-2" };
+  await nextTick();
+  finish();
+  await closing;
+  await fixture.settle();
+  assert.equal(fixture.closed.length, 0);
+  assert.equal(fixture.setup.state.session.browserSessionId, "browser-2");
+  assert.equal(fixture.setup.state.online, true);
+  assert.equal(fixture.setup.closing, false);
+});
 
 test("window blur releases manual input while the live browser keeps receiving frames", async (t) => {
   const fixture = await mountBrowser(t);
@@ -275,6 +346,8 @@ test("closed or unmounted browser viewers cannot reconnect on pageshow", async (
   const fixture = await mountBrowser(t);
   fixture.streams[0].send({ type: "closed", sessionId: "browser-1" });
   await fixture.settle();
+  assert.equal(fixture.closed.length, 1);
+  assert.equal(fixture.closed[0].status, "closed");
   fixture.pagehide();
   fixture.pageshow();
   await fixture.settle();
@@ -282,6 +355,21 @@ test("closed or unmounted browser viewers cannot reconnect on pageshow", async (
   fixture.unmount();
   fixture.pagehide();
   fixture.pageshow();
+  await fixture.settle();
+  assert.equal(fixture.streams.length, 1);
+});
+
+test("a stale browser history entry reports closed to the conversation after GET 404", async (t) => {
+  const fixture = await mountBrowser(t);
+  globalThis.fetch = async () => new Response(JSON.stringify({ error: "浏览器会话不存在或已关闭" }), { status: 404 });
+  fixture.setup.startWatching();
+  await fixture.settle();
+  assert.equal(fixture.setup.state.session.status, "closed");
+  assert.equal(fixture.setup.state.error, "");
+  assert.equal(fixture.closed.length, 1);
+  assert.equal(fixture.closed[0].browserSessionId, "browser-1");
+  fixture.visibility("hidden");
+  fixture.visibility("visible");
   await fixture.settle();
   assert.equal(fixture.streams.length, 1);
 });

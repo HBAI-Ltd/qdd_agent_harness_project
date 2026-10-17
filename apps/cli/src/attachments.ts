@@ -20,6 +20,7 @@ const MIME: Record<string, string> = {
   ".json": "application/json", ".html": "text/html", ".xml": "application/xml", ".yaml": "application/yaml", ".yml": "application/yaml",
   ".pdf": "application/pdf", ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp",
   ".zip": "application/zip", ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  ".xls": "application/vnd.ms-excel", ".xlsm": "application/vnd.ms-excel.sheet.macroEnabled.12",
   ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 };
 
@@ -97,13 +98,28 @@ export class AttachmentStore {
     return { ref: publicRef(ref), bytes: await readFile(this.object(ref.sha256)) };
   }
 
-  /** 给模型读的内容：文本按偏移分段返回，二进制只给元信息。 */
+  /** 给模型读的内容：文本和 Excel 表格按偏移分段返回，其他二进制只给元信息。 */
   async readForModel(id: string, offset = 0): Promise<string> {
     const { ref, bytes } = await this.bytes(id);
     const head = `附件 ${ref.path}（${ref.mime}，${ref.size} 字节）`;
-    if (!isText(bytes)) return `${head}\n这是二进制文件，无法直接读取文本内容。可根据文件名和类型向店长说明，或请店长提供可读格式（如 CSV、TXT）。`;
-    const text = bytes.toString("utf8");
-    const start = Math.max(0, Math.floor(offset));
+    const excel = [".xlsx", ".xls", ".xlsm"].includes(path.extname(ref.name).toLowerCase());
+    if (!excel && !isText(bytes)) return `${head}\n这是二进制文件，无法直接读取文本内容。可根据文件名和类型向店长说明，或请店长提供可读格式（如 CSV、TXT）。`;
+    let text: string;
+    if (excel) {
+      try {
+        const { read, utils } = await import("xlsx");
+        const workbook = read(bytes, { type: "buffer", cellFormula: false, cellHTML: false });
+        text = workbook.SheetNames.map((name) => {
+          const sheet = workbook.Sheets[name];
+          const csv = sheet ? utils.sheet_to_csv(sheet, { blankrows: false }) : "";
+          return `工作表：${name}\n${csv.trim() ? csv : "（空工作表）"}`;
+        }).join("\n\n");
+        if (!text) text = "（工作簿中没有工作表）";
+      } catch {
+        throw new AttachmentError("无法读取 Excel 附件，请确认文件未损坏、未加密，并另存为 XLSX 或 CSV 后重试。");
+      }
+    } else text = bytes.toString("utf8");
+    const start = Number.isFinite(offset) ? Math.max(0, Math.floor(offset)) : 0;
     const slice = text.slice(start, start + READ_LIMIT);
     const end = start + slice.length;
     const more = end < text.length ? `\n\n…（共 ${text.length} 字符，已显示 ${start}-${end}；用 offset=${end} 继续读取）` : "";

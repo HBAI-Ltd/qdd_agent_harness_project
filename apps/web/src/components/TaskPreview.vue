@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { ElButton } from "element-plus/es/components/button/index";
 import { ElTag } from "element-plus/es/components/tag/index";
 import type { JsonValue as PageBridgePayload, PageView } from "@qdd/shared";
@@ -26,7 +26,7 @@ const bridge = createTaskPageBridge({
   getWindow: () => frame.value?.contentWindow ?? null,
   getOrigin: () => (documentUrl.value ? new URL(documentUrl.value).origin : ""),
   getSlug: () => props.page.slug,
-  isOpaque: () => true,
+  isOpaque: () => sameOrigin.value,
   getContext: () => props.context ?? { theme: "light", locale: "zh-CN" },
   onMessage(message) {
     if (message.type === "page:ready") {
@@ -130,7 +130,11 @@ onBeforeUnmount(() => {
 });
 defineExpose({ postMessage: bridge.postMessage });
 
-watch(() => [props.page.slug, props.page.url, props.page.version, props.gatewayUrl], reload, { immediate: true });
+watch(
+  [() => props.page.slug, () => props.page.url, () => props.page.version, () => props.gatewayUrl],
+  reload,
+  { immediate: true },
+);
 </script>
 
 <template>

@@ -74,23 +74,28 @@ export function checkFile(rel: string, content: string, cdnAllowlist: string[]):
   return result;
 }
 
-/** 接受明确的 HTTPS 视频源，或单独的 "*" 全视频源开关；不接受 URL 通配符或 CSP 指令。 */
+/** 接受 HTTPS 或明确的 HTTP 回环视频源，或单独的 "*"；不接受 URL 通配符或 CSP 指令。 */
 export function parseMediaOrigins(value: unknown): string[] {
-  if (!Array.isArray(value)) throw new Error('mediaOrigins 必须是 HTTPS origin 数组或 ["*"]');
+  if (!Array.isArray(value)) throw new Error('mediaOrigins 必须是 HTTPS/HTTP 回环 origin 数组或 ["*"]');
   if (value.length === 1 && value[0] === "*") return ["*"];
   return [
     ...new Set(
       value.map((entry: unknown, index: number) => {
-        const invalid = () => new Error(`mediaOrigins 第 ${index + 1} 项必须是无路径、凭据或通配符的 HTTPS origin`);
-        if (typeof entry !== "string" || !/^https:\/\/[^\s/?#@\\;'"<>*%]+\/?$/i.test(entry)) throw invalid();
+        const invalid = () =>
+          new Error(`mediaOrigins 第 ${index + 1} 项必须是无路径、凭据或通配符的 HTTPS origin，HTTP 仅允许 localhost、127.0.0.1 或 [::1]`);
+        if (typeof entry !== "string") throw invalid();
+        const match = /^https?:\/\/([^\s/?#@\\;'"<>*%]+)\/?$/i.exec(entry);
+        if (!match) throw invalid();
         let url: URL;
         try {
           url = new URL(entry);
         } catch {
           throw invalid();
         }
-        if (url.protocol !== "https:" || !url.hostname || url.username || url.password || url.pathname !== "/" || url.search || url.hash)
-          throw invalid();
+        if (!url.hostname || url.username || url.password || url.pathname !== "/" || url.search || url.hash) throw invalid();
+        // Check the literal authority as URL normalizes alternative IP spellings
+        // such as 127.1 and 2130706433 to 127.0.0.1.
+        if (url.protocol === "http:" && !/^(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/i.test(match[1]!)) throw invalid();
         return url.origin;
       }),
     ),
@@ -119,9 +124,8 @@ export function pageCsp(
     allMedia ? `connect-src ${scope.origin}/api/ 'self' http: https: ws: wss:` : `connect-src ${scope.origin}/api/ 'self' ${media}`.trim(),
     allMedia ? "media-src 'self' http: https: blob: data:" : `media-src 'self' blob: ${media}`.trim(),
     "form-action 'none'",
-    "frame-src 'none'",
+    "frame-src 'self'",
     "worker-src 'self' blob:",
-    "sandbox allow-scripts allow-downloads allow-modals",
     `frame-ancestors 'self' ${frameAncestors.join(" ")}`.trim(),
     "object-src 'none'",
     "base-uri 'none'",

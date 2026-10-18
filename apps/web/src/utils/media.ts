@@ -24,3 +24,14 @@ export function safeMediaUrl(value: string): boolean {
     return false;
   }
 }
+
+/** Recognize camera-generated frames; the gateway separately validates the connected source. */
+export function isCameraCaptureUrl(value: string): boolean {
+  if (!safeMediaUrl(value)) return false;
+  try {
+    const url = new URL(value);
+    return !url.search && !url.hash && /^\/captures\/[a-f0-9]{32}\/frame_\d{6}\.jpg$/.test(url.pathname);
+  } catch {
+    return false;
+  }
+}

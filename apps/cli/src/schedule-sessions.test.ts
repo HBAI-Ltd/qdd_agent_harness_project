@@ -281,54 +281,87 @@ test("工作区初始化完整迁移旧定时会话且可重复执行，后来�
   }
 });
 
-test("隔离后的定时执行保留授权来源、事件回放与授权和取消入口", { timeout: 15000 }, async (t) => {
-  const script = [
-    tool("save_skill", { name: "盘点检查", description: "检查库存", steps: ["检查库存"] }),
-    reply(),
-    tool("save_skill", { name: "补货检查", description: "检查补货", steps: ["检查补货"] }),
-    reply(),
-  ];
-  const f = await fixture(t, async () => script.shift() ?? reply());
-  const schedule = await f.gateway.scheduler.create({ name: "等待授权的任务", cron: "0 8 * * *", prompt: "保存检查技能" });
+test("定时任务立即运行、到期执行及重启后续聊自动授权，保留来源与事件回放", { timeout: 15000 }, async (t) => {
+  let writes = 0;
+  const f = await fixture(t, async (messages, tools) => {
+    assert.match(String(messages[0]!.content), /所有工具调用.*由 harness 自动授权/);
+    assert.match(String(messages[0]!.content), /当前提问策略：off/);
+    assert.doesNotMatch(String(messages[0]!.content), /写入类操作会进入店长的工作台待办/);
+    assert.ok(!tools.some((entry) => entry.function.name === "create_schedule"));
+    assert.match(tools.find((entry) => entry.function.name === "test__write")!.function.description, /定时任务自动授权/);
+    const last = messages.at(-1)!;
+    if (last.role === "user") return tool("test__write", {});
+    if (last.role === "tool" && messages.at(-2)?.tool_calls?.[0]?.function.name === "test__write")
+      return tool("save_skill", { name: `检查技能${writes}`, description: "检查库存", steps: ["检查库存"] });
+    return reply();
+  });
+  f.sources.tools.push({
+    name: "test__write", description: "测试写入", inputSchema: { type: "object" },
+    source: "mcp:test", mutating: true, preauthorized: false,
+    call: async () => { writes++; return { ok: true }; },
+  });
+  const schedule = await f.gateway.scheduler.create({ name: "自动授权的任务", cron: "0 8 * * *", prompt: "执行写入并保存检查技能" });
   const sessionId = await f.gateway.scheduler.runNow(schedule.id);
-  const pending = await until(async () => {
-    const items = await (await f.api("/api/pending")).json() as PendingItem[];
-    return items.find((item) => item.sessionId === sessionId);
-  });
-  assert.equal(pending.kind, "approval");
-  assert.deepEqual(pending.origin, { kind: "schedule", scheduleId: schedule.id, scheduleName: schedule.name });
-  assert.deepEqual(await (await f.api("/api/sessions")).json(), []);
-  const waiting = await until(async () => {
-    const current = await (await f.api(`/api/schedules/${schedule.id}`)).json() as Schedule;
-    return current.currentRun?.status === "waiting" ? current.currentRun : undefined;
-  });
-  assert.equal(waiting.sessionId, sessionId);
-  const listed = await (await f.api("/api/schedules")).json() as Schedule[];
-  assert.deepEqual(listed[0]!.currentRun, waiting);
-  assert.doesNotMatch(await readFile(f.loaded.paths.schedules, "utf8"), /currentRun/);
+  await until(async () => (await f.gateway.scheduler.get(schedule.id)).lastRun?.sessionId === sessionId ? true : undefined);
+  assert.equal(writes, 1);
 
   const stream = await collectSse<SessionEvent>(f.api, `/api/sessions/${sessionId}/events`);
   t.after(stream.stop);
-  await until(async () => stream.events.some((event) => event.type === "approval_required" && event.requestId === pending.requestId) ? true : undefined);
-  assert.equal((await f.post(`/api/sessions/${sessionId}/approvals/${pending.requestId}`, { approved: true })).status, 200);
   await until(async () => stream.events.some((event) => event.type === "status" && event.status === "idle") ? true : undefined);
-  assert.ok(stream.events.some((event) => event.type === "approval_resolved" && event.requestId === pending.requestId && event.approved));
-  const finished = await until(async () => {
-    const current = await f.gateway.scheduler.get(schedule.id);
-    return current.lastRun?.sessionId === sessionId ? current : undefined;
-  });
-  assert.equal(finished.lastRun!.status, "ok");
-  assert.equal(finished.currentRun, undefined);
-  assert.equal((await f.gateway.workbench.skills.list())[0]!.name, "盘点检查");
+  assert.ok(stream.events.some((event) => event.type === "tool" && event.tool.name === "test__write" && event.tool.status === "success"));
+  assert.ok(!stream.events.some((event) => event.type === "approval_required"));
   await stream.stop();
 
-  const cancelledId = await f.gateway.scheduler.runNow(schedule.id);
-  await until(async () => (await f.gateway.hub.pending()).some((item) => item.sessionId === cancelledId) ? true : undefined);
-  assert.equal((await f.post(`/api/sessions/${cancelledId}/cancel`, {})).status, 202);
-  assert.equal((await f.gateway.hub.wait(cancelledId)).status, "error");
-  await until(async () => (await f.gateway.scheduler.get(schedule.id)).lastRun?.sessionId === cancelledId ? true : undefined);
-  assert.deepEqual(await f.gateway.hub.pending(), []);
-  assert.ok((await f.gateway.hub.detail(cancelledId)).events.some((event) => event.type === "error" && event.message === "已取消"));
+  const stored = JSON.parse(await readFile(f.loaded.paths.schedules, "utf8")) as { schedules: Schedule[] };
+  stored.schedules[0]!.nextRunAt = new Date(Date.now() - 60_000).toISOString();
+  await writeFile(f.loaded.paths.schedules, JSON.stringify(stored));
+  await f.gateway.scheduler.tick();
+  const dueId = await until(async () => {
+    const run = (await f.gateway.scheduler.get(schedule.id)).lastRun;
+    return run?.sessionId && run.sessionId !== sessionId ? run.sessionId : undefined;
+  });
+  assert.equal(writes, 2);
+  assert.equal((await f.gateway.scheduler.get(schedule.id)).lastRun!.status, "ok");
+
+  await f.restart();
+  assert.equal((await f.post(`/api/sessions/${sessionId}/messages`, { text: "继续执行" })).status, 202);
+  assert.equal((await f.gateway.hub.wait(sessionId)).status, "idle");
+  assert.equal(writes, 3);
+  assert.equal((await f.gateway.workbench.skills.list()).length, 3);
+  for (const id of [sessionId, dueId]) {
+    const detail = await f.gateway.hub.detail(id);
+    assert.equal(detail.status, "idle");
+    assert.deepEqual(detail.origin, { kind: "schedule", scheduleId: schedule.id, scheduleName: schedule.name });
+    assert.ok(!detail.events.some((event) => event.type === "approval_required" || event.type === "question_required"
+      || (event.type === "status" && event.status === "waiting")));
+  }
+  assert.deepEqual(await (await f.api("/api/pending")).json(), []);
   assert.deepEqual(await (await f.api("/api/sessions")).json(), []);
+  assert.equal((await f.gateway.scheduler.get(schedule.id)).currentRun, undefined);
   assert.doesNotMatch(await readFile(f.loaded.paths.schedules, "utf8"), /currentRun/);
+});
+
+test("普通会话即使无人值守也仍需授权，支持拒绝与取消", { timeout: 15000 }, async (t) => {
+  const f = await fixture(t, async (messages) => messages.at(-1)!.role === "user"
+    ? tool("save_skill", { name: "需确认的技能", description: "检查库存", steps: ["检查库存"] })
+    : reply());
+  for (const unattended of [false, true]) {
+    const session = await f.gateway.hub.create("保存检查技能", { unattended });
+    const pending = await until(async () => {
+      const items = await (await f.api("/api/pending")).json() as PendingItem[];
+      return items.find((item) => item.sessionId === session.id);
+    });
+    assert.equal(pending.kind, "approval");
+    assert.equal(pending.origin, undefined);
+    await until(async () => (await f.gateway.hub.meta(session.id)).status === "waiting" ? true : undefined);
+    if (unattended) {
+      assert.equal((await f.post(`/api/sessions/${session.id}/cancel`, {})).status, 202);
+      assert.equal((await f.gateway.hub.wait(session.id)).status, "error");
+    } else {
+      assert.equal((await f.post(`/api/sessions/${session.id}/approvals/${pending.requestId}`, { approved: false })).status, 200);
+      assert.equal((await f.gateway.hub.wait(session.id)).status, "idle");
+    }
+    assert.deepEqual(await f.gateway.workbench.skills.list(), []);
+    assert.deepEqual(await f.gateway.hub.pending(), []);
+  }
 });

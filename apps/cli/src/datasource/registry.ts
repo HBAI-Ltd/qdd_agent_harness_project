@@ -1,4 +1,6 @@
 import type { JsonObject, McpServerConfig, MetricCatalog, ToolSpec } from "@qdd/shared";
+import path from "node:path";
+import type { ImageReceiver } from "../tool-images.js";
 import type { LoadedConfig } from "../config.js";
 import { loadMetrics } from "../datasets/metrics.js";
 import { JsonlDatasetStore, type DatasetStore } from "../datasets/store.js";
@@ -14,13 +16,16 @@ export interface DataTool extends ToolSpec {
   mutating: boolean;
   /** 已在配置中预先授权写入，或属于可立即执行的摄像头紧急停止。 */
   preauthorized: boolean;
-  call(args: JsonObject): Promise<unknown>;
+  /** 仅已接入的摄像头服务可读取此目录中的截图。 */
+  imageRoot?: string;
+  call(args: JsonObject, onImages?: ImageReceiver): Promise<unknown>;
 }
 
 /** 返回 true 表示用户授权本次调用。 */
 export type Authorizer = (tool: DataTool, args: JsonObject) => Promise<boolean>;
 
-const MUTATING_NAME = /(^|[_\-.])(create|update|delete|remove|set|write|insert|drop|put|post|patch|upsert|add|cancel|refund|send|exec|run|move|ptz|snapshot|capture|start|stop)/i;
+const MUTATING_NAME =
+  /(^|[_\-.])(create|update|delete|remove|set|write|insert|drop|put|post|patch|upsert|add|cancel|refund|send|exec|run|move|ptz|snapshot|capture|start|stop)/i;
 
 // 停止已有云台动作不能等待审批；仅豁免这些已知服务的非破坏性停止工具。
 const CAMERA_EMERGENCY_STOPS = new Map([
@@ -29,8 +34,7 @@ const CAMERA_EMERGENCY_STOPS = new Map([
   ["tysl", "tysl_camera_stop"],
 ]);
 
-const globToRegExp = (glob: string) =>
-  new RegExp(`^${glob.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*")}$`);
+const globToRegExp = (glob: string) => new RegExp(`^${glob.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*")}$`);
 
 const sanitize = (s: string) => s.replace(/[^a-zA-Z0-9_-]/g, "_");
 
@@ -80,38 +84,41 @@ export class DataSources {
       if (this.closed) throw new Error("数据源已关闭");
       // 在队列执行时读取持久化选择，防止并发安装/卸载用旧快照覆盖新状态。
       const servers = await loadInstalledMcpServers(loaded.paths, loaded.config.mcpServers);
-      const loadedServers = await Promise.all(Object.entries(servers).map(async ([name, server]) => {
-        let client: McpClient | undefined;
-        try {
-          client = new McpClient(name, server);
-          await client.start();
-          const allow = (server.allowTools ?? ["*"]).map(globToRegExp);
-          const tools: DataTool[] = [];
-          for (const t of await client.listTools()) {
-            if (!allow.some((re) => re.test(t.name))) continue;
-            const readOnly = t.annotations?.readOnlyHint;
-            const emergencyStop = CAMERA_EMERGENCY_STOPS.get(name) === t.name && t.annotations?.destructiveHint === false;
-            tools.push({
-              name: `mcp__${sanitize(name)}__${sanitize(t.name)}`.slice(0, 64),
-              description: `[MCP ${name}] ${t.description ?? ""}`,
-              inputSchema: t.inputSchema ?? { type: "object", properties: {} },
-              source: `mcp:${name}`,
-              // 工具名无法证明没有副作用，未明确声明只读的 MCP 工具均需授权。
-              mutating: t.annotations?.destructiveHint === true || MUTATING_NAME.test(t.name) || !readOnly,
-              preauthorized: server.allowWrite === true,
-              call: (args) => client!.callTool(t.name, args),
-            });
+      const loadedServers = await Promise.all(
+        Object.entries(servers).map(async ([name, server]) => {
+          let client: McpClient | undefined;
+          try {
+            client = new McpClient(name, server);
+            await client.start();
+            const allow = (server.allowTools ?? ["*"]).map(globToRegExp);
+            const tools: DataTool[] = [];
+            for (const t of await client.listTools()) {
+              if (!allow.some((re) => re.test(t.name))) continue;
+              const readOnly = t.annotations?.readOnlyHint;
+              const emergencyStop = CAMERA_EMERGENCY_STOPS.get(name) === t.name && t.annotations?.destructiveHint === false;
+              tools.push({
+                name: `mcp__${sanitize(name)}__${sanitize(t.name)}`.slice(0, 64),
+                description: `[MCP ${name}] ${t.description ?? ""}`,
+                inputSchema: t.inputSchema ?? { type: "object", properties: {} },
+                source: `mcp:${name}`,
+                // 工具名无法证明没有副作用，未明确声明只读的 MCP 工具均需授权。
+                mutating: t.annotations?.destructiveHint === true || MUTATING_NAME.test(t.name) || !readOnly,
+                preauthorized: server.allowWrite === true || emergencyStop,
+                ...(["haik", "tysl", "ezviz"].includes(name) ? { imageRoot: path.join(loaded.paths.root, "mcp", ".local", `${name}-captures`) } : {}),
+                call: (args, onImages) => client!.callTool(t.name, args, onImages),
+              });
+            }
+            return { client, tools, warning: undefined };
+          } catch (error) {
+            await client?.close();
+            return { client: undefined, tools: [], warning: `MCP 服务 ${name} 接入失败：${(error as Error).message}` };
           }
-          return { client, tools, warning: undefined };
-        } catch (error) {
-          await client?.close();
-          return { client: undefined, tools: [], warning: `MCP 服务 ${name} 接入失败：${(error as Error).message}` };
-        }
-      }));
+        }),
+      );
       const oldClients = this.clients.splice(0);
       this.tools.splice(0, this.tools.length, ...this.tools.filter((t) => t.source === "store"), ...loadedServers.flatMap((s) => s.tools));
-      this.warnings.splice(0, this.warnings.length, ...loadedServers.flatMap((s) => s.warning ? [s.warning] : []));
-      this.clients.push(...loadedServers.flatMap((s) => s.client ? [s.client] : []));
+      this.warnings.splice(0, this.warnings.length, ...loadedServers.flatMap((s) => (s.warning ? [s.warning] : [])));
+      this.clients.push(...loadedServers.flatMap((s) => (s.client ? [s.client] : [])));
       this.activeServers = servers;
       await Promise.all(oldClients.map((c) => c.close()));
     });
@@ -126,16 +133,22 @@ export class DataSources {
   /** 页面 agent 与直接工具调用共用页面声明的最小工具权限。 */
   restricted(names: readonly string[]): DataSources {
     const allowed = new Set(names);
-    return new DataSources(this.tools.filter((tool) => allowed.has(tool.name)), [], this.warnings, this.datasets, this.metrics);
+    return new DataSources(
+      this.tools.filter((tool) => allowed.has(tool.name)),
+      [],
+      this.warnings,
+      this.datasets,
+      this.metrics,
+    );
   }
 
-  async call(name: string, args: JsonObject, authorize: Authorizer): Promise<unknown> {
+  async call(name: string, args: JsonObject, authorize: Authorizer, onImages?: ImageReceiver): Promise<unknown> {
     const tool = this.get(name);
     if (!tool) throw new Error(`未知数据工具：${name}`);
     if (tool.mutating && !tool.preauthorized && !(await authorize(tool, args))) {
       throw new Error(`用户未授权写入操作 ${name}，不得重试或绕过。`);
     }
-    return tool.call(args);
+    return tool.call(args, onImages);
   }
 
   async close(): Promise<void> {

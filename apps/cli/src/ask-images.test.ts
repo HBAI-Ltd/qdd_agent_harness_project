@@ -166,7 +166,7 @@ test("image gateway validates before calling the model and retains page permissi
     for (const useAgent of [false, true]) {
       await upsertPage(loaded.paths, {
         slug: useAgent ? "image-page" : "no-agent", title: "Image test", wish: "", summary: "",
-        tools: [], useAgent, metrics: [], datasets: {}, version: 1, stale: null, gaps: [], sessionId: "test",
+        tools: ["store__get_store_info"], useAgent, metrics: [], datasets: {}, version: 1, stale: null, gaps: [], sessionId: "test",
         createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
       });
     }
@@ -182,6 +182,9 @@ test("image gateway validates before calling the model and retains page permissi
       chat: () => async (messages, tools, signal) => {
         seen.push(structuredClone(messages));
         assert.ok(tools.every((tool) => !sources?.get(tool.function.name)?.mutating));
+        if (messages[1]?.images && messages[1]?.content !== "admin image") {
+          assert.deepEqual(tools.map((tool) => tool.function.name), ["store__get_store_info"]);
+        }
         if (failModel) throw new Error("vision not supported");
         if (messages[1]?.content === "wait for cancellation") {
           return new Promise<ChatMessage>((_resolve, reject) => {

@@ -96,7 +96,9 @@ export function createChat(llm: HarnessConfig["llm"]): ChatFn {
   };
 
   return async (messages, tools, signal, onDelta) => {
-    const wireMessages = messages.map(({ images, ...message }) => {
+    const wireMessages = messages.filter((message) =>
+      message.role !== "assistant" || message.content?.trim() || message.tool_calls?.length,
+    ).map(({ images, finishReason: _finishReason, ...message }) => {
       if (!images?.length) return message;
       if (message.role !== "user") throw new Error("图片只能附加到 user 消息");
       return {
@@ -114,10 +116,7 @@ export function createChat(llm: HarnessConfig["llm"]): ChatFn {
         headers: { "Content-Type": "application/json", Accept: "text/event-stream", Authorization: `Bearer ${apiKey}` },
         body: JSON.stringify({
           model: llm.model,
-          // 兼容旧会话中误存的纯思考响应；reasoning_content 不能替代正文或工具调用。
-          messages: messages
-            .filter((message) => message.role !== "assistant" || !!message.content?.trim() || !!message.tool_calls?.length)
-            .map(({ finishReason: _finishReason, ...message }) => message),
+          messages: wireMessages,
           tools,
           tool_choice: "auto",
           temperature: 0.2,

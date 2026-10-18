@@ -7,7 +7,7 @@
 | 海康互联 | `sites/haik-console` | `http://127.0.0.1:8787/`、`/mcp` | 15 |
 | 天翼视联 | `apps/tysl-console` | `http://127.0.0.1:8790/`、`/mcp` | 14 |
 | 萤石 | `apps/ezviz-console` | `http://127.0.0.1:8791/`、`/mcp` | 15 |
-| 收钱吧 | `sites/shouqianba-console` | `http://127.0.0.1:8788/`、`/mcp`（密钥鉴权） | 18 |
+| 收钱吧 | `sites/shouqianba-console` | `http://192.168.100.166:8788/`、`/mcp`（密钥鉴权） | 18 |
 
 ## 安装与启动
 

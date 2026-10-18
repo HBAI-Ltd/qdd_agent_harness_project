@@ -34,7 +34,7 @@ test("camera player assets and live media permissions are served by the running 
   gateway = await startGateway(loaded, sources, {
     token, scheduler: false, chat: () => async () => ({ role: "assistant", content: "unused" }),
   });
-  for (const [file, mime] of [["index.js", "text/javascript"], ["style.css", "text/css"], ["decoder.js", "text/javascript"], ["decoder.wasm", "application/wasm"]]) {
+  for (const [file, mime] of [["index.js", "text/javascript"], ["hls.min.js", "text/javascript"], ["style.css", "text/css"], ["decoder.js", "text/javascript"], ["decoder.wasm", "application/wasm"]]) {
     const response = await fetch(`${gateway.url}/assets/camera-player/${file}`);
     assert.equal(response.status, 200, file);
     assert.ok(response.headers.get("content-type")?.startsWith(mime!), file);
@@ -48,16 +48,19 @@ test("camera player assets and live media permissions are served by the running 
   const policy = async () => {
     const response = await fetch(`${gateway!.url}/pages/camera-fixture/`, { headers: { Authorization: `Bearer ${token}` } });
     assert.equal(response.status, 200);
-    return response.headers.get("content-security-policy") ?? "";
+    const csp = response.headers.get("content-security-policy") ?? "";
+    assert.ok(csp.includes(`script-src ${response.url}`));
+    assert.ok(csp.includes("frame-src 'self';"));
+    return csp;
   };
-  assert.match(await policy(), /connect-src 'self';/);
+  assert.ok((await policy()).includes(`connect-src ${gateway.url}/api/ 'self';`));
   await writeFile(configFile, JSON.stringify({ mediaOrigins: ["*"] }));
   const allowed = await policy();
-  assert.match(allowed, /connect-src 'self' http: https: ws: wss:;/);
+  assert.ok(allowed.includes(`connect-src ${gateway.url}/api/ 'self' http: https: ws: wss:;`));
   assert.match(allowed, /media-src 'self' http: https: blob: data:;/);
   assert.match(allowed, /'wasm-unsafe-eval'/);
   await writeFile(configFile, JSON.stringify({ mediaOrigins: [] }));
   const revoked = await policy();
-  assert.match(revoked, /connect-src 'self';/);
+  assert.ok(revoked.includes(`connect-src ${gateway.url}/api/ 'self';`));
   assert.doesNotMatch(revoked, /'wasm-unsafe-eval'/);
 });

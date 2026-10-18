@@ -58,6 +58,9 @@ const browserUrl = "data:text/javascript," + encodeURIComponent(`
 `);
 const workspaceApiUrl = "data:text/javascript," + encodeURIComponent(`
   export async function downloadAttachment() { return new Blob(); }
+  let imageDownloader = async () => new Blob(["fixture"], { type: "image/jpeg" });
+  export function setChatImageDownloader(download = async () => new Blob(["fixture"], { type: "image/jpeg" })) { imageDownloader = download; }
+  export function downloadChatImage(...args) { return imageDownloader(...args); }
 `);
 const composerUrl = "data:text/javascript," + encodeURIComponent(`
   export async function filesFromDrop(data) { return filesFromInput(data.files); }
@@ -99,6 +102,7 @@ markdownComponentUrl = await compileComponent("../src/components/MarkdownContent
 attachmentComponentUrl = await compileComponent("../src/components/AttachmentList.vue", "attachment-list-test");
 const { default: ChatView } = await import(await compileComponent("../src/views/chat/index.vue", "chat-view-test"));
 const { setContext } = await import(contextUrl);
+const { setChatImageDownloader } = await import(workspaceApiUrl);
 const mounted = [];
 const at = "2026-10-17T03:00:00Z";
 let blockIndex = 0;
@@ -273,6 +277,135 @@ test("failed inline images expose a retry and preserve their original link", asy
   assert.equal(findAll(root, (node) => node.tag === "a" && node.props.href === "https://example.com/broken.png").length, 1);
 });
 
+const cameraCapture = "http://127.0.0.1:8787/captures/5a7cc6d8d6ad0b5c262605c7dae903ec/frame_000001.jpg";
+async function settleMedia() {
+  await setImmediate();
+  await nextTick();
+}
+
+test("historical camera images load automatically through the gateway while ordinary images retain their URL", async (t) => {
+  const calls = [];
+  const blobs = [];
+  setChatImageDownloader(async (...args) => {
+    calls.push(args);
+    return new Blob(["camera frame"], { type: "image/jpeg" });
+  });
+  t.mock.method(URL, "createObjectURL", (blob) => {
+    blobs.push(blob);
+    return `blob:camera-${blobs.length}`;
+  });
+  const { root } = await mount(session("idle", [
+    thinking(`![巡检截图](${cameraCapture})`),
+    say(`![海康-2](${cameraCapture})\n\n![普通图片](https://example.com/normal.jpg)`),
+  ]));
+  await settleMedia();
+  assert.equal(calls.length, 2);
+  for (const [base, token, url, signal] of calls) {
+    assert.equal(base, "http://127.0.0.1:3000");
+    assert.equal(token, "test-token");
+    assert.equal(url, cameraCapture);
+    assert.equal(signal.aborted, false);
+  }
+  assert.ok(blobs.every((blob) => blob.type === "image/jpeg"));
+  assert.deepEqual(findAll(root, (node) => node.tag === "img").map((node) => node.props.src), [
+    "blob:camera-1", "blob:camera-2", "https://example.com/normal.jpg",
+  ]);
+  assert.equal(findAll(root, (node) => node.tag === "a" && node.props.href === cameraCapture).length, 2);
+  for (const image of findAll(root, (node) => node.tag === "img")) image.props.onLoad();
+  await nextTick();
+  assert.doesNotMatch(textContent(root), /加载中|加载失败/);
+});
+
+test("camera image reloads abort stale requests and revoke blobs when credentials, source, or session change", async (t) => {
+  const requests = [];
+  const created = [];
+  const revoked = [];
+  setChatImageDownloader((base, token, url, signal) => new Promise((resolve) => {
+    requests.push({ base, token, url, signal, resolve });
+  }));
+  t.mock.method(URL, "createObjectURL", (blob) => {
+    created.push(blob);
+    return `blob:camera-${created.length}`;
+  });
+  t.mock.method(URL, "revokeObjectURL", (url) => revoked.push(url));
+  const answer = say(`![截图](${cameraCapture})`);
+  const { root, workspace } = await mount(session("idle", [answer]));
+  assert.equal(requests.length, 1);
+  assert.equal(findAll(root, (node) => node.tag === "img").length, 0);
+
+  workspace.token.value = "new-token";
+  await nextTick();
+  assert.equal(requests[0].signal.aborted, true);
+  assert.equal(requests[1].token, "new-token");
+  requests[0].resolve(new Blob(["stale"]));
+  await settleMedia();
+  assert.equal(created.length, 0);
+  requests[1].resolve(new Blob(["fresh"]));
+  await settleMedia();
+  assert.equal(findAll(root, (node) => node.tag === "img")[0].props.src, "blob:camera-1");
+
+  workspace.gatewayUrl.value = "http://127.0.0.1:3001";
+  await nextTick();
+  assert.equal(requests[1].signal.aborted, true);
+  assert.deepEqual(revoked, ["blob:camera-1"]);
+  assert.equal(requests[2].base, "http://127.0.0.1:3001");
+  requests[2].resolve(new Blob(["another gateway"]));
+  await settleMedia();
+
+  const nextCapture = cameraCapture.replace("frame_000001.jpg", "frame_000002.jpg");
+  workspace.activeSession.value.events[0].content = `![截图](${nextCapture})`;
+  await nextTick();
+  assert.equal(requests[2].signal.aborted, true);
+  assert.deepEqual(revoked, ["blob:camera-1", "blob:camera-2"]);
+  assert.equal(requests[3].url, nextCapture);
+
+  workspace.activeSession.value.events = [];
+  await nextTick();
+  assert.equal(requests[3].signal.aborted, true);
+  requests[3].resolve(new Blob(["unmounted"]));
+  await settleMedia();
+  assert.equal(created.length, 2);
+  assert.equal(findAll(root, (node) => node.tag === "img").length, 0);
+});
+
+test("camera image proxy errors retain the backend reason and retry automatically with the same protected URL", async () => {
+  let attempts = 0;
+  setChatImageDownloader(async (_base, _token, url) => {
+    assert.equal(url, cameraCapture);
+    if (++attempts === 1) throw new Error("监控截图已过期，请重新抓拍");
+    return new Blob(["fresh frame"], { type: "image/jpeg" });
+  });
+  const { root } = await mount(session("idle", [say(`![截图](${cameraCapture})`)]));
+  await settleMedia();
+  assert.match(textContent(root), /监控截图已过期，请重新抓拍/);
+  assert.equal(findAll(root, (node) => node.tag === "img").length, 0);
+  const retry = findAll(root, (node) => node.tag === "button" && textContent(node) === "重试")[0];
+  await retry.props.onClick();
+  await settleMedia();
+  assert.equal(attempts, 2);
+  assert.match(findAll(root, (node) => node.tag === "img")[0].props.src, /^blob:/);
+  assert.doesNotMatch(textContent(root), /已过期/);
+});
+
+test("camera images wait for gateway credentials and never fall back to a direct image request", async () => {
+  const calls = [];
+  setChatImageDownloader(async (...args) => {
+    calls.push(args);
+    return new Blob(["frame"]);
+  });
+  const { root, workspace } = await mount(session("idle", []));
+  workspace.token.value = " ";
+  workspace.activeSession.value.events.push(say(`![截图](${cameraCapture})`));
+  await settleMedia();
+  assert.equal(calls.length, 0);
+  assert.equal(findAll(root, (node) => node.tag === "img").length, 0);
+  assert.match(textContent(root), /请连接网关后查看监控截图/);
+  workspace.token.value = "connected-token";
+  await settleMedia();
+  assert.equal(calls.length, 1);
+  assert.match(findAll(root, (node) => node.tag === "img")[0].props.src, /^blob:/);
+});
+
 test("attachment picker accepts arbitrary file types, allows attachment-only sends, and clears sent refs", async () => {
   const { root, attachments, calls } = await mount(undefined);
   const picker = findAll(root, (node) => node.tag === "input" && node.props.type === "file")[0];
@@ -410,6 +543,7 @@ afterEach(() => {
     app.unmount();
     scope.stop();
   }
+  setChatImageDownloader();
 });
 
 const browserEvent = (id = "browser-1", status = "running") => ({

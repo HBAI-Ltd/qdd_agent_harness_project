@@ -97,8 +97,12 @@ export class Scheduler {
     return schedule;
   }
 
+  async validateUpdate(raw: unknown): Promise<Partial<ScheduleInput>> {
+    return this.parse(raw, false);
+  }
+
   async update(id: string, raw: unknown): Promise<Schedule> {
-    const input = await this.parse(raw, false);
+    const input = await this.validateUpdate(raw);
     return this.mutate((all) => {
       const s = all.find((x) => x.id === id);
       if (!s) throw new Missing("定时任务不存在");

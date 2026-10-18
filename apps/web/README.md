@@ -39,7 +39,7 @@ npm run qdd -- token
 - 助手正文与思考支持 Markdown 标题、表格、代码块、引用、任务列表和链接；用户输入保留原文。表格和代码横向滚动，原始 HTML 按文字显示，危险链接协议不渲染为链接。
 - 对话记录来自 `GET /api/sessions`，按更新时间倒序展示；切换时加载 `GET /api/sessions/:id` 并订阅该会话的 SSE。前端按网关保存当前选择，刷新或重新连接后恢复同一会话或新对话草稿状态。
 - 工作台总览：接入 `GET /api/overview` 与 `GET /api/pending`，展示真实计数、已启用定时任务、最近对话和已发布页面。可在总览直接回答问题或授权，也可进入来源对话；侧栏同步技能、任务和已连接来源数量。
-- 任务：按后端 `PageView.kind` 区分定时与一次性页面，支持类型筛选、关联定时任务名称搜索，并展示各任务启停状态。列表和预览可置顶或取消置顶多个页面，侧边栏同步标记，始终保留后端的置顶顺序。侧边栏支持搜索和 `Ctrl K` 展开并聚焦搜索框。页面通过 `PageView.url` 嵌入，保留网关注入的 SDK、样式及页面鉴权。
+- 任务：按后端 `PageView.kind` 区分定时与一次性页面，支持类型筛选、关联定时任务名称搜索，并展示各任务启停状态。列表和预览可置顶或取消置顶多个页面，侧边栏同步标记，始终保留后端的置顶顺序。侧边栏支持搜索和 `Ctrl K` 展开并聚焦搜索框。页面通过 `PageView.url` 嵌入，保留网关注入的 SDK、样式及页面鉴权。后台刷新列表或更新标题、置顶、定时任务状态时保留当前预览，不重置页面内交互及加载期限；仅在页面标识、地址、版本或网关地址变化，以及点击「重新加载」时重载预览。
 - 侧边栏：桌面端可收缩为图标导航并保存偏好；移动端使用抽屉，可通过遮罩或 `Escape` 关闭。
 - 设置：Element Plus 输入框、按钮和开关，用于网关连接、浅色/深色主题、发送快捷键及后端统一页面风格。
 - 修改已发布页面时，在同一对话面板恢复该页面对应的原始会话，继续其上下文，不额外创建会话。
@@ -129,6 +129,12 @@ node apps/web/tests/attachment-isolation-browser.smoke.mjs
 node --test apps/web/tests/chat-view.test.mjs apps/web/tests/chat-timeline.test.ts apps/web/tests/markdown.test.ts
 ```
 
+对话中的监控截图通过 `POST /api/chat/images` 读取为 Blob 显示，历史消息中的原截图链接也会自动处理。加载失败时显示具体原因并可重试；切换会话、网关或 token 时取消旧请求并释放图片。截图识别、接口和真实组件回归使用 Node.js 内置测试器：
+
+```powershell
+node --test apps/web/tests/media.test.ts apps/web/tests/workspace-api.test.ts apps/web/tests/chat-view.test.mjs
+```
+
 消息内浏览器回归使用生产界面、真实网关和本机 Chrome，模型响应通过本地脚本提供。覆盖截图解码、对话底部位置、跨轮次复用连接、人工输入、移动端布局、切换对话后的订阅释放、按钮真实关闭与对话指令关闭：
 
 ```powershell
@@ -186,7 +192,7 @@ node --test apps/web/tests/datasets-api.test.mjs apps/web/tests/workspace-data.t
 
 整页刷新、跳转或离页时，工作空间和实时浏览器通过 `pagehide` 主动关闭事件流，避免旧文档占满 Chrome 的 HTTP 连接；从浏览器历史返回时通过 `pageshow` 恢复订阅，浏览器画面恢复为只读。站内路由切换继续复用公共布局的连接。技能与定时任务编辑器在断连时保留草稿并提示未保存；保存中断时明确提示结果尚未确认，切换地址或 token 后阻止把旧编辑目标写入新连接。任务页面请求超过 15 秒未加载时显示可重试的错误；已加载但 SDK 握手未完成仍使用 8 秒期限。
 
-相关组件回归位于 `tests/workspace-conversation.test.mjs`、`tests/workspace-api.test.ts`、`tests/session-browser.test.mjs`、`tests/skills-view.test.mjs`、`tests/schedules-view.test.mjs`、`tests/schedules-actions.test.mjs` 和 `tests/task-preview.test.mjs`，包含静默事件流取消、离页恢复、离线保存、模板技能、任务启停/立即执行/执行对话、自定义执行规则以及页面加载和握手超时。使用上方全量前端测试命令执行。
+相关组件回归位于 `tests/workspace-conversation.test.mjs`、`tests/workspace-api.test.ts`、`tests/session-browser.test.mjs`、`tests/skills-view.test.mjs`、`tests/schedules-view.test.mjs`、`tests/schedules-actions.test.mjs` 和 `tests/task-preview.test.mjs`，包含静默事件流取消、离页恢复、离线保存、模板技能、任务启停/立即执行/执行对话、自定义执行规则以及页面加载和握手超时。预览回归还覆盖连续列表更新时 iframe 与通信保持稳定、加载期限不被重置，以及页面版本、地址、网关切换后的正常重载。使用上方全量前端测试命令执行。
 
 真实 Chrome 回归使用独立临时工作区和本机 HTTP 服务，不调用外部模型或发送消息。连接回归使用完整生产构建与真实网关，记录网关实际收到的请求和活动事件流，默认执行 30 次整页跳转、30 次站内切换、5 次离页及 15 次历史前进后退。预览回归将实际 TaskPreview 组件和 SDK 打包为生产模式，验证 30 次正常握手、挂起请求和缺失 SDK 的超时反馈。浏览器默认使用本机 Chrome；可通过 `CHROME_PATH` 指定路径，连接回归次数可通过 `NAVIGATION_ROUNDS` 调整：
 

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -56,15 +56,16 @@ describe("浏览器工具（本机 Chrome）", { skip: CHROME ? false : "未找�
   let siteUrl: string;
   let gateway: Gateway;
   let sources: DataSources;
+  let root: string | undefined;
   const outputs: string[] = [];
-  let script: ((last: string) => ChatMessage)[] = [];
+  let script: ((last: string, messages: ChatMessage[]) => ChatMessage)[] = [];
   let browserDescription = "";
   const chat: ChatFn = async (messages, tools) => {
     browserDescription = tools.find((tool) => tool.function.name === "browser")?.function.description ?? "";
     const last = messages.at(-1)!;
     if (last.role === "tool") outputs.push(String(last.content));
     const next = script.shift();
-    return next ? next(String(last.content)) : { role: "assistant", content: "（脚本结束）" };
+    return next ? next(String(last.content), messages) : { role: "assistant", content: "（脚本结束）" };
   };
   const api = (p: string, init: RequestInit = {}) =>
     fetch(gateway.url + p, { ...init, headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json", ...init.headers } });
@@ -106,7 +107,7 @@ describe("浏览器工具（本机 Chrome）", { skip: CHROME ? false : "未找�
     site = createServer((req, res) => res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" }).end(req.url === "/form" ? FORM : PAGE));
     await new Promise<void>((r) => site.listen(0, "127.0.0.1", r));
     siteUrl = `http://127.0.0.1:${(site.address() as { port: number }).port}/`;
-    const root = await mkdtemp(path.join(tmpdir(), "qdd-browser-"));
+    root = await mkdtemp(path.join(tmpdir(), "qdd-browser-"));
     await writeFile(path.join(root, "harness.config.json"), JSON.stringify({ gateway: { port: 0 }, llm: { clarify: "off" }, browser: { enabled: true, executablePath: CHROME } }));
     const loaded = await loadConfig(root);
     await ensureWorkspace(loaded.paths);
@@ -118,6 +119,11 @@ describe("浏览器工具（本机 Chrome）", { skip: CHROME ? false : "未找�
     await gateway.close();
     await sources.close();
     site.close();
+    if (root) {
+      assert.equal(path.dirname(root), path.resolve(tmpdir()));
+      assert.match(path.basename(root), /^qdd-browser-/);
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   test("agent 打开网页、快照、授权后输入并点击、读取结果；前端可看实时画面并接管", { timeout: 90_000 }, async () => {
@@ -180,6 +186,33 @@ describe("浏览器工具（本机 Chrome）", { skip: CHROME ? false : "未找�
     assert.equal(after.url, siteUrl);
     assert.equal((await api(`/api/browser/${state.browserSessionId}/input`, { method: "POST", body: JSON.stringify({ tabId: state.tabId, type: "navigate", url: "file:///etc/passwd" }) })).status, 400);
     stream.stop();
+  });
+
+  test("真实浏览器截图进入下一轮视觉输入，随后继续读取并完成回复", { timeout: 30_000 }, async () => {
+    let received = false;
+    script = [
+      () => call("browser", { action: "open", url: siteUrl }),
+      () => call("browser", { action: "screenshot" }),
+      (_last, messages) => {
+        const image = messages.at(-1);
+        assert.equal(image?.role, "user");
+        assert.equal(image?.images?.length, 1);
+        const url = image!.images![0]!.url;
+        assert.match(url, /^data:image\/jpeg;base64,/);
+        const bytes = Buffer.from(url.slice(url.indexOf(",") + 1), "base64");
+        assert.ok(bytes.length > 1000);
+        assert.deepEqual([...bytes.subarray(0, 3)], [255, 216, 255]);
+        assert.equal(messages.at(-2)?.role, "tool");
+        assert.doesNotMatch(messages.at(-2)?.content ?? "", /无法查看图片/);
+        received = true;
+        return call("browser", { action: "read" });
+      },
+      () => call("reply", { text: "已查看截图并继续读取页面。" }),
+    ];
+    const session = await gateway.hub.create("查看网页截图，然后继续读取页面");
+    assert.equal((await gateway.hub.wait(session.id)).status, "idle", JSON.stringify(await gateway.hub.detail(session.id)));
+    assert.equal(received, true);
+    await gateway.workbench.browser!.closeSession(session.id);
   });
 
   test("首次 open 导航未完成时即可看到浏览器事件并订阅实时画面", { timeout: 30_000 }, async (t) => {

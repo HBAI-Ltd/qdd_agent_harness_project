@@ -22,13 +22,8 @@ export const DEFAULT_CONFIG: HarnessConfig = {
   approvalTimeoutMin: 60,
   browser: { enabled: false, executablePath: "", permission: "confirm" },
   gateway: { host: "127.0.0.1", port: 5173, tokenEnv: "QDD_GATEWAY_TOKEN", corsOrigins: [] },
-  cdnAllowlist: [
-    "cdn.jsdelivr.net",
-    "unpkg.com",
-    "cdnjs.cloudflare.com",
-    "fonts.googleapis.com",
-    "fonts.gstatic.com",
-  ],
+  cdnAllowlist: ["127.0.0.1", "localhost", "cdn.jsdelivr.net", "unpkg.com", "cdnjs.cloudflare.com", "fonts.googleapis.com", "fonts.gstatic.com"],
+  // External media is opt-in; HTTP origins are limited to explicit loopback hosts.
   mediaOrigins: [],
   mcpServers: {},
   datasets: { refreshIntervalSec: 0 },
@@ -128,7 +123,8 @@ export async function loadConfig(root = process.cwd()): Promise<LoadedConfig> {
     if (!server || typeof server !== "object" || Array.isArray(server) || !isHttpUrl(server.url)) {
       throw new Error(`MCP 服务 ${name} 缺少 http(s) url（只支持 Streamable HTTP）`);
     }
-    if (server.allowTools !== undefined && (!Array.isArray(server.allowTools) || server.allowTools.some((tool) => typeof tool !== "string"))) throw new Error(`MCP 服务 ${name} 的 allowTools 必须是字符串数组。`);
+    if (server.allowTools !== undefined && (!Array.isArray(server.allowTools) || server.allowTools.some((tool) => typeof tool !== "string")))
+      throw new Error(`MCP 服务 ${name} 的 allowTools 必须是字符串数组。`);
     if (server.allowWrite !== undefined && typeof server.allowWrite !== "boolean") throw new Error(`MCP 服务 ${name} 的 allowWrite 必须是布尔值。`);
     for (const field of ["bearerTokenEnv", "bearerTokenFile"] as const) {
       if (server[field] !== undefined && (typeof server[field] !== "string" || !server[field].trim())) {
@@ -155,9 +151,12 @@ export async function loadConfig(root = process.cwd()): Promise<LoadedConfig> {
   if (!["enabled", "disabled"].includes(config.llm.thinking)) throw new Error("llm.thinking 只能是 enabled 或 disabled。");
   if (typeof config.browser.enabled !== "boolean") throw new Error("browser.enabled 必须是布尔值。");
   if (typeof config.gateway.host !== "string" || !config.gateway.host.trim()) throw new Error("gateway.host 必须是非空字符串。");
-  if (!Array.isArray(config.gateway.corsOrigins) || config.gateway.corsOrigins.some((origin) => !isHttpUrl(origin))) throw new Error("gateway.corsOrigins 必须是 http(s) 来源数组。");
-  if (!Number.isFinite(config.datasets.refreshIntervalSec) || config.datasets.refreshIntervalSec < 0) throw new Error("datasets.refreshIntervalSec 必须是大于或等于 0 的有限数字。");
-  if (!Array.isArray(config.cdnAllowlist) || config.cdnAllowlist.some((host) => typeof host !== "string" || !host.trim())) throw new Error("cdnAllowlist 必须是非空主机名数组。");
+  if (!Array.isArray(config.gateway.corsOrigins) || config.gateway.corsOrigins.some((origin) => !isHttpUrl(origin)))
+    throw new Error("gateway.corsOrigins 必须是 http(s) 来源数组。");
+  if (!Number.isFinite(config.datasets.refreshIntervalSec) || config.datasets.refreshIntervalSec < 0)
+    throw new Error("datasets.refreshIntervalSec 必须是大于或等于 0 的有限数字。");
+  if (!Array.isArray(config.cdnAllowlist) || config.cdnAllowlist.some((host) => typeof host !== "string" || !host.trim()))
+    throw new Error("cdnAllowlist 必须是非空主机名数组。");
   chatOptions(config.llm);
   if (!["confirm", "auto"].includes(config.browser.permission)) throw new Error("browser.permission 只能是 confirm 或 auto。");
   if (!Number.isFinite(config.approvalTimeoutMin) || config.approvalTimeoutMin <= 0) throw new Error("approvalTimeoutMin 必须是大于 0 的有限数字。");
@@ -167,12 +166,16 @@ export async function loadConfig(root = process.cwd()): Promise<LoadedConfig> {
 
   const ids = new Set<string>();
   for (const m of config.llm.models ?? []) {
-    if (typeof m?.id !== "string" || !m.id.trim() || (m.model !== undefined && (typeof m.model !== "string" || !m.model.trim()))) throw new Error("llm.models 每项都需要 id，model 必须是非空字符串。");
+    if (typeof m?.id !== "string" || !m.id.trim() || (m.model !== undefined && (typeof m.model !== "string" || !m.model.trim())))
+      throw new Error("llm.models 每项都需要 id，model 必须是非空字符串。");
     if (ids.has(m.id)) throw new Error(`llm.models 中 id ${m.id} 重复。`);
-    if (m.maxTokens !== undefined && (!Number.isSafeInteger(m.maxTokens) || m.maxTokens <= 0)) throw new Error(`模型 ${m.id} 的 maxTokens 必须是正整数。`);
+    if (m.maxTokens !== undefined && (!Number.isSafeInteger(m.maxTokens) || m.maxTokens <= 0))
+      throw new Error(`模型 ${m.id} 的 maxTokens 必须是正整数。`);
     if (m.baseUrl !== undefined && !isHttpUrl(m.baseUrl)) throw new Error(`模型 ${m.id} 的 baseUrl 必须是有效的 http(s) URL。`);
-    if (m.apiKeyEnv !== undefined && (typeof m.apiKeyEnv !== "string" || !m.apiKeyEnv.trim())) throw new Error(`模型 ${m.id} 的 apiKeyEnv 必须是非空环境变量名。`);
-    if (m.thinking !== undefined && !["enabled", "disabled"].includes(m.thinking)) throw new Error(`模型 ${m.id} 的 thinking 只能是 enabled 或 disabled。`);
+    if (m.apiKeyEnv !== undefined && (typeof m.apiKeyEnv !== "string" || !m.apiKeyEnv.trim()))
+      throw new Error(`模型 ${m.id} 的 apiKeyEnv 必须是非空环境变量名。`);
+    if (m.thinking !== undefined && !["enabled", "disabled"].includes(m.thinking))
+      throw new Error(`模型 ${m.id} 的 thinking 只能是 enabled 或 disabled。`);
     ids.add(m.id);
   }
 
@@ -204,6 +207,9 @@ export async function loadConfig(root = process.cwd()): Promise<LoadedConfig> {
 
 function isHttpUrl(value: unknown): value is string {
   if (typeof value !== "string" || !value.trim()) return false;
-  try { return ["http:", "https:"].includes(new URL(value).protocol); }
-  catch { return false; }
+  try {
+    return ["http:", "https:"].includes(new URL(value).protocol);
+  } catch {
+    return false;
+  }
 }

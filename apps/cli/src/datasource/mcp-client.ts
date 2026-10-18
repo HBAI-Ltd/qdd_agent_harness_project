@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { HARNESS_VERSION, SERVICE_NAME, type JsonObject, type McpServerConfig, type ToolSpec } from "@qdd/shared";
+import { contentImages, type ImageReceiver } from "../tool-images.js";
 
 export interface McpTool extends ToolSpec {
   annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean };
@@ -67,7 +68,7 @@ export class McpClient {
     return tools;
   }
 
-  async callTool(name: string, args: JsonObject): Promise<unknown> {
+  async callTool(name: string, args: JsonObject, onImages?: ImageReceiver): Promise<unknown> {
     const result = (await this.request("tools/call", { name, arguments: args })) as {
       content?: { type: string; text?: string }[];
       structuredContent?: unknown;
@@ -75,6 +76,7 @@ export class McpClient {
     };
     const text = (result.content ?? []).filter((c) => c.type === "text").map((c) => c.text).join("\n");
     if (result.isError) throw new Error(text || `MCP 工具 ${name} 返回错误`);
+    if (onImages) onImages(contentImages(result.content));
     if (result.structuredContent !== undefined) return result.structuredContent;
     try {
       return JSON.parse(text);

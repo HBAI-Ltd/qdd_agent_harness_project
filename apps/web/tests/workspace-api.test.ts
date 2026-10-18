@@ -5,6 +5,7 @@ import {
   answerQuestions,
   cancelSession,
   createWish,
+  downloadChatImage,
   gatewayEvents,
   getSession,
   getStyle,
@@ -144,6 +145,55 @@ test("gateway errors retain HTTP status and the backend error message", async ()
     assert.match(error.message, /HTTP 502/);
     return true;
   });
+});
+
+test("camera screenshots download as a Blob through an authenticated uncached POST without putting tokens in URLs", async () => {
+  const captureUrl = "http://127.0.0.1:8787/captures/5a7cc6d8d6ad0b5c262605c7dae903ec/frame_000001.jpg";
+  const bytes = Uint8Array.of(0xff, 0xd8, 0xff, 0xe0);
+  const signal = new AbortController().signal;
+  let capturedUrl = "";
+  let capturedInit: RequestInit | undefined;
+  globalThis.fetch = async (input, init) => {
+    capturedUrl = String(input);
+    capturedInit = init;
+    return new Response(bytes, { headers: { "Content-Type": "image/jpeg" } });
+  };
+  const blob = await downloadChatImage(base + "/", "  " + token + "  ", captureUrl, signal);
+  assert.ok(blob instanceof Blob);
+  assert.equal(blob.type, "image/jpeg");
+  assert.deepEqual(new Uint8Array(await blob.arrayBuffer()), bytes);
+  assert.equal(capturedUrl, base + "/api/chat/images");
+  assert.equal(capturedUrl.includes(token), false);
+  assert.equal(capturedUrl.includes(captureUrl), false);
+  assert.equal(capturedInit?.method, "POST");
+  assert.equal(capturedInit?.cache, "no-store");
+  assert.equal(capturedInit?.signal, signal);
+  assert.equal(new Headers(capturedInit?.headers).get("Authorization"), "Bearer " + token);
+  assert.equal(new Headers(capturedInit?.headers).get("Content-Type"), "application/json");
+  assert.deepEqual(JSON.parse(String(capturedInit?.body)), { url: captureUrl });
+});
+
+test("camera screenshot proxy preserves backend failures and caller cancellation", async () => {
+  stubResponse({ error: "监控截图不存在或已过期" }, 404);
+  await assert.rejects(downloadChatImage(base, token, "http://127.0.0.1:8787/captures/missing.jpg"), (error: unknown) => {
+    assert.ok(error instanceof GatewayError);
+    assert.equal(error.status, 404);
+    assert.equal(error.message, "监控截图不存在或已过期");
+    return true;
+  });
+
+  const controller = new AbortController();
+  let capturedSignal: AbortSignal | null | undefined;
+  globalThis.fetch = async (_input, init) => {
+    capturedSignal = init?.signal;
+    return new Promise<Response>((_resolve, reject) => {
+      capturedSignal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+    });
+  };
+  const downloading = downloadChatImage(base, token, "http://127.0.0.1:8787/captures/pending.jpg", controller.signal);
+  assert.equal(capturedSignal, controller.signal);
+  controller.abort();
+  await assert.rejects(downloading, { name: "AbortError" });
 });
 
 test("session SSE handles fragmented UTF-8, CRLF, multiline data and the since cursor", async () => {

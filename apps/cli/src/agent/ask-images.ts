@@ -21,10 +21,17 @@ function matchesImageType(bytes: Buffer, mime: string): boolean {
 }
 
 /** Remote images are passed to the provider, never downloaded by the gateway. */
-export function parseAskImages(value: unknown): AskImage[] {
+export function parseAskImages(value: unknown, limits: {
+  maxImages?: number;
+  maxImageBytes?: number;
+  maxTotalBytes?: number;
+} = {}): AskImage[] {
+  const maxImages = limits.maxImages ?? MAX_ASK_IMAGES;
+  const maxImageBytes = limits.maxImageBytes ?? MAX_ASK_IMAGE_BYTES;
+  const maxTotalBytes = limits.maxTotalBytes ?? MAX_ASK_IMAGES_BYTES;
   if (value === undefined) return [];
-  if (!Array.isArray(value) || value.length > MAX_ASK_IMAGES) {
-    throw new AskImageError(`images 必须是不超过 ${MAX_ASK_IMAGES} 项的数组`);
+  if (!Array.isArray(value) || value.length > maxImages) {
+    throw new AskImageError(`images 必须是不超过 ${maxImages} 项的数组`);
   }
   let totalBytes = 0;
   return value.map((entry: unknown, index) => {
@@ -38,8 +45,8 @@ export function parseAskImages(value: unknown): AskImage[] {
       throw new AskImageError(`${label}.detail 必须是 auto、low 或 high`);
     }
     if (url.startsWith("data:")) {
-      if (url.length > 4 * Math.ceil(MAX_ASK_IMAGE_BYTES / 3) + 64) {
-        throw new AskImageError(`${label} 图片不能超过 5 MiB`);
+      if (url.length > 4 * Math.ceil(maxImageBytes / 3) + 64) {
+        throw new AskImageError(`${label} 图片不能超过 ${maxImageBytes / 1024 / 1024} MiB`);
       }
       const comma = url.indexOf(",");
       const header = url.slice(0, comma);
@@ -51,9 +58,9 @@ export function parseAskImages(value: unknown): AskImage[] {
       }
       const bytes = Buffer.from(encoded, "base64");
       if (bytes.toString("base64") !== encoded) throw new AskImageError(`${label} Base64 编码不合法`);
-      if (bytes.length > MAX_ASK_IMAGE_BYTES) throw new AskImageError(`${label} 图片不能超过 5 MiB`);
+      if (bytes.length > maxImageBytes) throw new AskImageError(`${label} 图片不能超过 ${maxImageBytes / 1024 / 1024} MiB`);
       totalBytes += bytes.length;
-      if (totalBytes > MAX_ASK_IMAGES_BYTES) throw new AskImageError("Base64 图片总大小不能超过 10 MiB");
+      if (totalBytes > maxTotalBytes) throw new AskImageError(`Base64 图片总大小不能超过 ${maxTotalBytes / 1024 / 1024} MiB`);
       if (!matchesImageType(bytes, mime)) throw new AskImageError(`${label} 图片内容与声明的类型不匹配`);
     } else {
       if (url.length > MAX_IMAGE_URL_LENGTH || /[\s\\\u0000-\u001f\u007f]/.test(url)) {

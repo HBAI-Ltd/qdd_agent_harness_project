@@ -183,7 +183,10 @@ try {
     }
   });
   await page.goto(shellOrigin, { waitUntil: "networkidle0" });
-  const frame = page.frames().find((candidate) => candidate.url().startsWith(`${gateway.url}/pages/${SLUG}/`));
+  const frame = page.frames().find((candidate) => {
+    const url = new URL(candidate.url());
+    return url.origin === gateway.url && (url.pathname.startsWith(`/pages/${SLUG}/`) || url.pathname.startsWith(`/pages/${SLUG}~`));
+  });
   assert.ok(frame, "The real task page is embedded across origins");
   await frame.waitForFunction(() => typeof window.EzuikitFlv === "function");
   assert.equal(await frame.evaluate(() => { try { void parent.document.body; return false; } catch { return true; } }), true);

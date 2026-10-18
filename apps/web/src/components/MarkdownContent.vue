@@ -3,7 +3,7 @@ import { computed } from "vue";
 import { markdownMedia, renderMarkdown } from "@/utils/markdown";
 import ChatMedia from "@/components/ChatMedia.vue";
 
-const props = defineProps<{ content: string }>();
+const props = defineProps<{ content: string; gatewayUrl?: string | undefined; token?: string | undefined }>();
 const rendered = computed(() => renderMarkdown(props.content, true));
 const media = computed(() => markdownMedia(props.content));
 </script>
@@ -11,7 +11,7 @@ const media = computed(() => markdownMedia(props.content));
 <template>
   <div class="markdown-content">
     <div v-html="rendered"></div>
-    <ChatMedia v-for="item in media" :key="item.src" v-bind="item" />
+    <ChatMedia v-for="item in media" :key="item.src" v-bind="item" :gateway-url="gatewayUrl" :token="token" />
   </div>
 </template>
 

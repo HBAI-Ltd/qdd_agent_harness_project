@@ -28,8 +28,8 @@ test("MCP 密钥文件相对项目根目录解析，绝对路径与环境变量�
   const absoluteFile = path.join(root, "absolute-key");
   await writeFile(path.join(root, "harness.config.json"), JSON.stringify({
     mcpServers: {
-      relative: { url: "http://127.0.0.1:8788/mcp", bearerTokenFile: "mcp/.local/shouqianba/mcp-key" },
-      absolute: { url: "http://127.0.0.1:8788/mcp", bearerTokenFile: absoluteFile },
+      relative: { url: "http://192.168.100.166:8788/mcp", bearerTokenFile: "mcp/.local/shouqianba/mcp-key" },
+      absolute: { url: "http://192.168.100.166:8788/mcp", bearerTokenFile: absoluteFile },
       env: { url: "https://mcp.example/mcp", bearerTokenEnv: "QDD_MCP_AUTH_CONFIG_TEST" },
     },
   }));

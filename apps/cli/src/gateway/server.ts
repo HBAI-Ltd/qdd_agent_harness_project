@@ -3,21 +3,7 @@ import { mkdir, readFile, realpath, stat } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type {
-  AnswerBody,
-  AskBody,
-  SelectModelBody,
-  BrowserStreamEvent,
-  CreateWishBody,
-  GatewayEvent,
-  HarnessConfig,
-  JsonObject,
-  Overview,
-  PageView,
-  RecordInput,
-  SendMessageBody,
-  ToolInfo,
-} from "@qdd/shared";
+import type { AnswerBody, AskBody, SelectModelBody, BrowserStreamEvent, CreateWishBody, GatewayEvent, HarnessConfig, JsonObject, Overview, PageView, RecordInput, SendMessageBody, ToolInfo } from "@qdd/shared";
 import { runAsk } from "../agent/ask.js";
 import { MAX_ASK_BODY_BYTES, parseAskImages } from "../agent/ask-images.js";
 import { chatOptions } from "../agent/chat-options.js";
@@ -25,21 +11,13 @@ import type { ChatFn } from "../agent/llm.js";
 import { AttachmentError, MAX_ATTACHMENT_BYTES } from "../attachments.js";
 import { hasModel, modelCatalog, resolveModel, type LoadedConfig } from "../config.js";
 import type { DataSources } from "../datasource/registry.js";
-import {
-  addRecords,
-  defineRecord,
-  listRecordSets,
-  parseRecordDefinition,
-  queryRecords,
-  RECORD_PREFIX,
-  updateRecord,
-  voidRecord,
-} from "../datasets/records.js";
+import { addRecords, defineRecord, listRecordSets, parseRecordDefinition, queryRecords, RECORD_PREFIX, updateRecord, voidRecord } from "../datasets/records.js";
 import { refreshDatasets } from "../datasets/refresh.js";
 import { pageCsp } from "../guard.js";
 import { BadRequest, Conflict, NotFound, SessionHub } from "../sessions.js";
 import { pinPage, readPages, readPins, readStyle, unpinPage, resetStyle, toScriptJson, writeAtomic, writeStyle } from "../web/site.js";
 import { Auth } from "./auth.js";
+import { chatImageOrigins, readChatImage } from "./chat-images.js";
 import { handleMcp } from "./mcp-endpoint.js";
 import { buildComputeScript, SDK_JS } from "./sdk.js";
 import { CameraLogin } from "../workbench/cameras.js";
@@ -57,6 +35,7 @@ const MIME: Record<string, string> = {
   ".wasm": "application/wasm",
 };
 const CAMERA_PLAYER_ROOT = path.dirname(fileURLToPath(import.meta.resolve("ezuikit-flv")));
+const HLS_PLAYER_ROOT = path.dirname(fileURLToPath(import.meta.resolve("hls.js/dist/hls.min.js")));
 const CAMERA_PLAYER_FILES = new Set(["index.js", "style.css", "decoder.js", "decoder.wasm", "LICENSE"]);
 const MAX_BODY = 1024 * 1024;
 const MAX_STATE = 64 * 1024;
@@ -102,7 +81,7 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
   workbench.scheduler = scheduler;
   // Media permissions can change while the gateway is running; apply them to
   // the next page load without restarting conversations or camera sessions.
-  const currentPageCsp = async (): Promise<string> => {
+  const currentPageCsp = async (scope: { origin: string; slug: string }): Promise<string> => {
     let mediaOrigins = config.mediaOrigins;
     try {
       const latest = JSON.parse(await readFile(path.join(paths.root, "harness.config.json"), "utf8")) as Partial<HarnessConfig>;
@@ -110,7 +89,7 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw new HttpError(500, "无法读取视频源配置，请检查配置文件格式");
     }
-    return pageCsp(config.cdnAllowlist, config.gateway.corsOrigins, mediaOrigins);
+    return pageCsp(config.cdnAllowlist, config.gateway.corsOrigins, scope, mediaOrigins);
   };
   const globalClients = new Set<ServerResponse>();
   const computeJs = await buildComputeScript();
@@ -119,7 +98,9 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
   const broadcast = (event: GatewayEvent) => {
     for (const c of globalClients) c.write(`data: ${JSON.stringify(event)}\n\n`);
   };
-  hub.onMeta((session) => broadcast(session.origin?.kind === "schedule" ? { type: "schedules_changed" } : { type: "session_updated", session }));
+  hub.onMeta((session) => broadcast(session.origin?.kind === "schedule"
+    ? { type: "schedules_changed" }
+    : { type: "session_updated", session }));
   hub.onPending(() => broadcast({ type: "pending_changed" }));
   // 页面的 kind 由定时任务推导，任务变化时页面列表也需刷新
   scheduler.onChange(() => {
@@ -146,7 +127,9 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
       hub.pending(),
     ]);
     const count = (status: string) => sessions.filter((x) => x.status === status).length;
-    const next = schedules.filter((x) => x.enabled && x.nextRunAt).sort((a, b) => a.nextRunAt!.localeCompare(b.nextRunAt!))[0];
+    const next = schedules
+      .filter((x) => x.enabled && x.nextRunAt)
+      .sort((a, b) => a.nextRunAt!.localeCompare(b.nextRunAt!))[0];
     return {
       sessions: {
         total: sessions.length,
@@ -157,11 +140,7 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
       },
       pages: { total: pages.length, stale: pages.filter((x) => x.stale).length },
       skills: { total: skills.length },
-      schedules: {
-        total: schedules.length,
-        enabled: schedules.filter((x) => x.enabled).length,
-        next: next ? { id: next.id, name: next.name, at: next.nextRunAt! } : null,
-      },
+      schedules: { total: schedules.length, enabled: schedules.filter((x) => x.enabled).length, next: next ? { id: next.id, name: next.name, at: next.nextRunAt! } : null },
       connectors: { total: connectors.length, connected: connectors.filter((x) => x.status === "connected").length },
       pending,
     };
@@ -170,20 +149,7 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
   const server = createServer((req, res) => {
     route(req, res).catch((error: Error) => {
       const tagged = (error as { status?: unknown }).status;
-      const status =
-        error instanceof HttpError
-          ? error.status
-          : typeof tagged === "number"
-            ? tagged
-            : error.name === "ZodError"
-              ? 400
-              : error instanceof NotFound || error instanceof Missing
-                ? 404
-                : error instanceof Conflict
-                  ? 409
-                  : error instanceof BadRequest || error instanceof InvalidInput || error instanceof AttachmentError
-                    ? 400
-                    : 500;
+      const status = error instanceof HttpError ? error.status : typeof tagged === "number" ? tagged : error.name === "ZodError" ? 400 : error instanceof NotFound || error instanceof Missing ? 404 : error instanceof Conflict ? 409 : error instanceof BadRequest || error instanceof InvalidInput || error instanceof AttachmentError ? 400 : 500;
       if (res.headersSent) {
         res.end();
         return;
@@ -196,25 +162,14 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
     const origin = req.headers.origin;
     const pathname = new URL(req.url ?? "/", "http://gateway").pathname;
     const pageRuntime = /^\/api\/(?:tools\/[^/]+|ask|state\/[a-z0-9-]+|records\/[^/]+(?:\/[^/]+)?)$/.test(pathname);
-    const requestedHeaders = (req.headers["access-control-request-headers"] ?? "")
-      .toString()
-      .toLowerCase()
-      .split(",")
-      .map((header) => header.trim())
-      .filter(Boolean);
-    const pagePreflight =
-      req.method === "OPTIONS" &&
-      requestedHeaders.includes("x-qdd-page") &&
-      requestedHeaders.includes("x-qdd-page-token") &&
-      requestedHeaders.every((header) => ["content-type", "x-qdd-page", "x-qdd-page-token"].includes(header));
+    const requestedHeaders = (req.headers["access-control-request-headers"] ?? "").toString().toLowerCase().split(",").map((header) => header.trim()).filter(Boolean);
+    const pagePreflight = req.method === "OPTIONS" && requestedHeaders.includes("x-qdd-page") && requestedHeaders.includes("x-qdd-page-token")
+      && requestedHeaders.every((header) => ["content-type", "x-qdd-page", "x-qdd-page-token"].includes(header));
     const sandboxedPage = origin === "null" && pageRuntime && (pagePreflight || (req.method !== "OPTIONS" && auth.pageOf(req) !== undefined));
     if ((origin && origin !== "null" && config.gateway.corsOrigins.includes(origin)) || sandboxedPage) {
       res.setHeader("Access-Control-Allow-Origin", origin);
       res.setHeader("Vary", "Origin");
-      res.setHeader(
-        "Access-Control-Allow-Headers",
-        sandboxedPage ? "Content-Type, X-QDD-Page, X-QDD-Page-Token" : "Authorization, Content-Type, X-QDD-Page, X-QDD-Page-Token, X-File-Name",
-      );
+      res.setHeader("Access-Control-Allow-Headers", sandboxedPage ? "Content-Type, X-QDD-Page, X-QDD-Page-Token" : "Authorization, Content-Type, X-QDD-Page, X-QDD-Page-Token, X-File-Name");
       res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
       res.setHeader("Access-Control-Expose-Headers", "Mcp-Session-Id");
     }
@@ -241,10 +196,11 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
     if (p === "/sdk/compute.js") return send(res, 200, MIME[".js"]!, computeJs);
     if (p.startsWith("/assets/camera-player/")) {
       const asset = p.slice("/assets/camera-player/".length);
+      if (asset === "hls.min.js") return serveFile(res, HLS_PLAYER_ROOT, asset, HLS_PLAYER_ROOT);
       if (!CAMERA_PLAYER_FILES.has(asset)) throw new HttpError(404, "Not Found");
-      return serveFile(res, CAMERA_PLAYER_ROOT, asset);
+      return serveFile(res, CAMERA_PLAYER_ROOT, asset, CAMERA_PLAYER_ROOT);
     }
-    if (p.startsWith("/assets/")) return serveFile(res, path.join(paths.site, "assets"), p.slice("/assets/".length));
+    if (p.startsWith("/assets/")) return serveFile(res, path.join(paths.site, "assets"), p.slice("/assets/".length), paths.site);
     if (p.startsWith("/pages/")) return servePage(req, res, url);
 
     if (p === "/mcp") {
@@ -290,7 +246,7 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
       const chat = options.chat(resolveModel(config.llm));
       const stream = openSse(res);
       const controller = new AbortController();
-      res.on("close", () => controller.abort());
+      res.once("close", () => controller.abort());
       try {
         const text = await runAsk(askSources, chat, body.question, body.context, (name) => stream({ type: "tool", name }), controller.signal, images);
         stream({ type: "answer", text });
@@ -308,10 +264,7 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
       if (!(await readPages(paths)).some((x) => x.slug === slug)) throw new HttpError(404, `页面 ${slug} 不存在`);
       const file = path.join(paths.state, `${slug}.json`);
       if (m === "GET") {
-        const state = await readFile(file, "utf8").then(
-          (t) => JSON.parse(t) as unknown,
-          () => ({}),
-        );
+        const state = await readFile(file, "utf8").then((t) => JSON.parse(t) as unknown, () => ({}));
         return json(res, 200, { state });
       }
       if (m === "PUT") {
@@ -345,18 +298,7 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
       const store = sources.datasets;
       if (!name) {
         if (m === "GET") {
-          return json(
-            res,
-            200,
-            (await listRecordSets(store)).map((x) => ({
-              name: x.name.slice(RECORD_PREFIX.length),
-              description: x.description,
-              schema: x.record,
-              rowCount: x.rowCount,
-              watermark: x.watermark,
-              updatedAt: x.updatedAt,
-            })),
-          );
+          return json(res, 200, (await listRecordSets(store)).map((x) => ({ name: x.name.slice(RECORD_PREFIX.length), description: x.description, schema: x.record, rowCount: x.rowCount, watermark: x.watermark, updatedAt: x.updatedAt })));
         }
         if (m === "POST") {
           const manifest = await defineRecord(store, parseRecordDefinition(await readJson(req)));
@@ -365,15 +307,7 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
       } else if (!id) {
         if (m === "GET") {
           const limit = url.searchParams.get("limit");
-          return json(
-            res,
-            200,
-            await queryRecords(store, name, {
-              from: url.searchParams.get("from") ?? undefined,
-              to: url.searchParams.get("to") ?? undefined,
-              limit: limit ? Number(limit) : undefined,
-            }),
-          );
+          return json(res, 200, await queryRecords(store, name, { from: url.searchParams.get("from") ?? undefined, to: url.searchParams.get("to") ?? undefined, limit: limit ? Number(limit) : undefined }));
         }
         if (m === "POST") {
           const body = (await readJson(req)) as RecordInput | RecordInput[];
@@ -393,6 +327,14 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
     if (!p.startsWith("/api/")) throw new HttpError(404, "Not Found");
     requireAdmin(req, url);
 
+    if (p === "/api/chat/images") {
+      if (m !== "POST") throw new HttpError(405, "图片读取接口只接受 POST");
+      const body = await readJson(req, 4096);
+      const connectors = await workbench.connectors.list(mcpInfo());
+      const image = await readChatImage(body, chatImageOrigins(sources, connectors));
+      return send(res, 200, "image/jpeg", image);
+    }
+
     if (p === "/api/events" && m === "GET") {
       openSse(res);
       globalClients.add(res);
@@ -400,13 +342,7 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
       return;
     }
     if (p === "/api/tools" && m === "GET") {
-      const list: ToolInfo[] = sources.tools.map(({ name, description, inputSchema, source, mutating }) => ({
-        name,
-        description,
-        inputSchema,
-        source,
-        mutating,
-      }));
+      const list: ToolInfo[] = sources.tools.map(({ name, description, inputSchema, source, mutating }) => ({ name, description, inputSchema, source, mutating }));
       return json(res, 200, list);
     }
     if (p === "/api/pages" && m === "GET") {
@@ -423,11 +359,7 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
         };
       });
       const rank = (x: PageView) => pinOrder.get(x.slug)?.index ?? Infinity;
-      return json(
-        res,
-        200,
-        pages.sort((a, b) => rank(a) - rank(b) || b.updatedAt.localeCompare(a.updatedAt)),
-      );
+      return json(res, 200, pages.sort((a, b) => rank(a) - rank(b) || b.updatedAt.localeCompare(a.updatedAt)));
     }
     const pin = /^\/api\/pages\/([^/]+)\/pin$/.exec(p);
     if (pin && (m === "PUT" || m === "DELETE")) {
@@ -481,17 +413,13 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
       if (body.skillId !== undefined && typeof body.skillId !== "string") throw new HttpError(400, "skillId 必须是字符串");
       const model = checkModel(body.model);
       const attachments = await hub.attachments.resolve(body.attachments);
-      return json(
-        res,
-        201,
-        await hub.create(body.wish.trim(), {
-          slug: body.slug,
-          skillId: body.skillId,
-          attachments,
-          ...(model !== undefined ? { model } : {}),
-          ...(body.reasoningEffort !== undefined ? { reasoningEffort: body.reasoningEffort } : {}),
-        }),
-      );
+      return json(res, 201, await hub.create(body.wish.trim(), {
+        slug: body.slug,
+        skillId: body.skillId,
+        attachments,
+        ...(model !== undefined ? { model } : {}),
+        ...(body.reasoningEffort !== undefined ? { reasoningEffort: body.reasoningEffort } : {}),
+      }));
     }
 
     // ---------------------------------------------------------------- 工作台
@@ -619,15 +547,11 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
       const [, provider, step] = camera;
       const body = step === "login-start" ? undefined : await readJson(req);
       const result =
-        provider === "haik" && step === "send-code"
-          ? await cameras.haikSendCode(body)
-          : provider === "haik" && step === "login"
-            ? await cameras.haikLogin(body)
-            : provider === "tysl" && step === "login-start"
-              ? await cameras.tyslStart()
-              : provider === "tysl" && step === "login-complete"
-                ? await cameras.tyslComplete(body)
-                : undefined;
+        provider === "haik" && step === "send-code" ? await cameras.haikSendCode(body)
+        : provider === "haik" && step === "login" ? await cameras.haikLogin(body)
+        : provider === "tysl" && step === "login-start" ? await cameras.tyslStart()
+        : provider === "tysl" && step === "login-complete" ? await cameras.tyslComplete(body)
+        : undefined;
       if (!result) throw new HttpError(404, "不支持的登录步骤");
       if (step === "login" || step === "login-complete") broadcast({ type: "connectors_changed" });
       return json(res, 200, result);
@@ -671,8 +595,7 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
     if (p === "/api/datasets" && m === "GET") return json(res, 200, await sources.datasets.list());
     if (p === "/api/datasets/refresh" && m === "POST") {
       const body = (await readJson(req)) as { datasets?: unknown } | undefined;
-      if (body?.datasets !== undefined && (!Array.isArray(body.datasets) || body.datasets.some((name) => typeof name !== "string")))
-        throw new HttpError(400, "datasets 必须是字符串数组");
+      if (body?.datasets !== undefined && (!Array.isArray(body.datasets) || body.datasets.some((name) => typeof name !== "string"))) throw new HttpError(400, "datasets 必须是字符串数组");
       return json(res, 200, await refreshDatasets(sources, body?.datasets as string[] | undefined));
     }
 
@@ -696,15 +619,11 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
         if (typeof body?.text !== "string" || !body.text.trim()) throw new HttpError(400, "text 不能为空");
         const model = checkModel(body.model);
         const attachments = await hub.attachments.resolve(body.attachments);
-        return json(
-          res,
-          202,
-          await hub.send(id, body.text.trim(), {
-            attachments,
-            ...(model !== undefined ? { model } : {}),
-            ...(body.reasoningEffort !== undefined ? { reasoningEffort: body.reasoningEffort } : {}),
-          }),
-        );
+        return json(res, 202, await hub.send(id, body.text.trim(), {
+          attachments,
+          ...(model !== undefined ? { model } : {}),
+          ...(body.reasoningEffort !== undefined ? { reasoningEffort: body.reasoningEffort } : {}),
+        }));
       }
       if (sub === "/model" && m === "PUT") {
         const body = (await readJson(req)) as SelectModelBody | undefined;
@@ -777,12 +696,8 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
     const host = req.headers.host;
     if (!host || /[\s/@\\?#]/.test(host)) throw new HttpError(400, "Host 不合法");
     let origin: string;
-    try {
-      origin = new URL(`http://${host}`).origin;
-    } catch {
-      throw new HttpError(400, "Host 不合法");
-    }
-    res.setHeader("Content-Security-Policy", pageCsp(config.cdnAllowlist, config.gateway.corsOrigins, { origin, slug: pageSegment }));
+    try { origin = new URL(`http://${host}`).origin; } catch { throw new HttpError(400, "Host 不合法"); }
+    res.setHeader("Content-Security-Policy", await currentPageCsp({ origin, slug: pageSegment }));
     if (ext !== ".html") return send(res, 200, MIME[ext] ?? "application/octet-stream", await readFile(file));
 
     const boot =
@@ -794,12 +709,11 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
     const entry = (await readPages(paths)).find((x) => x.slug === slug);
     const banner = gapBanner(entry);
     if (banner) out = /<body[^>]*>/i.test(out) ? out.replace(/<body[^>]*>/i, (m) => m + banner) : out + banner;
-    res.setHeader("Content-Security-Policy", await currentPageCsp());
     send(res, 200, MIME[".html"]!, out);
   }
 
-  async function serveFile(res: ServerResponse, root: string, rel: string): Promise<void> {
-    const file = await resolveFile(root, rel, paths.site);
+  async function serveFile(res: ServerResponse, root: string, rel: string, trustedRoot: string): Promise<void> {
+    const file = await resolveFile(root, rel, trustedRoot);
     if (!file) throw new HttpError(404, "Not Found");
     send(res, 200, MIME[path.extname(file).toLowerCase()] ?? "application/octet-stream", await readFile(file));
   }
@@ -864,18 +778,14 @@ function pageHostOrigins(req: IncomingMessage, configured: string[]): string[] {
     try {
       const url = new URL(value);
       if (/^https?:$/.test(url.protocol) && url.origin === value) origins.add(url.origin);
-    } catch {
-      /* 配置中的通配符、opaque 源与非 URL 不参与通信。 */
-    }
+    } catch { /* 配置中的通配符、opaque 源与非 URL 不参与通信。 */ }
   }
   const requestHost = req.headers.host;
   if (requestHost && !/[\s/@\\?#]/.test(requestHost)) {
     try {
       const url = new URL(`http://${requestHost}`);
       if (url.host && !url.username && !url.password) origins.add(url.origin);
-    } catch {
-      /* 无效 Host 不扩大通信范围。 */
-    }
+    } catch { /* 无效 Host 不扩大通信范围。 */ }
   }
   return [...origins];
 }
@@ -884,10 +794,7 @@ function pageHostOrigins(req: IncomingMessage, configured: string[]): string[] {
 function gapBanner(page: { gaps: { kind: string; item: string; reason: string; suggestion?: string }[]; stale: string | null } | undefined): string {
   if (!page || (!page.gaps.length && !page.stale)) return "";
   const items = page.gaps
-    .map(
-      (g) =>
-        `<li><b>[${GAP_LABEL[g.kind] ?? g.kind}] ${escapeHtml(g.item)}</b>：${escapeHtml(g.reason)}${g.suggestion ? `（${escapeHtml(g.suggestion)}）` : ""}</li>`,
-    )
+    .map((g) => `<li><b>[${GAP_LABEL[g.kind] ?? g.kind}] ${escapeHtml(g.item)}</b>：${escapeHtml(g.reason)}${g.suggestion ? `（${escapeHtml(g.suggestion)}）` : ""}</li>`)
     .join("");
   const stale = page.stale ? `<li><b>[口径变更]</b> ${escapeHtml(page.stale)}</li>` : "";
   return `<aside data-qdd-gaps style="all:initial;display:block;font:13px/1.6 system-ui,sans-serif;background:#fff7e6;color:#613400;border-bottom:1px solid #ffd591;padding:8px 16px"><b style="font-weight:600">能力缺口说明</b><ul style="margin:4px 0 0;padding-left:20px">${stale}${items}</ul></aside>`;
@@ -903,13 +810,7 @@ async function resolveFile(root: string, rel: string, trustedRoot: string): Prom
   }
   let file = path.join(root, path.normalize(decoded));
   if (!file.startsWith(root + path.sep) && file !== root) return undefined;
-  if (
-    path
-      .relative(root, file)
-      .split(path.sep)
-      .some((s) => s.startsWith("."))
-  )
-    return undefined;
+  if (path.relative(root, file).split(path.sep).some((s) => s.startsWith("."))) return undefined;
   try {
     if ((await stat(file)).isDirectory()) file = path.join(file, "index.html");
     const [realRoot, realFile, realTrustedRoot, info] = await Promise.all([realpath(root), realpath(file), realpath(trustedRoot), stat(file)]);
@@ -942,11 +843,11 @@ function json(res: ServerResponse, status: number, body: unknown): void {
   send(res, status, "application/json; charset=utf-8", JSON.stringify(body));
 }
 
-function openSse(_res: ServerResponse): (data: unknown) => void {
+function openSse(res: ServerResponse): (data: unknown) => void {
   res.writeHead(200, { "Content-Type": "text/event-stream; charset=utf-8", Connection: "keep-alive" });
   res.write(": connected\n\n");
   const ping = setInterval(() => res.write(": ping\n\n"), 25_000);
-  req.on("close", () => clearInterval(ping));
+  res.once("close", () => clearInterval(ping));
   return (data) => {
     if (!res.writableEnded && !res.destroyed) res.write(`data: ${JSON.stringify(data)}\n\n`);
   };

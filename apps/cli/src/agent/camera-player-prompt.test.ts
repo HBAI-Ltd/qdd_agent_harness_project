@@ -19,7 +19,7 @@ const input: PromptInput = {
 test("camera instructions use the installed FLV player and fixed-version whitelisted HLS", () => {
   const prompt = systemPrompt(input);
   assert.ok(prompt.includes("ezuikit-flv@2.1.1"));
-  for (const asset of ["style.css", "index.js", "decoder.js"]) {
+  for (const asset of ["style.css", "index.js", "decoder.js", "hls.min.js"]) {
     assert.ok(prompt.includes(`/assets/camera-player/${asset}`));
     assert.deepEqual(checkContent(`<script src="/assets/camera-player/${asset}"></script>`, input.cdnAllowlist), []);
   }
@@ -36,14 +36,17 @@ test("camera instructions use the installed FLV player and fixed-version whiteli
   assert.ok(flvExample);
   assert.deepEqual(checkContent(flvExample, input.cdnAllowlist), []);
   assert.ok(flvExample.includes("disableColect: true"));
-  assert.ok(flvExample.includes("autoPlay: false"));
+  assert.ok(flvExample.includes("autoPlay: true"));
+  assert.ok(flvExample.includes("autoWasm: false"));
+  for (const requirement of ["videoFrame", "player.getState().playing", "不能只查 video", "最多降级 WASM 一次", "单路预览", "不调用 preview / get_live_stream"])
+    assert.ok(prompt.includes(requirement), requirement);
 });
 
 test("camera instructions expose configured media policy without granting script or iframe permissions", () => {
   for (const origins of [[], ["https://media.example.test:8443"], ["*"]]) {
     const prompt = systemPrompt({ ...input, mediaOrigins: origins });
     assert.ok(prompt.includes(`当前配置 mediaOrigins：${JSON.stringify(origins)}`));
-    const csp = pageCsp(input.cdnAllowlist, [], origins);
+    const csp = pageCsp(input.cdnAllowlist, [], { origin: "http://localhost:3000", slug: input.slug }, origins);
     assert.ok(csp.includes("frame-src 'self';"));
     assert.ok(csp.includes("form-action 'none';"));
     assert.notDeepEqual(checkContent('fetch("/business")', input.cdnAllowlist), []);

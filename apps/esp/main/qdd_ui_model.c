@@ -153,7 +153,7 @@ static void instruction_page(qdd_ui_view_t *view, unsigned page,
         view->stage = QDD_UI_WIFI;
         view->title = "连接无线网";
         view->detail = progress->wifi_connected ? "网络已连接" : "按确认选择无线网";
-        view->next = "电脑和手机连同一无线网";
+        view->next = ""; // Already shown inside the Wi-Fi instruction card.
         break;
     case 2:
         view->stage = QDD_UI_USB_INSTALL;
@@ -173,7 +173,7 @@ static void instruction_page(qdd_ui_view_t *view, unsigned page,
         view->title = "连接手机蓝牙";
         view->detail = view->phone_secure ? (state->ready ? "手机蓝牙已连接" : "手机连接中，请稍候") :
             pairing_open ? "手机蓝牙中选择本设备" : "按确认开启配对";
-        view->next = "手机确认配对，无需输数字";
+        view->next = view->show_passkey ? "请在手机输入配对码" : "手机确认配对，无需输数字";
         break;
     case 5:
         projection_view(view, progress->phone_fresh);

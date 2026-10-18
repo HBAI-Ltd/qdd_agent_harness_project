@@ -12,6 +12,465 @@ Their original logs remain for traceability. That stop request applies to the ea
 The later new-controller LAN report authorizes the bounded transfer verification recorded in v26:
 its APK download and hash pass, with no APK source changes. This is not proof of phone installation.
 
+## v61 Web reconnect refusal: listener recovery, default port and status fixes
+
+2026-10-18: The user again reported an actively refused connection and identified web reconnect.
+The failing machine's target IP/port, EXE version and logs were not provided; the reproduced defects
+below do not establish its root cause. No local listeners on 8790/8791/3333/3334 were observed,
+which does not establish the other computer's state.
+
+- **Android red/green**: Production `ScreenApplication` and `FrameServer`, with real loopback TCP,
+  failed to recover after temporary port contention cleared: three same-IP callbacks still left
+  connection refused, while removing/restoring the address returned HTTP 200. Initial bind failure
+  now schedules three retries at 1/3/10-second intervals, followed by an explicit retry-LAN button.
+  Same-IP callbacks do not reset the budget; healthy listeners/connections remain intact. Network
+  loss/replacement or address removal invalidates pending retries and stale callbacks. Closed
+  listeners are detectable and manually recoverable without a spinning accept loop. Projection
+  consent, private-interface binding, selected IME and input safety rules remain intact.
+- **Desktop port red/green**: A bare phone IP previously used HTTP port 80; it now uses 8791.
+  Full HTTP/HTTPS URLs, explicit ports and existing saved URLs retain their semantics. Tests cover
+  12 port/serialization roundtrips and seven invalid inputs. This does not migrate an incorrect
+  already-saved full URL; discovery or editing still requires saving the intended phone address.
+- **Web status red/green**: Reconnect no longer stays in the connecting state due to an obsolete
+  generation. Recovered video clears only its own error, preserving a newer controller refusal.
+  No automatic ARM or replay occurs. Reconnect retries current settings; address changes require
+  discovery and explicit save through the connection-settings link.
+- **Host tests: PASS**: Rust 102/102, generated UI 83/83, assets 4/4, packaged EXE isolated cases
+  21/21, root typecheck/build. Full Android Java/socket suite passes, including 35 new recovery
+  checks. TCP sockets are real; Android Network/Handler events are host substitutes. Independent
+  review found no blocking issue.
+- **Build: PASS**: `apps/android-mcp-rust/build/windows/v61/设备操作台.exe`, buildId
+  `rust-4759c400886ddeb1`, 1,938,944 B, SHA
+  `98ab9e428e5283b705efd35fb23c23d4d0a5d3ee92a6852de0000050941fd688`.
+  ZIP 950,927 B, SHA `5ca009187e903f31dd3ed7f577dbfd518894030bae94d4dcc2ecb77240399050`;
+  source ZIP 309,499 B, SHA `a6df1813db88cc4ab64c19419102af7e6cc9c7b4a0dba1d9efb096be2fd024bf`.
+  CRCs, source-entry hashes, exact EXE identity and exclusion of local settings are verified.
+  Fixed APK copy `apps/android-screen/build/v61/qdd-android-screen-debug.apk`, 74,282 B,
+  SHA `45ba041dc87731559ead532a65deb7667739d7400c3a86fda1a2761fe1fe451f`; signing/manifest verified.
+- Evidence: `apps/android-mcp-rust/build/reconnect-v61-*`, `build/windows/v61/exe-smoke.json`,
+  `transfer-compression-audit.json`, Android `build/listener-refusal-review/repro.log` and
+  `endpoint-v61-{red,green,tests,build}.log`. `tools/test-stream.ps1` runs `tools/test-endpoint.ps1`,
+  compiling production listeners and the host event substitutes in `tools/endpoint-tests/`.
+- **Device / Unverified**: No APK installation, real console startup/replacement, ESP flash or
+  on-board download update. Both APK and EXE need updating to include the fixes. The reported
+  machine's actual cause, OEM callbacks, real recovery and Chinese insertion remain unverified.
+  v60 IME behavior is retained. Previously recorded MCP session/queued-cancellation issues remain
+  pending; this is not full robustness acceptance. No commit, push or publication.
+
+## v60 Direct Unicode through the selected device IME
+
+2026-10-18: the user reported that clipboard input did not work, prohibited accessibility,
+and accepted initial enablement/selection of the device IME. This increment restores direct
+text submission without clipboard, accessibility, silent keyboard changes, or ADB input.
+
+- The phone APK registers `QddInputMethodService` as the sole v1 encrypted BLE text receiver.
+  `ScreenService` no longer starts the clipboard receiver. Setup distinguishes selecting the
+  current controller, first enablement, IME selection, and editor focus. Completed steps do
+  not prompt again. Keep the device IME selected for continuous use; switching away requires
+  selecting it again. System confirmation remains a user action.
+- The console requires `STATUS 0(mode=ime/ready/epoch)`, then sends `BEGIN/DATA`, one COMMIT,
+  and status queries only. Mixed Unicode is limited to 512 UTF-8 bytes. There is no CLIP_BEGIN,
+  PASTE, pinyin, or bare-HID Unicode fallback. Clipboard modes fail before text upload.
+  `TEXT_IME_UNAVAILABLE`, `TEXT_IME_NOT_READY`, and `TEXT_IME_REJECTED` distinguish setup and
+  rejection. Missing ACKs, cancellation, and identity/focus changes never replay text. v59
+  writer-lock admission checks remain intact; safety deadlines are unchanged.
+- Editor, lock, controller, link, and epoch changes revoke readiness/pending text. Independent
+  review caught and fixed an ACK routing edge: a reentrant controller change during commit
+  cannot send an old ACK through a new/null receiver. Duplicate COMMIT returns a cached result.
+- `accepted` means `InputConnection.commitText` accepted the request, not that the target App
+  displayed or saved the exact text. `insertionVerified=false`. The operator retains entered
+  text and requests real visual confirmation without declaring a timeout/setup error success.
+- **Host tests: PASS**. Rust **101/101** (IME red 0/3→green 3/3 with 21 scenarios, writer 9/9),
+  generated operator **81/81**, assets **4/4**, root typecheck/build. Exact packaged v60 EXE
+  **21/21** isolated loopback cases cover Chinese, mixed text, 512 bytes, lost COMMIT ACK,
+  duplicate RPC IDs, unavailable IME, clipboard-mode rejection, and explicit rejection.
+  Complete Android Java/socket checks pass, including v1 protocol **125 checks**, new IME
+  session/setup **88 checks**, socket **21 cases**, registration/single-receiver and ACK routing
+  red/green checks. Historical clipboard model tests remain, but are not a runtime route.
+- **Host interoperability: PASS, 18/18**. Production C v1→production Java `ImeTextSession`/
+  `Utf8ImeProtocol`→production C ACK covers 12-byte Chinese, 32-byte mixed text, and 512 bytes
+  across acceptance, rejection, exception/uncertain, pre-commit cancellation, stale epoch,
+  and focus change during commit. Duplicate BLE COMMIT dispatches at most once; duplicate host
+  COMMIT generates no new BLE frame. v2 mixing and v1 PASTE are rejected. InputConnection and
+  ATT confirmation are fakes, not real phone/BLE validation.
+- **Build: PASS**. EXE buildId `rust-4dc5c96ce4144e92`;
+  `apps/android-mcp-rust/build/windows/v60/设备操作台.exe` **1,938,944 B**,
+  SHA `c99e4dc756c587384c8b0530418eddf0594241204e04336d3b7fb69d101d42bf`. ZIP **950,800 B**,
+  SHA `c99a8d7fff91bdffe580cf6fdda5a663e6e06b8392fe285c2d8d86adf120dcfa`. Rust source ZIP **308,214 B**,
+  SHA `6ffd3fd30c4c3856a5af96db7c24f0e3c3533a0b871de7d011b6f496c5546fcc`. Entry CRC/hashes, EXE self-test identity, and absence
+  of local configuration were verified. APK `apps/android-screen/build/qdd-android-screen-debug.apk`
+  **74,282 B**, SHA `15c56274fc29230e7512244c66213a82c37cbbe1fbbd8884882fede011214b17`, local development signature and manifest verified.
+- **ESP Build: PASS**. Only embedded downloads change to v60; the existing v1 input protocol
+  needs no firmware logic change. Full gate exit 0; existing platform skips **4/5/12** are not
+  counted as passes. Bundle `apps/esp/build/firmware/e022744020956e83890672a2ad03bd5c17b55527a8455e5bc275fd3a3b85f650`;
+  directory name is full-image SHA. APP **2695760 B**,
+  SHA `2afaeb72f810cc5a37e802792c803898050d7982fa7bb8f028fa796de3f4cf46`; ELF SHA `88a61e6e7a8334c0ccc84b6804d950bef7ff5836665e23c18767deeba7add28a`.
+  Build layout is factory `0x10000/0x7f0000`, not a current-device layout observation. The app
+  embeds exactly one copy each of the exact APK and ZIP above; archive verification passes.
+- Evidence: `apps/android-mcp-rust/build/ime-v60-*.log`, `build/windows/v60/exe-smoke.json`,
+  `transfer-compression-audit.json`, `apps/android-screen/build/ime-v60-*.log`, and
+  `apps/esp/build/ime-v60-full-gate.log`, `ime-v60-artifact-identity.json`,
+  `ime-v60-interop/result.json`. v59 and earlier history remain intact.
+- **Device tests: NOT RUN / Unverified**. ADB and serial enumeration found no devices in this
+  increment. No APK installation, actual console replacement/start, board flashing, or real
+  business input occurred. System setup UI, OEM InputConnection/GATT coexistence, actual
+  Chinese insertion, and the real-image feedback loop remain unverified. This is not complete
+  product acceptance. Earlier independent loopback evidence of SSE-disconnect session loss,
+  POST-only session exhaustion, and queued cancellation latency is retained. Per the user's
+  priority to fix Chinese first, those robustness issues are not included in this increment.
+
+## v59 Unicode clipboard input — no IME switch, one preparation and one paste
+
+2026-10-18: The user chose to have the phone screen-sharing App write its
+clipboard, followed by one ESP Ctrl+V. This implements that three-component
+path without enabling/selecting a custom IME or automatically changing the
+system keyboard. The phone App must select the current controller and keep
+screen sharing active; the target App needs a focused editable field.
+
+- Protocol and modes: the host retains `QDDTXT/1` with new `CLIP_BEGIN` and
+  `PASTE` commands and explicit `mode=clipboard/ime` in STATUS. Missing mode
+  means legacy IME. Phone BLE v2 prepares the clipboard; legacy v1 `accepted`
+  cannot establish clipboard readiness. Rust defaults to clipboard only;
+  outdated App/firmware produces an update instruction without IME fallback,
+  guessed transliteration or a separate bare Ctrl+V. ASCII retains HID input.
+- Single dispatch: `CLIP_BEGIN/DATA → COMMIT → STATUS → PASTE → STATUS`.
+  COMMIT and PASTE are each attempted once; waiting polls only status. Lost ACK,
+  cancellation, unknown states or changed mode/epoch/identity never replay input.
+  ESP consumes a short-lived one-use ticket into `paste_pending` before Ctrl+V,
+  then sends a neutral release after 50 ms. Cancellation cleanup and an older
+  transaction cannot affect a newer control reservation. Existing 1200 ms ACK
+  and 1500 ms safety deadlines remain; no automatic ARM was added.
+- Confirmation semantics: phone ACK 0 means `clipboard_dispatched`: the write
+  API call returned, without proof that a background/OEM clipboard accepted it.
+  ACK 3 means `clipboard_verified`: permitted readback matched this transaction
+  at that moment. The former permits one best-effort paste, returned as
+  `clipboardVerified=false`. Explicit AppOps denial rejects it and
+  sends no paste; uncertain results do not create a reusable ticket.
+  `pasteSent=true` confirms shortcut dispatch only; `insertionVerified` is always
+  false and does not establish target-field insertion. AI/users must inspect a
+  subsequent real image; observe after a timeout instead of blindly resubmitting.
+- Phone lifecycle and privacy: projection stop, locking, controller replacement
+  and connection-generation changes revoke readiness/update the epoch; stale
+  callbacks cannot revive a ticket. Selected-controller and encrypted-BLE checks
+  remain. Writing replaces the current clipboard; its previous contents are not
+  read, backed up or restored. Late/duplicate frames of one transaction cannot
+  write again. The webpage preserves unconfirmed text, distinguishes clipboard
+  preparation denial from target-field failure and does not request IME selection
+  or claim successful insertion.
+- Cancellation ordering: deterministic red tests found two dispatch windows.
+  ESP previously pumped a queued press before parsing the next cancellation;
+  the final route defers the first press until both input batches are parsed,
+  including an owner's partial line across actual 64-byte reads. CANCEL, ARM,
+  PAUSE and RELEASE win before a queued first press, while foreign commands
+  cannot cancel/block its owner and an already-held key still releases on time.
+  Rust's blocking writer previously survived timeout/cancellation and could
+  subsequently send stale COMMIT/PASTE or HID commands. Both paths now recheck
+  request identity, connection epoch, cancellation and absolute deadline after
+  acquiring the writer lock; HID also checks its sequence/control round. Retired
+  waiters cannot remove a newer reused-ID request. The state lock does not span
+  IO. Nine targeted writer regressions pass; bytes already admitted to IO are
+  still uncertain after cancellation and are never claimed to be retractable.
+- Host tests: **PASS**. Rust **99/99**, actual minified UI **81/81**, assets
+  **4/4**, and root TypeScript typecheck/build pass. The formal v59 EXE passes
+  **21/21** independent loopback cases, including dispatched/verified results,
+  lost COMMIT/PASTE ACK, duplicate RPC, legacy-IME refusal and no replay.
+  Full Android Java/socket tests pass, including **72 clipboard checks**,
+  **125 legacy UTF-8 protocol checks** and **21 stream-socket cases**.
+  Production C → Java → C protocol interoperability passes **12/12** cases:
+  3/18/512 UTF-8 bytes with ACK 0/1/2/3. Clipboard and HID are fake in these tests;
+  this is Host evidence, not real clipboard or BLE input verification. Evidence:
+  `apps/android-mcp-rust/build/clipboard-v59-{rust-final,all-writer-green,ui-green,assets,root-typecheck,root-build,exe}.log`,
+  `build/windows/v59/exe-smoke.json`,
+  `apps/android-screen/build/clipboard-v59-tests.log`, and
+  `apps/esp/build/clipboard-v59-interop/result.json`. Relevant red logs remain.
+- Build / desktop and APK: **PASS**. Rust buildId **rust-8ffd9a5601b8a295**;
+  `apps/android-mcp-rust/build/windows/v59/设备操作台.exe`: **1,942,528 B**, SHA
+  `af3de10d10a58dcb08f58315175a14173c4d966e33318b92516e2bec239d24b4`;
+  `设备操作台.zip`: **952,381 B**, SHA
+  `841483ccd1cb84fbaf40d8c561e4247632082b49460ab89f80a8850b745444fb`;
+  `android-mcp-rust-source.zip`: **308,508 B**, SHA
+  `f3460a5e542ba57f62c990fa7b4a7892fc76a2f6130f482b6df915cdd1445dac`.
+  The adjacent manifest and `transfer-compression-audit.json` verify EXE/ZIP,
+  CRC, self-test buildId and all 77 source-file / 79 archive-entry hashes.
+  Local connection settings and credentials are excluded.
+  `apps/android-screen/build/qdd-android-screen-debug.apk`: **70,188 B**, SHA
+  `1a2ca9683d27c9d391b6f8d43cf94942b7432c2fad3822d5a890592e2256e0bf`,
+  matching its `build/manifest.json`, with a local development signature.
+  Build success does not establish phone installation.
+- Build / ESP: **PASS**. The final frozen-source complete gate exited 0, with
+  repository checks, Host tests, ESP-IDF build, merged-image/layout verification
+  and debug archive verification passing. The existing platform-specific skip
+  groups remain **4/5/12**; they are not passed tests. Focused integration is
+  **4/4**, transport contract **19/19**, and BLE contract **9/9**. Logs:
+  `apps/esp/build/clipboard-v59-{full-gate,route-red,partial-red,route-green}.log`.
+  Final bundle: `apps/esp/build/firmware/82e79c4ec24233b8c1f4959c51bd90afdf87bd12f5c47b735eb1da4201f27461`;
+  its directory name is the full-image SHA256. Application **2,693,248 B**, SHA
+  `09927da30a3f4145f8faf797e89c102d23ddb19a83040da850d3a8a9fa0b9949`;
+  matching ELF SHA `e5efe92de9e4a95b1ccfe0333e6ff48a986fc5dc3f28a4c972a413cbed2ca0b2`.
+  The build uses factory `0x10000/0x7f0000`. This is build layout evidence, not a
+  fresh read of the connected board or authorization to flash a merged image.
+  `apps/esp/build/clipboard-v59-artifact-identity.json` verifies that the exact
+  delivered APK and final desktop ZIP each occur once in the application bytes,
+  and binds the EXE tests/source ZIP to the final buildId. No assets partition
+  was written. The earlier candidate and logs remain in the history/pre-review
+  locations; only these final identities are the delivery candidate.
+- Device / unverified: COM5 USB enumeration reports serial `4C:11:AE:2F:A1:B8`
+  (A1BA); ADB found no device. No APK
+  installation, firmware flash, actual-service replacement/start or real text
+  input was performed. OEM background clipboard behavior, preservation/recovery
+  of the original system keyboard, lock/projection recovery and actual Ctrl+V
+  insertion with visual feedback remain **UNVERIFIED**. Complete product
+  acceptance is not established.
+
+## v58 Friend's desktop EXE — connection diagnostics and recovery entry
+
+2026-10-18: The user clarified that error 10061 occurred on a friend's EXE
+webpage. That computer has not been accessed or tested here. This machine's
+previous addresses, absent service or disconnected board do not establish the
+friend's failure cause. This change makes a connection failure identifiable and
+provides a recovery path; it does not claim that the remote incident is resolved.
+
+- Connection diagnostics: controller TCP failures carry `ESP_CONNECTION_ERROR`;
+  phone-screen connection failures carry `SCREEN_CONNECTION_ERROR`. Each names
+  the failed role and a validated `host:port`, retaining the original OS error
+  and error chain. Invalid addresses use a neutral invalid-address label rather
+  than echoing raw URL credentials, paths or queries. Loopback refusal tests
+  check role separation, original error preservation and sensitive-URL rejection.
+- Recovery UI: the error panel offers a real connection-settings / rediscovery
+  link to `/desktop/settings#discover`. Known endpoint failures preserve the
+  role-specific message; legacy 10061/ECONNREFUSED messages also receive a useful
+  recovery hint. The existing error detail remains available. Unavailable MCP
+  and failed screen connections can expose the same entry. A successful retry
+  clears it; unsent text is preserved and recovery does not replay control input.
+- Settings: entering through `#discover` runs the existing bounded read-only
+  discovery even when an old address was saved. Concurrent discovery is blocked;
+  multiple candidates require selection, and delayed results cannot overwrite
+  newer edits or a submitted configuration. Finding/selecting a device does not
+  save settings or send input. The user must explicitly save the chosen values.
+  Timeout remains actionable with manual entry available; no automatic save,
+  input replay or relaxed protocol deadline was introduced.
+- Host tests: **PASS** — Rust **87/87**, generated/minified UI **79/79**, asset
+  checks **4/4** and transfer-package checks **7/7**. Coverage includes endpoint
+  refusal, error-detail preservation, settings-link recovery, no replay,
+  rediscovery with existing values, multiple candidates, edit races and timeout.
+  Build is **PASS**. Evidence includes
+  `apps/android-mcp-rust/build/reconnect-v58-{check,rust-tests,build}.log` and
+  `apps/android-mcp-rust/tools/fixtures/operator-recovery-cases.js`.
+- Artifact identity: `apps/android-mcp-rust/build/windows/v58/manifest.json`,
+  buildId **rust-3c4d8d7ec3f1a10e**. The actual EXE and ZIP hashes match the manifest:
+  `设备操作台.exe` **1,929,728 B**, SHA
+  `3d8d853da4db028673bb28e7547657b0c22034ef4269b706c1ebc1ca33446846`;
+  `设备操作台.zip` **945,529 B**, SHA
+  `5e45d723630432148031b4e2b63017ce202239be2ed8f96f8abf1c13d5b10ae7`.
+  Formal packaged-EXE acceptance is **21/21 PASS**, session 75793 exit 0.
+  `reconnect-v58-exe.log` and `build/windows/v58/exe-smoke.json` cover independent
+  loopback scenarios without real devices. Source ZIP: **302,484 B**, SHA
+  `dcbcc265d61d32817a66b9c9830723694f405683046ee9d77b9a22385157c447`.
+  `transfer-compression-audit.json` verifies the single-EXE ZIP's CRC, exact hash
+  and self-test buildId, plus all 77 source files / 79 archive-entry hashes.
+  Neither archive includes local settings or credentials; no actual service was
+  started. The explicit allowlist now includes the recovery UI fixture while
+  preserving the existing text-input fixture's exact bytes.
+- Packaged error-chain checks: **2/2 PASS**. The exact v58 EXE was called through
+  the official MCP SDK using `android_screenshot` and `android_hid_status`.
+  Two Windows exclusive-bound, non-listening loopback ports produced actual
+  `os error 10061` responses, preserving the correct role, exact endpoint and
+  original reason in about 2.08 seconds each. No input tool was called and no TCP
+  connection was accepted. Both EXE children and the port-reservation helper
+  exited; the temporary directory was removed. Evidence:
+  `apps/android-mcp-rust/build/reconnect-v58-exe-refusal.{mjs,json,log}`.
+- Device / unverified: the friend's computer, actual refusal endpoint, network
+  conditions and recovery remain **UNVERIFIED**. Host fixtures and packaged
+  offline tests do not prove real phone, BLE or controller behavior. This v58
+  desktop change does not update the APK, ESP firmware or board assets, and does
+  not supersede v57's device-specific verification boundary.
+
+## v57 ESP UI audit — navigation, error feedback and state restoration
+
+2026-10-18: The user reported duplicate Next buttons and requested a review of
+the full ESP UI, including removal of estimated Wi-Fi scan durations. Review
+found deterministic presentation and page-transition defects; the fixes below
+do not change input ownership, wireless parameters or protocol deadlines.
+
+- Guide navigation: pages 2, 3 and 5 previously rendered Next in both the middle
+  confirmation row and the fixed bottom navigation row. The middle now names
+  its action or destination: select wireless network, install phone software,
+  connect phone Bluetooth, start pairing, check device connections, enter home.
+  The three separate rows remain. Previous is dimmed on page 1; the last bottom
+  row says Finish guide. Physical key behavior and manual page advancement are
+  preserved; finishing never asserts that the device is ready.
+- Scan and settings feedback: scanning retains its spinner and return action
+  without a seconds estimate. Password validation errors on the completion
+  actions page are visible instead of silently rejecting Connect. An error with
+  no selected SSID offers Return to network list, rather than Re-enter password.
+  A failed background scan can open the error page only while the user remains
+  on the network list; it cannot replace a later menu, download, help, pairing,
+  reset or password page. The existing CONNECTING success/failure behavior is
+  preserved. The production worker branch failed the new regression before the
+  LIST guard and passes afterward.
+- State restoration: returning between a legacy numeric pairing code, QR and
+  computer instructions restores the proper value font and hint position. A
+  visible pairing code now requests code entry instead of simultaneously saying
+  no digits are required. The first wireless page keeps the same-network hint
+  inside its card and removes the duplicate below it. Menu arrows, fixed return,
+  password pages, reset, pairing feedback and hidden/stale content were reviewed.
+- Download webpage: explicitly resuming the computer ZIP selects Windows
+  installation instructions even when browser detection initially selected
+  Android or an unknown platform. While this transfer is active, competing native
+  APK/ZIP links are blocked without changing the selected platform; they work
+  again after completion. Saving the package does not advance the wizard or
+  claim installation. This changes the existing LAN page, not the transfer
+  protocol or ordinary direct-download flow.
+- Host tests: **PASS**. Root TypeScript typecheck/build, driver-download JS
+  **21/21**, transport contracts **19/19**, fonts **3/3** and UI model tests pass.
+  **83 host-rendered frames** use the actual LVGL renderer and application fonts,
+  covering glyphs, bounds, label overlap, page returns and cached refreshes.
+  Unchanged refreshes produce no flushes; replacement checks retain stable
+  allocations. Peak LVGL usage is **17,632 B within 24 KiB**. These are simulated
+  state renders, not photographs or pixel verification of the physical display.
+  Evidence: `apps/esp/build/ui-audit-v57/` red/green logs and previews,
+  `ui-v57-scan-routing-{red,green}.log`, `ui-v57-model-passkey-red.log`,
+  `ui-v57-model-wifi-copy-red.log`, `ui-v57-model-copy-green.log`,
+  `ui-v57-root-typecheck.log` and `ui-v57-root-build.log`.
+- Build: **PASS**. The complete ESP gate exited 0 in
+  `apps/esp/build/ui-v57-full-gate.log`, preserving existing platform skips
+  **4 + 5 + 12**. Verified archive:
+  `apps/esp/build/firmware/3ac256edad7a95ae136fc1645079f52734eb00b612921d4154ac9bb319088648`;
+  its name is the full-image SHA. APP **2,677,872 B**, SHA
+  `66867063be5e421cc49012edcc805ad19bd3be96de80c807cbcdc25d702196ec`;
+  matching ELF SHA
+  `4493334320a658f6029cee4c73efb51eecb7e2b00c6389fb76536c78b3880363`.
+- Flash Device: **PASS for the exact app-only scope**. Fresh enumeration identifies COM6 /
+  MAC `4c:11:ae:31:32:6c`; COM5 is absent. The fresh table SHA is
+  `bd386c960f8b827e812dd238af37d469c319d7e9ecc2d7501d00296c46804a4f`,
+  with valid MD5. OTA data sequence 1 / state 2 and valid CRC select
+  OTA0 at `0x20000`, capacity `0x2f0000`. The initial high-speed stub table read
+  failed with `The chip stopped responding`; the ROM loader at 115200 then read
+  the table and OTA data and completed the write. Session **9962 exited 0**,
+  **2,678,784 B padded** were written at `0x20000`, and written-data hash
+  verification passed. The erase range ends before **0x2ae000 / 2,809,856**.
+  Evidence: `apps/esp/build/com6-v57-flash-plan.json` and
+  `com6-v57-{layout-read,layout-read-rom,otadata-read,flash}.log`; the failed
+  attempt remains recorded. The write scope excludes bootloader, table, OTA
+  data, NVS, PHY, `assets` and OTA1; this is not a claim that old configuration
+  automatically recovered. EXE/APK artifacts and the assets partition are not
+  updated. Firmware still embeds v56 as its fallback, but this COM6 retains its
+  existing assets partition; its downloaded desktop package is not assumed to
+  be v56 without checking the actually selected content.
+- Startup Device: **PASS only for bounded startup and read-only queries**.
+  `apps/esp/build/com6-v57-startup.json` records **30.000 s / 9 of 9 samples**,
+  no faults, errors or observed OOM, and a closed serial port. STATUS identifies
+  `QDD-Passport-326E`; Wi-Fi is **configured=false / connected=false**, with no
+  IP, BLE is disconnected/not ready, and `TEXT_STATUS` is **ready=false**. No
+  control input, PING or pairing command was sent. These observations do not
+  establish network or Bluetooth connection recovery, physical key navigation,
+  display pixels or phone feedback; the UI evidence remains the 83 host renders.
+
+- Additional COM5 flash: on 2026-10-18 the user initially named COM6, but two
+  read-only enumerations found only COM5 / `4c:11:ae:2f:a1:b8`. Flashing proceeded
+  after the user explicitly selected the attached COM5 (A1BA). The same v57
+  archive verified again. Fresh table SHA
+  `b4a705f5dcd64100c5c40e0de65b2a2acae70a2827ae56044317575331f4620d`, valid MD5,
+  identifies factory at `0x10000 / 0x7f0000` and no assets partition. Only the exact
+  APP above was written at `0x10000`, erase end exclusive `0x29e000`;
+  session **51338 exited 0**, **2,677,872 B / 12.7 s**, written-data hash verified.
+  Bootloader, table, NVS and PHY were preserved. `com5-v57-startup.json` records
+  **30.000 s / 9 of 9 read-only replies**, no fault/OOM and a closed serial port.
+  Wi-Fi connected at `192.168.1.221`; BLE encrypted/bonded/ready=true and
+  armed/locked=false. `TEXT_STATUS ready=false / editorEpoch=0`; no control or
+  text input was sent, so this does not validate Chinese input. A single PC GET
+  to `http://192.168.1.221:3334/` **timed out after 3 seconds**; download-page
+  reachability is not claimed. No network tuning or extra flash followed it.
+  Evidence: `apps/esp/build/com5-v57-{flash-plan.json,layout-read.log,flash.log,`
+  `startup.json,http.json}`. No firmware changed, no previous gate was repeated,
+  and the v58 desktop package was not written to the board.
+- Unverified: physical display and key navigation, the new LAN page on this
+  device, real Chinese input and complete phone-control feedback remain separate
+  checks. The user's new report of error 10061 on a friend's computer is being
+  investigated separately; this machine's historical connection configuration
+  and this board's current disconnected Wi-Fi are not evidence of that remote
+  failure's cause.
+
+## v56 Chinese text submission — operator fix, real text entry unverified
+
+2026-10-18: The user again reported that text submission could not enter Chinese.
+The Rust operator page still enforced an ASCII-only regular expression, rejecting
+Chinese before dispatching `android_type`. The Rust MCP / ESP UTF-8 / Android IME
+channel already exists; fixing this frontend rejection does not establish a
+completed real-device text-entry loop.
+
+- Fix: the send button accepts mixed Chinese, English and emoji unchanged through
+  the existing `android_type` route. A string containing non-ASCII remains limited
+  to **512 UTF-8 bytes**, not 512 characters. NUL, unpaired UTF-16 surrogates and
+  unsupported controls in ASCII-only input are rejected before submission. Protocol, ACK
+  deadlines, input ownership and retry policy are unchanged; no pinyin/HID/ADB
+  fallback was introduced for Chinese.
+- UI: the text field now describes Chinese support. When preparation is missing,
+  it directs the user to select the current controller in the phone App's
+  “设备中文输入”, enable and select that IME, then focus the target editable field.
+  No old board name is hard-coded. Errors retain `textTransfer.status`; uncertain
+  delivery takes precedence over cancellation and explicitly warns that text may
+  already be present and must not be resent. Success, failure and new screen
+  frames never automatically replay text; failed/uncertain submissions retain
+  the user's draft. Independent review found that an `IME` substring check also
+  matched `TIMEOUT` / `MIME`; a red regression preceded the whole-word fix.
+- Host: **PASS**. Root TypeScript typecheck/build, Rust **83/83**, generated UI
+  **74/74**, asset checks **4/4**, transfer packaging **7/7** and EXE **21/21** pass.
+  Six new frontend tests failed on the old baseline. The actual minified assets
+  now cover unchanged mixed text, UTF-8 limits, invalid input before ARM, one
+  dispatch despite clicks during a delayed result, missing-IME guidance,
+  uncertain-result/draft preservation and no replay after fresh screen frames.
+  Evidence: `apps/android-mcp-rust/build/unicode-v56-ui-red.log`,
+  `unicode-v56-ime-match-red.log`, `unicode-v56-ui-green.log` and
+  `unicode-v56-assets.log`; packaged-EXE results are in
+  `apps/android-mcp-rust/build/windows/v56/exe-smoke.json`. These fixtures use no
+  real phone/controller and do not establish that Chinese reached a real field.
+- Build / artifacts: **PASS**. Directory:
+  `apps/android-mcp-rust/build/windows/v56/`; buildId **`rust-f76f812ff75498de`**.
+  EXE **1,925,120 B**, SHA
+  `bfe8e442298a8d63dea957d88f084178e91392ea7f5a69274f32ea22f69c1663`;
+  ZIP **943,612 B**, SHA
+  `bcdd5b96f07f9ab689ccb3fb7d2c87217cec24a8f699c579fa0d916ce5db334c`.
+  Source ZIP **296,919 B**, SHA
+  `21071300c3838d33f139d67758ad64b83453d3dbe1a5117d4f28216f3f56f8d0`.
+  The explicit source allowlist includes `tools/fixtures/operator-text-cases.js`
+  with exact bytes and manifest hashes, rather than allowing arbitrary JS folders.
+  Local connection configuration and credentials remain excluded. The Rust build
+  generates compressed resources from its own canonical assets, not old Node UI.
+- ESP Build / Host: **PASS**. The embedded ZIP reference selects v56. The complete
+  gate exited 0 with the existing platform skips 4 + 5 + 12; independent archive
+  verification passed. Log: `apps/esp/build/unicode-v56-full-gate.log`.
+  Archive: `apps/esp/build/firmware/c9a7cebf9499a491b2178b40378af87497e3cc5a8d81cc763ad53ceaa1ee6ed8`;
+  the directory name is the full-image SHA. APP **2,677,808 B**, SHA
+  `73a53c7b0a689c3d772abee1d5b8efa615d83ef6753c4567dda256c333a53fb5`; matching ELF SHA
+  `b8018f393e469edd8f5e7f250c62762a4a4fdb61d7a2e89d4cc99a9b55f438a6`.
+  Only the firmware packaging reference changed; ESP input protocol and wireless
+  parameters did not change in this round.
+- Device: **flash, read-only startup and package identity checks PASS**. Fresh
+  enumeration and ROM inspection confirmed COM5 / MAC `4c:11:ae:2f:a1:b8` /
+  ESP32-C3 / 8 MB. The freshly read table passed MD5 with SHA
+  `b4a705f5dcd64100c5c40e0de65b2a2acae70a2827ae56044317575331f4620d`.
+  This QDD-Passport-A1BA has no `assets`, unlike the historical COM6 / 326E board.
+  Only the exact APP was written at `0x10000`, erase end exclusive `0x29e000`;
+  flashing exited 0 with data hash verified. Bootloader, table, NVS and PHY were
+  preserved. Evidence: `apps/esp/build/com5-v56-{flash-plan.json,flash.log}`.
+  A 30.000-second read-only window observed no faults/OOM and the original BLE
+  bond restored encrypted/bonded/ready. However, Wi-Fi was configured but
+  disconnected without an IP, and TEXT_STATUS reported ready=false, editorEpoch=0.
+  BLE readiness is not IME readiness. No ARM, HID or text was sent.
+  One INFO in `browser-usb-v56-info.json` verified the entire on-board ZIP SHA:
+  943,612 B matching the v56 ZIP above; CANCEL succeeded and the port closed.
+  This read-only diagnostic does not change the LAN browser download flow.
+  With Wi-Fi disconnected, the new LAN download check was not run; neither
+  network stability nor real Chinese end-to-end acceptance is claimed.
+- Runtime and unverified boundary: the current read-only check enumerated no ADB
+  device and found port `8790` refusing connections. No actual service was started
+  or replaced, the previously denied App launch/configuration action was not
+  retried or bypassed, and no real Chinese text was submitted or visually checked.
+  APK installation, current-controller selection, system IME enablement/selection,
+  real encrypted BLE text and post-`commitText` screen feedback remain unverified.
+  Host PASS is not complete-product or real Chinese-input acceptance.
+
 ## v55 Direct LAN installation and PIN-free pairing
 
 2026-10-18: The ESP, computer and controlled phone connect to the same wireless
@@ -53,8 +512,40 @@ the package directly, without a local HTML receiver or USB port selection.
   report covers 1040/390 widths, native single GETs, manual navigation, no-JS
   content and the old-path redirect using isolated fixtures only:
   `apps/esp/build/ui-browser-v55/landing-lan-report.json`.
-- Build/device: final firmware gate and app-only COM5 verification in progress;
-  final identities and measured transfer results will be recorded below.
+  Final three-row guide rendering covers all six pages, separate row bounds,
+  rounded corners and the unchanged 128 px QR. The 18 button contracts and three
+  font checks pass; peak host LVGL usage is 17,520 B within 24 KiB. Preview:
+  `apps/esp/build/ui-hotspot-v55/wireless-guide-three-rows-six-v55.png`.
+- Build: PASS; complete gate exit 0, including the existing platform skips
+  (4 + 5 + 12), and independent archive verification. Log:
+  `apps/esp/build/wireless-v55-three-row-full-gate-final.log`.
+  The verified bundle is `apps/esp/build/firmware/0782b7e1672fa098f7487cea23f4c3350dc7880202d72149da187c13cfc1dc00`;
+  its directory name is the full-image SHA. App: **2,677,360 B**, SHA
+  `2ce943c90c194ef30fe4ba69bfd2d155b84a969bfd3e836b9033724a7e04414c`;
+  matching ELF SHA `ac00ecb7f64ed23440e7bc526a20386983800f1655218b0619a686690d9113a2`.
+  An earlier run caught CRLF-only drift in legacy helper source identities;
+  all 18 original LF byte sequences were restored and matched their unchanged
+  manifests exactly before this successful gate. No identity check was relaxed.
+- Device: PASS for the following bounded checks only. Fresh COM5 enumeration and
+  ROM identification matched MAC `4c:11:ae:2f:a1:b8`, ESP32-C3 / 8 MB. The freshly
+  read table passed MD5 and SHA
+  `b4a705f5dcd64100c5c40e0de65b2a2acae70a2827ae56044317575331f4620d`.
+  Only the exact app was written at `0x10000`, erase end exclusive `0x29e000`;
+  flash exit 0 and hash verification passed. Bootloader/table/NVS/PHY were not
+  written. The 30.015 s read-only startup observation saw Wi-Fi restored and the
+  existing encrypted/bonded/ready connection, with no faults or allocation
+  failures. Serial was closed; no ARM, pairing request or HID input was sent.
+  Evidence: `com5-v55-{flash-plan, startup}.json` and `com5-v55-flash.log` in `apps/esp/build/`.
+- Actual LAN transfer: `http://10.65.201.147:3334/` returned the exact tested HTML
+  in **547 ms**; the legacy path redirected to `/`. A single non-Range GET with
+  no retry downloaded the full **943,153 B ZIP in 39.219 s** and the new
+  **66,090 B APK in 4.282 s**. ZIP SHA, CRC, single EXE entry and extracted EXE SHA
+  match v50; APK SHA matches the new manifest. ZIP completion diagnostics report
+  result 0 and no active transfer. Post-download status retained secure BLE and
+  Wi-Fi, with zero allocation failures; current free heap was 39,120 B and the
+  observed minimum 10,560 B. Evidence: `com5-v55-download.json` and
+  `com5-v55-post-download-health.json`. These measured durations do not establish
+  a throughput improvement; no package was launched or installed in this check.
 - Unverified: first-time PIN-free pairing on a new phone, physical key/display
   acceptance, real projection/input feedback and long-run RF behavior remain
   separate checks. This work does not relabel the previous high-rate LAN failure

@@ -8,12 +8,25 @@
 #define BLE_HS_EDONE 14
 #define BLE_HS_ENOMEM 6
 #define BLE_HS_ETIMEOUT 13
+#define BLE_GATT_ACCESS_OP_READ_CHR 0
+#define BLE_GATT_ACCESS_OP_WRITE_CHR 1
+#define BLE_ATT_ERR_INSUFFICIENT_AUTHEN 5
+#define BLE_ATT_ERR_WRITE_NOT_PERMITTED 3
+#define BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN 13
+#define BLE_ATT_ERR_VALUE_NOT_ALLOWED 19
+#define BLE_ATT_ERR_UNLIKELY 14
+#define OS_MBUF_PKTLEN(frame) ((frame)->length)
 #define portENTER_CRITICAL(lock) ((void)(lock))
 #define portEXIT_CRITICAL(lock) ((void)(lock))
 struct ble_npl_event { int unused; };
 struct os_mbuf { uint8_t bytes[64]; size_t length; };
+struct ble_gatt_access_ctxt { unsigned op; struct os_mbuf *om; };
 static int s_lock;
 static qdd_ble_status_t s_status;
+qdd_ble_status_t qdd_ble_status(void) { return s_status; }
+static int ble_hs_mbuf_to_flat(const struct os_mbuf *frame,void *out,size_t length,void *unused) {
+  (void)unused; assert(length<=frame->length); memcpy(out,frame->bytes,length); return 0;
+}
 static atomic_uint_fast16_t s_connection;
 static uint16_t s_text_handle;
 static bool s_text_subscribed,s_text_indication_busy,s_text_requested,s_att_indication_busy,s_text_cancelled,s_text_neutral,s_text_event_enqueued;
@@ -59,6 +72,7 @@ static void reset(void) {
   s_connection=1; s_text_handle=40; s_text_subscribed=true;
   s_text_indication_busy=s_text_requested=s_att_indication_busy=s_text_cancelled=s_text_neutral=s_text_event_enqueued=false;
   s_text_length=0; memset(s_text_staging,0,sizeof(s_text_staging)); memset(&s_text_events,0,sizeof(s_text_events));
+  s_text_events.ready=true; s_text_events.receiver_version=1; s_text_events.editor_epoch=7;
 }
 static uint32_t queue(void) {
   const uint8_t frame[]={1,3,1,0,0,0,0,0,0,0,7,0,0,0}; uint32_t token=0;
@@ -130,8 +144,43 @@ static void test_just_works_and_security_loss(void) {
     assert(!sends && !allocated && s_text_events.indication_done && !s_text_events.indication_success);
   }
 }
+static int write_frame(const uint8_t *bytes,size_t length) {
+  struct os_mbuf buffer={.length=length}; memcpy(buffer.bytes,bytes,length);
+  struct ble_gatt_access_ctxt context={.op=BLE_GATT_ACCESS_OP_WRITE_CHR,.om=&buffer};
+  return text_access(1,0,&context,&context);
+}
+static void test_clipboard_real_gatt_versions_ack_and_cancel(void) {
+  reset(); const uint8_t ready[]={2,0x81,7,0,0,0};
+  assert(!write_frame(ready,sizeof(ready)));
+  qdd_ble_text_events_t events=qdd_ble_text_events();
+  assert(events.editor_changed && events.ready && events.receiver_version==2 && events.editor_epoch==7);
+  assert(qdd_ble_text_current(2,7) && !qdd_ble_text_current(1,7) && !qdd_ble_text_current(2,8));
+  assert(!qdd_ble_text_events().editor_changed);
+  const uint8_t legacy[]={1,3,1,0,0,0,0,0,0,0,7,0,0,0}; uint32_t token;
+  assert(qdd_ble_text_indicate(legacy,sizeof(legacy),1600,allowed,&token)==QDD_BLE_TEXT_FAILED);
+  uint8_t frame[15]={2,0x82,1,0,0,0,0,0,0,0,3,7,0,0,0};
+  assert(!write_frame(frame,sizeof(frame))); events=qdd_ble_text_events();
+  assert(events.ack_received && events.ack_version==2 && events.ack_status==3 && events.ack_id==1 && events.ack_epoch==7);
+  frame[0]=1; assert(write_frame(frame,sizeof(frame))==BLE_ATT_ERR_VALUE_NOT_ALLOWED);
+  frame[10]=0; assert(write_frame(frame,sizeof(frame))==BLE_ATT_ERR_VALUE_NOT_ALLOWED);
+  assert(!qdd_ble_text_events().ack_received);
+  const uint8_t commit[]={2,3,1,0,0,0,0,0,0,0,7,0,0,0};
+  assert(qdd_ble_text_indicate(commit,sizeof(commit),1600,allowed,&token)==QDD_BLE_TEXT_QUEUED);
+  const uint8_t disable[]={2,0x83,7,0,0,0}; assert(!write_frame(disable,sizeof(disable)));
+  pump(); assert(!sends && !allocated && s_text_events.indication_done && !s_text_events.indication_success);
+  assert(!qdd_ble_text_current(2,7));
+  const uint8_t cancel[]={2,4,1,0,0,0,0,0,0,0};
+  assert(qdd_ble_text_indicate(cancel,sizeof(cancel),UINT64_MAX,NULL,&token)==QDD_BLE_TEXT_QUEUED);
+  qdd_ble_text_cancel_pending(); fast_allowed=false; pump(); assert(sends==1 && allocated==1);
+  confirm(40); assert(!s_text_indication_busy);
+  reset(); queue();
+  assert(!write_frame(ready,sizeof(ready))); pump(); assert(!sends && !allocated); // Switch invalidates staged v1 bytes.
+  reset(); s_status.key_size=15; assert(write_frame(ready,sizeof(ready))==BLE_ATT_ERR_INSUFFICIENT_AUTHEN);
+  assert(!qdd_ble_text_current(1,7));
+}
 int main(void) {
   test_service_changed_slot_and_one_mbuf(); test_cancel_and_deadline_before_host_sender(); test_confirm_then_cancel_never_replays(); test_neutral_cancel_survives_closed_input_gate(); test_two_producers_deduplicate_pending_host_event(); test_service_changed_timeout_is_not_slot_confirmation();
   test_just_works_and_security_loss();
+  test_clipboard_real_gatt_versions_ack_and_cancel();
   puts("QDD text actual BLE public queue, shared Service Changed slot, one mbuf, cancellation and deadline: PASS"); return 0;
 }

@@ -10,6 +10,13 @@
     "calibration-state", "status-connected", "status-encrypted", "status-ready",
     "error-box", "error-message", "error-detail", "activity", "capture-state", "screen-profile", "screen-profile-state", "access-url",
   ].map((id) => [id, element(id)]));
+  const connectionSettings = document.createElement("a");
+  connectionSettings.id = "connection-settings-link";
+  connectionSettings.className = "text-button";
+  connectionSettings.href = "/desktop/settings#discover";
+  connectionSettings.textContent = "检查连接设置 / 重新查找";
+  connectionSettings.hidden = true;
+  ui["error-box"].append(connectionSettings);
   let client = null;
   let frame = null;
   let hid = {};
@@ -23,6 +30,7 @@
   let reconnectTimer = null;
   let reconnectAttempt = 0;
   let autoConnect = true;
+  let errorRevision = 0;
   const boundedMotion = (value) => Math.max(-4096, Math.min(4096, value));
   const profiles = { turbo: "极速（灰度）", fast: "快速", standard: "标准", original: "原画" };
   const inputTools = new Set(["android_hid_arm", "android_home", "android_back", "android_scroll",
@@ -196,23 +204,32 @@
     });
   }
 
-  function clearError() { ui["error-box"].hidden = true; }
-  function showError(error) {
+  function clearError() { errorRevision++; ui["error-box"].hidden = true; connectionSettings.hidden = true; }
+  function showError(error, recoverConnection = false) {
     const message = error instanceof Error ? error.message : String(error);
-    const friendly = message.includes("Queued input was cancelled") || message.includes("HID operation cancelled") ? "远控已退出，点击画面即可重新进入。" :
+    const endpointError = /^(?:ESP_CONNECTION_ERROR|SCREEN_CONNECTION_ERROR):\s*/u;
+    const refused = /\bos error 10061\b|\bECONNREFUSED\b/iu.test(message);
+    const friendly = error?.textTransfer?.status === "uncertain" || message.includes("delivery is uncertain") ? "文字可能已输入，请先查看手机输入框，不要重复发送。" :
+      message.startsWith("TEXT_IME_REJECTED:") || message.includes("IME explicitly rejected") ? "手机输入框未接受文字，请确认当前输入框可编辑。" :
+      /^(?:TEXT_IME_UNAVAILABLE|TEXT_IME_NOT_READY|TEXT_RECEIVER_UNAVAILABLE|TEXT_RECEIVER_NOT_READY):/u.test(message) || /\bIME\b/u.test(message) ? "在新版手机“设备投屏”内选择当前控制器，首次启用并选中“设备中文输入”，再点选目标输入框。保持选中即可连续使用。" :
+      message.includes("Queued input was cancelled") || message.includes("HID operation cancelled") ? "远控已退出，点击画面即可重新进入。" :
+      endpointError.test(message) ? message.replace(endpointError, "") :
+      refused ? "连接被拒绝，请检查手机投屏地址和设备控制器地址；可打开连接设置重新查找。" :
       message.includes("实时连接") || message.includes("正在重连") || message.includes("操作台需要更新") || message.includes("旧版服务") ? message :
       message.includes("LOCKED") || message.includes("physical lock") ? "已紧急停止，请在设备控制器上选择“取消急停”并确认。" :
       message.includes("HID_NOT_READY") ? "手机还没连好，请在手机蓝牙设置里连接设备控制器。" :
       message.includes("CONFIGURING") || message.includes("SETUP_BUSY") ? "设备控制器正在设置 Wi-Fi，请在板上完成设置后再点击画面。" :
       message.includes("expired") || message.includes("superseded") ? "画面已更新或过期，请等待新截图后再点按。" :
       message.includes("calibrat") ? "AI 点击位置需要重新设置。电脑鼠标遥控无需校准。" :
-      /鼠标|键盘|投屏|图像|局域网|截图|校准比例|控制板|Wi-Fi|蓝牙/u.test(message) ? message :
+      /鼠标|键盘|投屏|图像|局域网|截图|校准比例|控制板|Wi-Fi|蓝牙|文字|输入|字符/u.test(message) ? message :
       error?.name === "TimeoutError" || error?.name === "AbortError" ? "请求超时，已尝试暂停键鼠，请检查局域网连接。" :
-      message.includes("ASCII") ? "这里可发送英文、数字和符号。中文请用手机输入法。" :
+      message.includes("ASCII") ? "文字含不支持的控制字符，请删除后再发送。" :
       message.includes("fetch") || message.includes("Network") ? "操作台连接中断，已尝试暂停设备。" : "操作未完成，请查看设备状态。";
     ui["error-message"].textContent = friendly;
     ui["error-detail"].textContent = message;
+    connectionSettings.hidden = !(recoverConnection || endpointError.test(message) || refused);
     ui["error-box"].hidden = false;
+    return ++errorRevision;
   }
 
   async function rpc(context, method, params, options = {}) {
@@ -252,7 +269,11 @@
     const result = await rpc(context, "tools/call", { name, arguments: args }, options);
     if (!result) throw new Error("未收到操作结果。");
     const text = (result.content ?? []).filter((item) => item.type === "text").map((item) => item.text).join("\n");
-    if (result.isError) throw new Error(text || "设备操作失败。");
+    if (result.isError) {
+      const error = new Error(text || "设备操作失败。");
+      error.textTransfer = result.structuredContent?.textTransfer;
+      throw error;
+    }
     let data = result.structuredContent ?? {};
     if (text) {
       try { data = JSON.parse(text); } catch { /* An optional human-readable result is not state. */ }
@@ -301,7 +322,7 @@
       context.pendingVideo = null;
       context.videoError = true;
       emergencyPause("手机画面中断，操作已暂停。画面恢复后，请点击画面重新进入。", true);
-      showError(new Error(message));
+      context.videoErrorRevision = showError(new Error(message), true);
     };
     channel.addEventListener("unavailable", (event) => {
       let message = "手机没有传来新画面，请检查手机上的投屏开关和 Wi-Fi。";
@@ -374,8 +395,13 @@
           const fps = context.videoTimes.length;
           ui["frame-info"].textContent = `${packet.data.width} × ${packet.data.height} · ${fps} 帧/秒 · 画面约 ${Math.round(age)}ms 前`;
           if (context.videoError) {
-            context.videoError = false; clearError();
-            ui["activity"].textContent = "画面已恢复。点击画面即可继续操作。";
+            context.videoError = false;
+            // A recovered phone stream says nothing about a later controller
+            // or input error. Only retire this stream's own displayed error.
+            if (context.videoErrorRevision === errorRevision) {
+              clearError();
+              ui["activity"].textContent = "画面已恢复。点击画面即可继续操作。";
+            }
           }
           clearTimeout(context.videoDeadline);
           context.videoDeadline = setTimeout(() => unavailable("手机画面已中断，操作已暂停。"), Math.max(1, 3000 - age));
@@ -552,7 +578,7 @@
         }
       }
     }).catch((error) => {
-      if (current(context, context.captureEpoch, context.captureRevision)) return handleFailure(context, error);
+      if (current(context, context.captureEpoch, context.captureRevision)) return handleFailure(context, error, true);
     }).finally(() => {
       context.captureTask = null;
       if (client !== context) return;
@@ -575,7 +601,7 @@
           const { data } = await tool(context, "android_hid_status");
           if (current(context, epoch, revision)) updateState(data);
         }
-      } catch (error) { if (current(context, epoch, revision)) void handleFailure(context, error); }
+      } catch (error) { if (current(context, epoch, revision)) void handleFailure(context, error, true); }
       finally { schedulePoll(); }
     }, 1000);
   }
@@ -684,10 +710,10 @@
     render();
   }
 
-  async function handleFailure(context, error) {
+  async function handleFailure(context, error, recoverConnection = false) {
     if (context !== client) return;
     frame = null;
-    showError(error);
+    showError(error, recoverConnection);
     emergencyPause("本次操作未完成，连接恢复后点击画面继续操作。");
     if (error.connectionLost || error instanceof TypeError) {
       client = null;
@@ -713,7 +739,10 @@
       if (!current(context, epoch, revision)) return;
       if (arm) context.armIntent = true;
       if (data) updateState(data);
-      ui["activity"].textContent = `${label}已发送。画面会持续跟随手机。`;
+      const transfer = data?.textTransfer;
+      ui["activity"].textContent = transfer?.mode === "ime" && transfer.status === "accepted"
+        ? "输入法已接受文字，请查看手机确认，勿重复发送。"
+        : `${label}已发送。画面会持续跟随手机。`;
     }).catch((error) => {
       if (current(context, epoch, revision)) return handleFailure(context, error);
     }).finally(() => {
@@ -799,7 +828,7 @@
         if (client === pending) client = null;
         await closeContext(pending);
       }
-      if (attempt === connectionEpoch) showError(error);
+      if (attempt === connectionEpoch) showError(error, true);
     }
     finally {
       if (attempt !== connectionEpoch && pending) void closeContext(pending);
@@ -834,8 +863,9 @@
   });
   ui["capture-button"].addEventListener("click", () => {
     if (!client || connecting || client.actionTask || document.hidden) return;
-    const context = client, epoch = generation;
+    const context = client;
     emergencyPause("正在重新连接画面，请稍后点击画面继续操作。");
+    const epoch = generation;
     startVideo(context);
     clearError(); ui["activity"].textContent = "正在重新连接手机画面…";
     void refresh(context).then(() => {
@@ -863,7 +893,17 @@
   action("enter-button", "发送回车", "android_key", () => ({ combo: "enter" }));
   action("type-button", "发送文字", "android_type", () => {
     const text = ui["typing-input"].value;
-    if (!text || !/^[\x09\x0a\x0d\x20-\x7e]+$/.test(text)) throw new Error("仅支持 US ASCII 文字，请输入英文、数字或符号。");
+    if (!text) throw new Error("请输入要发送的文字。");
+    if (text.includes("\0")) throw new Error("文字不能包含空字符。");
+    for (const character of text) {
+      const code = character.codePointAt(0);
+      if (code >= 0xd800 && code <= 0xdfff) throw new Error("文字含不完整字符，请重新输入该字符。");
+    }
+    if (/[^\x00-\x7f]/u.test(text)) {
+      if (new TextEncoder().encode(text).byteLength > 512) throw new Error("每次最多发送 512 字节文字（约 170 个汉字），请分段发送。");
+    } else if (!/^[\x09\x0a\x0d\x20-\x7e]+$/.test(text)) {
+      throw new Error("文字含不支持的控制字符，请删除后再发送。");
+    }
     return { text };
   });
   ui["calibrate-button"].addEventListener("click", () => {

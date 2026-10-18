@@ -84,6 +84,7 @@ final class FrameServer implements AutoCloseable {
         }); }
         catch (RejectedExecutionException full) { timeout.cancel(false); closeSocket(socket); }
       } catch (IOException | RejectedExecutionException error) {
+        if (listener.isClosed()) { close(); return; }
         if (!closed) { /* A single failed connection must not expose or stop screen capture. */ }
       }
     }
@@ -315,4 +316,5 @@ final class FrameServer implements AutoCloseable {
     for (Socket socket : sockets) closeSocket(socket);
     workers.shutdownNow(); streamWorkers.shutdownNow(); deadlines.shutdownNow();
   }
+  boolean isListening() { return !closed && !listener.isClosed() && listener.isBound(); }
 }

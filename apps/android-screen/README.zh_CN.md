@@ -10,6 +10,7 @@
 安卓 MediaProjection → Wi-Fi 内网 MJPEG 预览 → 电脑操作台
 安卓 MediaProjection → Wi-Fi 内网原图 JPEG → 电脑 MCP → AI 看到屏幕
 ESP32 BLE 键盘鼠标 → 安卓输入
+ESP32 加密 BLE 文字 → 已选中的设备输入法 → 当前文本框
 ```
 
 USB 只用于首次安装 APK 和调试，运行投屏不需要 ADB 转发或 scrcpy。App 不包含
@@ -54,6 +55,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File ./apps/android-screen/tools/
 App 将自身 IP、UUID 与投屏状态登记给控制板，电脑 EXE 的“自动查找”据此填写连接信息。
 控制板换 IP 后按已选择的蓝牙名称重新发现，不会随意切到其他设备。
 上述登记不会授予 HID 输入权限，也不会自动跳过安卓屏幕共享授权。
+
+若内网监听端口暂时无法启动，App 会在 1、3、10 秒间隔内各重试一次。
+失败时显示“重试内网连接”，可在故障排除后手动恢复，无需重新授权正在进行的投屏。
+健康的监听和现有连接不会被重建；换网络或断网时，旧重试不会恢复过期地址。
+手机显示投屏中仅表示正在采集画面，仍须核对 App 的内网连接状态和当前地址。
 
 蓝牙引导仅在控制板的 `connected`、`encrypted`、`bonded`、`ready` 都为真时显示就绪。
 Just Works 配对无需手输数字，在手机蓝牙设置中确认设备即可。其 `authenticated` 可以仍为假：
@@ -222,40 +228,47 @@ HTTP 请求头最多 8 KiB / 34 项。短请求使用两条工作线程、四个
 会话和坐标均无效，重新进入生成新会话。HTTP 不提供打开页面或发送鼠标事件的方法。
 系统光标不入镜时不能通过相同图像推导增益；预点击目标标记也不证明真实指针位置。
 
-## 可选设备中文输入法
+## 设备中文输入
 
-电脑通过新版 ESP 固件把原始 UTF-8 文字分片发送到已配对的加密 BLE 通道，APK 的可选输入法
-向当前文本框调用 `InputConnection.commitText`。不使用拼音替代、剪贴板、ADB 或网络文字输入。
-一次最多 512 个 UTF-8 字节，支持中文、emoji 和 ASCII 混合；不支持 NUL。目标 App 仍可能
-限制字符或长度，蓝牙 ACK 只证明编辑 API 接受，实际显示应通过投屏确认。
+通过一次系统设置启用并选中“设备中文输入”后，文字由 ESP 加密 BLE 直接交给当前输入法，
+再用 `InputConnection.commitText` 提交到已聚焦的输入框。保持该输入法选中即可连续使用，
+切换到其他键盘后需要重新选择。不使用剪贴板、无障碍服务或 ADB 输入。
 
-首次使用需要本人在 App 的 **设备中文输入** 卡片依次完成：
+在 App 的 **设备中文输入** 卡片按当前提示完成：
 
-1. 允许 Android 12+ 的“附近设备”连接权限，手动选择已经在系统蓝牙配对的 QDD 控制器。
-2. 打开系统输入法设置，启用 **设备中文输入**。
-3. 在系统选择器选中它，再回到目标 App 聚焦文本框。
+1. 允许 Android 12+“附近设备”权限，选择已在系统蓝牙配对的当前 QDD 控制器。
+2. 首次点击“启用设备输入法”，在系统页面启用；返回 App 后点击“选择设备输入法”。
+3. 在系统选择器选中“设备中文输入”，回到目标 App 并点选可编辑的输入框。
 
-App 只枚举已绑定设备，不扫描附近设备、不请求定位；不会静默启用或选择输入法。输入法窗口
-被物理键盘隐藏时仍可工作，只在当前输入连接与加密 GATT 订阅均有效时报告就绪。
-输入法服务由 `BIND_INPUT_METHOD` 保护，HTTP 没有文字提交、启动输入法或修改选择的接口。
-切换文本框、停用输入法或断链会清除未提交的正文；正文不写入偏好、日志或文件。
+App 分别显示未启用、未选中、未聚焦与连接状态，已完成的步骤不会要求重复设置。
+系统的启用与选择由用户确认，App 不静默修改默认键盘。需要换回日常键盘时，使用输入法
+面板或 App 内的系统选择器。投屏仍用于查看输入结果；文本连接仅由当前设备输入法持有，
+投屏服务不再另开剪贴板接收器，避免两条 GATT 通道争抢同一控制器。
 
-GATT 服务 UUID 为 `9bded201-39ba-4a19-8ff7-25c9d00a0001`，控制器 indication 为 `...0002`，
-手机加密写入为 `...0003`。协议版本字节为 1，其余整数均为 little-endian：
+每次最多 512 个 UTF-8 字节，支持中文、emoji 和 ASCII 混合，不支持 NUL。输入框可能过滤
+字符或限制长度，因此 `accepted` 只表示 `commitText` 接受，不能证明文字已显示或保存。
+请查看真实画面；确认丢失、超时或取消后不要盲目再次发送。正文不写入偏好、日志或文件。
+锁屏、失去编辑器、换控制器、断链或输入法销毁均撤销就绪，迟到回调不能复活旧事务。
+
+服务 UUID 为 `9bded201-39ba-4a19-8ff7-25c9d00a0001`，控制器 indication 为 `...0002`，
+手机加密写入为 `...0003`。BLE 协议版本字节为 **1**，其余整数为 little-endian：
 
 | 方向/类型 | 正文 |
 | --- | --- |
-| ESP→手机 `01 BEGIN` | id u64、编辑 epoch u32、UTF-8 长度 u16 |
+| ESP→手机 `01 BEGIN` | id u64、编辑器 epoch u32、UTF-8 长度 u16 |
 | ESP→手机 `02 DATA` | id u64、偏移 u16、字节 |
-| ESP→手机 `03 COMMIT` | id u64、编辑 epoch u32 |
+| ESP→手机 `03 COMMIT` | id u64、编辑器 epoch u32 |
 | ESP→手机 `04 CANCEL` | id u64 |
-| 手机→ESP `81 READY` / `83 NOT_READY` | 编辑 epoch u32 |
-| 手机→ESP `82 ACK` | id u64、状态 u8、编辑 epoch u32 |
+| 手机→ESP `81 READY` / `83 NOT_READY` | 编辑器 epoch u32 |
+| 手机→ESP `82 ACK` | id u64、状态 u8、编辑器 epoch u32 |
 
-ACK 0 表示 `commitText` 返回 true，1 表示拒绝，2 表示异常导致结果不确定。每个编辑 epoch 中
-非零 id 按无符号 u64 递增；重复片必须与已收字节完全一致，重复 COMMIT 只返回缓存结果，不再提交。
-确认丢失时可能已经输入，电脑不得自动重放。状态/确认写入串行执行，正文仅通过 ESP BLE 抵达。
-新旧 HID 和 GATT 服务共存、已绑定设备的 Service Changed/OEM 缓存行为与真实中文提交尚需真机验收。
+ACK 0 为 accepted，1 为 rejected，2 为 uncertain。重复 COMMIT 仅返回缓存结果，不再次
+提交。焦点、接收器身份或 epoch 不符时不提交；剪贴板 v2 帧不能作为 v1 输入确认。
+相关纯 Java 协议、会话和准备状态测试随 `npm test --workspace @qdd/android-screen` 运行。
+这些 Host 检查和 APK 签名验证不替代手机系统启用流程与目标 App 中文落字的真机验收。
+
+平台依据：[Android 输入法与系统选择](https://developer.android.com/develop/ui/views/touch-and-input/creating-input-method)、
+[InputConnection.commitText](https://developer.android.com/reference/android/view/inputmethod/InputConnection#commitText(java.lang.CharSequence,int))。
 
 ## 验证边界
 

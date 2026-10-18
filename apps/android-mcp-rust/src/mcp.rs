@@ -118,7 +118,7 @@ pub struct Mcp {
   specs: Value,
 }
 
-pub const INSTRUCTIONS: &str = "Observe the device with android_screenshot, then prefer android_control with its frameId. It prepares input, executes one action once and returns a real newer phone image captured after completion. Before a coordinate tap use android_preview_tap to inspect a SIMULATED TARGET and 2x local zoom; this sends no HID and does not prove physical mouse accuracy. Use calibrated hover to observe the real cursor before a separate click only if this phone includes its system cursor in capture. Coordinates are original phone pixels; relative move uses HID counts. Relative move/click, scroll, key, home and back need no calibration. Prefer android_pointer_calibration phase auto after the user manually opens Pointer calibration in the phone App; it measures actual mouse events even if system cursor capture is unavailable, sends no click and cannot open the page. Otherwise probe returns BEFORE/AFTER images and finish computes scales from visible real cursor centers without further movement. When probe says measurable:false, no finish ticket exists: never invent positions or gain. Coordinate tap/hover/swipe require measured calibration. Keep this session's latest frameId and probeId. Intervening input invalidates calibration tickets. Coordinates remain estimates under mouse acceleration. Button presses automatically wait for recent movement to settle; no extra per-click sleep is needed. CONFIGURING, paused input and ACK timeout are instrument failures, not evidence the target App failed. Home/back ACK confirms HID delivery only, not OEM navigation success; inspect the result rather than repeat blindly. Never use ADB input as a fallback. Input is through the ESP32 BLE keyboard/mouse using Wi-Fi TCP or USB serial. Legacy input tools require android_hid_arm and a separate screenshot. If input completed but its image failed, never repeat it blindly; observe again. Physical emergency stop can be cleared only on the board. ASCII uses short HID pulses. Non-ASCII text up to 512 UTF-8 bytes uses the selected QDD phone IME over encrypted ESP BLE; queued is not accepted, uncertain must never be resubmitted blindly, and accepted still needs screenshot verification. Each tools/call request ID is single-use within a session; use a new ID only for an intentional new action, and renew the session at 4096 calls. No model API key is required.";
+pub const INSTRUCTIONS: &str = "Observe the device with android_screenshot, then prefer android_control with its frameId. It prepares input, executes one action once and returns a real newer phone image captured after completion. Before a coordinate tap use android_preview_tap to inspect a SIMULATED TARGET and 2x local zoom; this sends no HID and does not prove physical mouse accuracy. Use calibrated hover to observe the real cursor before a separate click only if this phone includes its system cursor in capture. Coordinates are original phone pixels; relative move uses HID counts. Relative move/click, scroll, key, home and back need no calibration. Prefer android_pointer_calibration phase auto after the user manually opens Pointer calibration in the phone App; it measures actual mouse events even if system cursor capture is unavailable, sends no click and cannot open the page. Otherwise probe returns BEFORE/AFTER images and finish computes scales from visible real cursor centers without further movement. When probe says measurable:false, no finish ticket exists: never invent positions or gain. Coordinate tap/hover/swipe require measured calibration. Keep this session's latest frameId and probeId. Intervening input invalidates calibration tickets. Coordinates remain estimates under mouse acceleration. Button presses automatically wait for recent movement to settle; no extra per-click sleep is needed. CONFIGURING, paused input and ACK timeout are instrument failures, not evidence the target App failed. Home/back ACK confirms HID delivery only, not OEM navigation success; inspect the result rather than repeat blindly. Never use ADB input as a fallback. Input is through the ESP32 BLE keyboard/mouse using Wi-Fi TCP or USB serial. Legacy input tools require android_hid_arm and a separate screenshot. If input completed but its image failed, never repeat it blindly; observe again. Physical emergency stop can be cleared only on the board. ASCII uses short HID pulses. Non-ASCII text up to 512 UTF-8 bytes uses the user-selected QDD device IME over encrypted ESP BLE. In the phone App select the current controller, enable and select Device Chinese Input once, then focus the target editable field. Keep that IME selected for continuous use; switching away requires selecting it again. No accessibility service or clipboard is used. BEGIN/DATA uploads one transaction; COMMIT is sent once and only STATUS is polled. accepted means the current InputConnection accepted the text, while insertionVerified remains false. Inspect the new real phone image before continuing. Lost ACK, cancellation or timeout is uncertain and must never be blindly resubmitted. Clipboard receiver modes are rejected before uploading text and never trigger a paste. Each tools/call request ID is single-use within a session; use a new ID only for an intentional new action, and renew the session at 4096 calls. No model API key is required.";
 
 impl Mcp {
   pub fn new(backend: Arc<dyn Backend>) -> Arc<Self> {
@@ -129,8 +129,7 @@ impl Mcp {
       observation: Mutex::new(None),
       epoch: AtomicU64::new(0),
       controls: Mutex::new(()),
-      specs: serde_json::from_str(crate::assets::TOOLS_JSON)
-        .expect("embedded tool schemas"),
+      specs: serde_json::from_str(crate::assets::TOOLS_JSON).expect("embedded tool schemas"),
     })
   }
 
@@ -1919,11 +1918,26 @@ pub(crate) mod tests {
     );
     assert!(preview.get("isError").is_none(), "{preview}");
     assert_eq!(preview["structuredContent"]["realClickSent"], false);
-    assert_eq!(preview["structuredContent"]["target"], json!({"x":10,"y":20,"coordinateSpace":"pixels"}));
-    assert_eq!(preview["structuredContent"]["annotation"]["label"], "PHONE PX: X=10 Y=20");
-    assert_eq!(preview["structuredContent"]["annotation"]["coordinateSpace"], "originalPhonePixels");
-    assert_eq!(preview["structuredContent"]["annotation"]["original"]["sourceRect"]["x"], 0);
-    assert_eq!(preview["structuredContent"]["annotation"]["zoom"]["legend"]["height"], 52);
+    assert_eq!(
+      preview["structuredContent"]["target"],
+      json!({"x":10,"y":20,"coordinateSpace":"pixels"})
+    );
+    assert_eq!(
+      preview["structuredContent"]["annotation"]["label"],
+      "PHONE PX: X=10 Y=20"
+    );
+    assert_eq!(
+      preview["structuredContent"]["annotation"]["coordinateSpace"],
+      "originalPhonePixels"
+    );
+    assert_eq!(
+      preview["structuredContent"]["annotation"]["original"]["sourceRect"]["x"],
+      0
+    );
+    assert_eq!(
+      preview["structuredContent"]["annotation"]["zoom"]["legend"]["height"],
+      52
+    );
     assert_eq!(preview["content"].as_array().unwrap().len(), 5);
     assert_eq!(backend.actions.lock().unwrap().len(), 0);
     let old = mcp.call(

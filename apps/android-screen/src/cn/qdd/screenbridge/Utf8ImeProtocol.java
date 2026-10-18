@@ -6,14 +6,22 @@ import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 
-/** Main-thread-only bounded protocol. No text is logged, read back, or persisted. */
+/** Main-thread-only bounded protocol. No text is logged or persisted. */
 final class Utf8ImeProtocol {
   static final int LIMIT = 512;
   interface Committer { boolean commit(String text) throws Exception; }
+  interface ResultCommitter { int commit(String text) throws Exception; }
+  private final int version;
   private long epoch, highestId, terminalId, terminalEpoch, pendingId;
   private int terminalStatus = 1, used;
   private boolean editor, subscribed;
   private byte[] pending;
+
+  Utf8ImeProtocol() { this(1); }
+  Utf8ImeProtocol(int version) {
+    if (version != 1 && version != 2) throw new IllegalArgumentException("Unsupported text protocol version");
+    this.version = version;
+  }
 
   void editor(long value, boolean active) {
     if (value < 1 || value > 0xffffffffL) throw new IllegalArgumentException("Invalid editor epoch");
@@ -28,7 +36,7 @@ final class Utf8ImeProtocol {
   boolean ready() { return subscribed && editor && epoch != 0; }
   long epoch() { return epoch; }
   int pendingBytes() { return pending == null ? 0 : pending.length; }
-  byte[] state() { byte[] out = new byte[6]; out[0] = 1; out[1] = (byte)(ready() ? 0x81 : 0x83); put(out, 2, epoch, 4); return out; }
+  byte[] state() { byte[] out = new byte[6]; out[0] = (byte)version; out[1] = (byte)(ready() ? 0x81 : 0x83); put(out, 2, epoch, 4); return out; }
   private void clear() { if (pending != null) Arrays.fill(pending, (byte)0); pending = null; pendingId = 0; used = 0; }
   private void terminal(long id, int result) { clear(); terminalId = id; terminalEpoch = epoch; terminalStatus = result; }
   private byte[] reject(long id) {
@@ -42,7 +50,7 @@ final class Utf8ImeProtocol {
     return ack(id, result, epoch);
   }
   private byte[] ack(long id, int result, long transferEpoch) {
-    byte[] out = new byte[15]; out[0] = 1; out[1] = (byte)0x82; put(out, 2, id, 8); out[10] = (byte)result; put(out, 11, transferEpoch, 4); return out;
+    byte[] out = new byte[15]; out[0] = (byte)version; out[1] = (byte)0x82; put(out, 2, id, 8); out[10] = (byte)result; put(out, 11, transferEpoch, 4); return out;
   }
   static long read(byte[] input, int offset, int count) {
     long value = 0; for (int i = 0; i < count; i++) value |= (long)(input[offset + i] & 255) << (i * 8); return value;
@@ -52,7 +60,10 @@ final class Utf8ImeProtocol {
   }
 
   byte[] receive(byte[] frame, Committer committer) {
-    if (frame == null || frame.length < 10 || frame[0] != 1 || frame[1] < 1 || frame[1] > 4) {
+    return receiveResult(frame, text -> committer.commit(text) ? 0 : 1);
+  }
+  byte[] receiveResult(byte[] frame, ResultCommitter committer) {
+    if (frame == null || frame.length < 10 || frame[0] != version || frame[1] < 1 || frame[1] > 4) {
       return pending == null ? null : reject(pendingId);
     }
     final int type = frame[1]; final long id = read(frame, 2, 8);
@@ -96,7 +107,7 @@ final class Utf8ImeProtocol {
     // exception must never make this transfer eligible for a second commit.
     terminal(id, 2);
     int result = 2;
-    try { result = committer.commit(text) ? 0 : 1; }
+    try { result = committer.commit(text); if (result < 0 || result > (version == 2 ? 3 : 2)) result = 2; }
     catch (Exception unavailable) { result = 2; }
     if (terminalId == id && terminalEpoch == transferEpoch) terminalStatus = result;
     return ack(id, result, transferEpoch);

@@ -55,11 +55,30 @@ Generated files live under `build/` and stay out of Git:
 - `build/windows/exe-smoke.json`: packaged fixture validation results.
 
 When an older EXE is in use, set `QDD_RUST_OUTPUT_DIR` to an absolute independent
-version directory (for example `F:\aidol\qdd_agent_harness_project\apps\android-mcp-rust\build\windows\v43`)
+version directory (for example `F:\aidol\qdd_agent_harness_project\apps\android-mcp-rust\build\windows\v56`)
 and run `npm run size --workspace @qdd/android-mcp-rust` and `test:exe` with the
 same value. The default output stays unchanged and the running old version need
 not be stopped. Update a stdio MCP configuration to the new executable path to
 use that version.
+
+## Screen sharing is active, but the console cannot connect
+
+The phone screen source and device controller have separate connection addresses.
+Errors identify the failing role, target IP/port and original system reason.
+`os error 10061` means that target refused the connection; an active screen-sharing
+indicator alone does not establish that the computer's saved address is current.
+
+Use the error's connection-settings/discovery link, check the selected device,
+then save. Discovery does not save automatically or replay input. If only the
+controller is found, enter the screen URL shown in the phone App manually.
+Select the intended controller when several are found. After connection recovers,
+click the screen to resume control.
+
+A bare phone IP such as `192.168.1.20` uses port `8791`. Full `http://` /
+`https://` URLs retain their explicit or standard ports; saved URLs are not
+migrated. Reconnect retries the current configuration. After a Wi-Fi address
+change, rediscover and save the intended device. Recovering phone video does not
+clear an unresolved controller error or automatically resume keyboard/mouse input.
 
 ## Offline installation and legacy USB receiver
 
@@ -103,7 +122,7 @@ private settings, and includes build instructions and a per-file hash manifest.
 To audit an existing release and reproduce its source archive with Python 3.8+:
 
 ```powershell
-python tools/pack-transfer.py --artifact-dir build/windows/v47
+python tools/pack-transfer.py --artifact-dir build/windows/v56
 ```
 
 The tool checks ZIP filename/CRC, extracts to an empty temporary directory,
@@ -189,17 +208,26 @@ old replays. Identical text with two new IDs remains two intentional inputs. Thi
 does not identify arbitrary new-ID retries as old actions: observe uncertain
 outcomes instead of blindly repeating them.
 
-Text containing non-ASCII uses the updated ESP's encrypted BLE text channel and
-the phone App's QDD IME. The user must enable/select that IME and focus an editable
-field. Missing firmware/IME fails clearly, without substituting pinyin, ADB or
-network-based remote input. Validate the whole UTF-8 string, no NUL, at most 512B.
-`QDDTXT/1` checks the editor epoch, uploads contiguous chunks, and sends COMMIT
-once. Its queued ACK is not successful input. Only STATUS is polled for up to
-10 seconds until phone acceptance/rejection; PING and safety deadlines stay unchanged.
-Disconnect, cancellation, timeout or changed focus after commit reports
-`textTransfer.status:"uncertain"`, never automatic resubmission. `accepted` means
-the InputConnection API accepted the request; inspect the new real image and
-intended field to verify actual content.
+The console's **Send text** button and MCP text tools accept Chinese, emoji and mixed
+text. Non-ASCII text travels through encrypted ESP BLE to the selected **Device Chinese Input** IME,
+which submits it through the current input connection. In the phone App, select the current
+controller, enable and select the device IME once, then focus the target editable field. Keep
+that IME selected for continuous use. After switching to another keyboard, select the device
+IME again. No clipboard, accessibility service, or ADB input is used. Each request is limited
+to 512 UTF-8 bytes and must not contain NUL.
+
+`QDDTXT/1` explicitly checks `mode=ime` and the current editor epoch, then uses
+`BEGIN/DATA → COMMIT → STATUS`. BLE payloads use version 1. Clipboard receiver modes are
+rejected before text upload with an update/setup message; clipboard results cannot count as
+IME acceptance and no Ctrl+V is sent. COMMIT is submitted once. Lost acknowledgements,
+cancellation, or focus/link changes never trigger a replay or a replacement transaction.
+
+`accepted` means the current `InputConnection.commitText` accepted the text, **not that the
+target App displayed or saved it**. `insertionVerified` remains false. Inspect the real phone
+image before continuing, particularly after a timeout. The operator preserves entered text
+and distinguishes an unavailable IME, explicit rejection, and uncertain delivery. Initial
+IME enablement and selection require the user to confirm in Android system UI; the App does
+not silently change the system keyboard.
 
 ## Tests and migration scope
 

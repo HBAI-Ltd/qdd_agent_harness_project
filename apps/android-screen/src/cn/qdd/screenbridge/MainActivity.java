@@ -6,6 +6,7 @@ import android.app.AlertDialog;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothManager;
+import android.content.ComponentName;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.res.ColorStateList;
@@ -18,8 +19,10 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.SystemClock;
+import android.provider.Settings;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.inputmethod.InputMethodInfo;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.Button;
 import android.widget.LinearLayout;
@@ -44,11 +47,13 @@ public final class MainActivity extends Activity {
   private ScreenApplication app;
   private TextView status;
   private TextView endpoint;
+  private Button retryEndpoint;
   private Button start;
   private Button stop;
   private TextView setupGuide;
   private Button bluetooth;
   private TextView imeStatus;
+  private Button enableIme, selectIme, changeIme;
   private CaptureConsent consent;
   private final Runnable refresh = new Runnable() {
     @Override public void run() { update(); handler.postDelayed(this, 500); }
@@ -84,6 +89,8 @@ public final class MainActivity extends Activity {
     LinearLayout network = card(content, "内网连接地址");
     endpoint = label("", 15); endpoint.setPadding(0, dp(12), 0, 0); endpoint.setTextIsSelectable(true); network.addView(endpoint);
     TextView networkTip = label("手机、设备控制器和电脑需要连接同一局域网。", 13); networkTip.setTextColor(MUTED); networkTip.setPadding(0, dp(12), 0, 0); network.addView(networkTip);
+    retryEndpoint = button(network, "重试内网连接", false);
+    retryEndpoint.setOnClickListener(view -> { app.retryServer(); update(); });
 
     LinearLayout controller = card(content, "设备控制器");
     setupGuide = label("", 14); setupGuide.setTextColor(MUTED); setupGuide.setPadding(0, dp(12), 0, dp(4)); controller.addView(setupGuide);
@@ -96,15 +103,19 @@ public final class MainActivity extends Activity {
     button(calibration, "打开指针校准页", false).setOnClickListener(view -> startActivity(new Intent(this, PointerCalibrationActivity.class)));
 
     LinearLayout unicode = card(content, "设备中文输入");
-    TextView unicodeTip = label("中文和表情需要新版控制器固件，并由你在系统里启用、选择“设备中文输入”。文字只经所选控制器的蓝牙传入，不读取或保存输入内容。可随时切回原输入法。", 14);
+    TextView unicodeTip = label("首次使用：选择已配对控制器，启用并选择“设备中文输入”，再点击目标文本框。保持选中后无需反复设置；需要手动打字时可切回原键盘。中文和表情只经控制器蓝牙直接输入，不保存文字。发送后请查看实际结果，未确认时不要重复发送。", 14);
     unicodeTip.setTextColor(MUTED); unicodeTip.setPadding(0, dp(12), 0, 0); unicode.addView(unicodeTip);
     imeStatus = label("", 14); imeStatus.setTextColor(MUTED); imeStatus.setPadding(0, dp(12), 0, 0); unicode.addView(imeStatus);
-    button(unicode, "1. 选择已配对控制器", false).setOnClickListener(view -> chooseTextController());
-    button(unicode, "2. 打开系统输入法设置", false).setOnClickListener(view -> {
-      try { startActivity(new Intent(android.provider.Settings.ACTION_INPUT_METHOD_SETTINGS)); }
-      catch (RuntimeException unavailable) { Toast.makeText(this, "请在系统设置中手动启用设备中文输入", Toast.LENGTH_LONG).show(); }
+    button(unicode, "选择已配对控制器", false).setOnClickListener(view -> chooseTextController());
+    enableIme = button(unicode, "1. 首次启用设备输入法", false);
+    enableIme.setOnClickListener(view -> {
+      try { startActivity(new Intent(Settings.ACTION_INPUT_METHOD_SETTINGS)); }
+      catch (RuntimeException unavailable) { Toast.makeText(this, "请在系统设置的输入法管理中启用“设备中文输入”", Toast.LENGTH_LONG).show(); }
     });
-    button(unicode, "3. 选择设备中文输入", false).setOnClickListener(view -> getSystemService(InputMethodManager.class).showInputMethodPicker());
+    selectIme = button(unicode, "2. 选择设备输入法", true);
+    selectIme.setOnClickListener(view -> showInputPicker());
+    changeIme = button(unicode, "切换回其他键盘", false);
+    changeIme.setOnClickListener(view -> showInputPicker());
 
     LinearLayout guide = card(content, "如何操作");
     TextView details = label("电脑打开设备操作台.exe，点“自动查找”连接设备。\n\n点击实时画面开始操作，按 Esc 返回电脑。\n\n紧急情况：在设备控制器上选择“紧急停止”并按确认。主界面默认选中急停；恢复时选择“取消急停”并确认。", 14);
@@ -185,6 +196,32 @@ public final class MainActivity extends Activity {
     if (!text.contentEquals(view.getText())) view.setText(text);
   }
 
+  private void showInputPicker() {
+    try { getSystemService(InputMethodManager.class).showInputMethodPicker(); }
+    catch (RuntimeException unavailable) { Toast.makeText(this, "请使用系统键盘切换按钮选择输入法", Toast.LENGTH_LONG).show(); }
+  }
+  private void updateInputSetup() {
+    String name = getSharedPreferences("screen-source", MODE_PRIVATE).getString(ImeGattClient.NAME, "尚未选择控制器");
+    boolean controllerSelected = BluetoothAdapter.checkBluetoothAddress(getSharedPreferences("screen-source", MODE_PRIVATE).getString(ImeGattClient.ADDRESS, ""));
+    try {
+      ComponentName own = new ComponentName(this, QddInputMethodService.class);
+      InputMethodManager manager = getSystemService(InputMethodManager.class);
+      boolean enabled = false;
+      for (InputMethodInfo method : manager.getEnabledInputMethodList()) {
+        if (own.equals(ComponentName.unflattenFromString(method.getId()))) { enabled = true; break; }
+      }
+      String current = Settings.Secure.getString(getContentResolver(), Settings.Secure.DEFAULT_INPUT_METHOD);
+      boolean selected = current != null && own.equals(ComponentName.unflattenFromString(current));
+      ImeSetupState setup = ImeSetupState.of(controllerSelected, enabled, selected, app.imeStatus);
+      setLabel(imeStatus, name + "\n" + setup.message);
+      setLabel(enableIme, enabled ? "1. 已启用设备输入法" : "1. 首次启用设备输入法"); enableIme.setEnabled(setup.enableAction);
+      setLabel(selectIme, selected ? "2. 已选择设备输入法" : "2. 选择设备输入法"); selectIme.setEnabled(setup.selectAction);
+      changeIme.setVisibility(selected ? View.VISIBLE : View.GONE);
+    } catch (RuntimeException unavailable) {
+      setLabel(imeStatus, name + "\n无法读取输入法状态，请在系统设置中检查“设备中文输入”。");
+      enableIme.setEnabled(true); selectIme.setEnabled(true); changeIme.setVisibility(View.GONE);
+    }
+  }
   private void applyConfiguration(Intent intent) {
     try {
       if (intent != null && intent.hasExtra("espSetupUrl")) app.boardSetup().configure(intent.getStringExtra("espSetupUrl"));
@@ -213,13 +250,14 @@ public final class MainActivity extends Activity {
         : consent.isWaiting() ? "等待系统授权" : app.frames.status());
     start.setEnabled(!active && !app.frames.isStopping() && !consent.isBusy(SystemClock.elapsedRealtime()) && app.serverError() == null); stop.setEnabled(active);
     setLabel(endpoint, app.wifiAddress() == null ? "暂未连接 Wi-Fi，请先连接电脑所在的局域网。" : "http://" + app.wifiAddress() + ":" + app.port());
+    retryEndpoint.setVisibility(app.serverError() != null && app.wifiAddress() != null ? View.VISIBLE : View.GONE);
     setLabel(setupGuide, app.boardSetup().guide());
     setLabel(bluetooth, app.boardSetup().bluetoothReady() ? "查看蓝牙连接" : "连接 " + app.boardSetup().deviceName());
-    String selected = getSharedPreferences("screen-source", MODE_PRIVATE).getString(ImeGattClient.NAME, "尚未选择控制器");
-    setLabel(imeStatus, selected + "\n" + app.imeStatus);
+    updateInputSetup();
   }
 
   private void requestCapture() {
+    app.retryServer();
     boolean notificationsMissing = Build.VERSION.SDK_INT >= 33
         && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED;
     CaptureConsent.Step next = consent.request(app.frames.isActive(), app.frames.isStopping(), app.serverError() == null,

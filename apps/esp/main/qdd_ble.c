@@ -196,7 +196,7 @@ static int text_access(uint16_t connection, uint16_t handle,
   if (context->op != BLE_GATT_ACCESS_OP_WRITE_CHR || argument == NULL) return BLE_ATT_ERR_WRITE_NOT_PERMITTED;
   const size_t length = OS_MBUF_PKTLEN(context->om);
   uint8_t frame[15];
-  if ((length != 6 && length != 15) || ble_hs_mbuf_to_flat(context->om, frame, length, NULL) != 0 || frame[0] != 1) {
+  if ((length != 6 && length != 15) || ble_hs_mbuf_to_flat(context->om, frame, length, NULL) != 0 || (frame[0] != 1 && frame[0] != 2)) {
     return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
   }
   if ((frame[1] == 0x81 || frame[1] == 0x83) && length == 6) {
@@ -205,22 +205,27 @@ static int text_access(uint16_t connection, uint16_t handle,
     portENTER_CRITICAL(&s_lock);
     const bool allowed = frame[1] != 0x81 || s_text_subscribed;
     if (allowed) {
+      if (!s_text_neutral && (frame[1] != 0x81 || epoch != s_text_events.editor_epoch ||
+          frame[0] != s_text_events.receiver_version)) s_text_cancelled = true;
       s_text_events.editor_changed = true;
       s_text_events.ready = frame[1] == 0x81;
       s_text_events.editor_epoch = epoch;
+      s_text_events.receiver_version = frame[0];
     }
     portEXIT_CRITICAL(&s_lock);
     return allowed ? 0 : BLE_ATT_ERR_UNLIKELY;
   }
-  if (frame[1] != 0x82 || length != 15 || frame[10] > 2) return BLE_ATT_ERR_VALUE_NOT_ALLOWED;
+  if (frame[1] != 0x82 || length != 15 || frame[10] > (frame[0] == 2 ? 3 : 2)) return BLE_ATT_ERR_VALUE_NOT_ALLOWED;
   const uint64_t id = text_little(frame + 2, 8);
   const uint32_t epoch = (uint32_t)text_little(frame + 11, 4);
   if (!id || !epoch) return BLE_ATT_ERR_VALUE_NOT_ALLOWED;
   portENTER_CRITICAL(&s_lock);
+  if (frame[0] != s_text_events.receiver_version) { portEXIT_CRITICAL(&s_lock); return BLE_ATT_ERR_VALUE_NOT_ALLOWED; }
   s_text_events.ack_received = true;
   s_text_events.ack_id = id;
   s_text_events.ack_epoch = epoch;
   s_text_events.ack_status = frame[10];
+  s_text_events.ack_version = frame[0];
   portEXIT_CRITICAL(&s_lock);
   return 0;
 }
@@ -639,6 +644,15 @@ uint16_t qdd_ble_text_mtu(void) {
   return connection == BLE_HS_CONN_HANDLE_NONE ? 23 : ble_att_mtu(connection);
 }
 
+bool qdd_ble_text_current(uint8_t version, uint32_t epoch) {
+  portENTER_CRITICAL(&s_lock);
+  const bool current = s_status.connected && s_status.encrypted && s_status.bonded && s_status.key_size == 16 &&
+      s_text_subscribed && s_text_events.ready && s_text_events.receiver_version == version &&
+      s_text_events.editor_epoch == epoch;
+  portEXIT_CRITICAL(&s_lock);
+  return current;
+}
+
 static void text_send_failed(uint32_t token) {
   portENTER_CRITICAL(&s_lock);
   if (s_text_indication_busy && s_text_flight_token == token) {
@@ -664,7 +678,8 @@ static void text_send_event(struct ble_npl_event *event) {
   bool (*allowed)(void) = s_text_allowed;
   memcpy(bytes, s_text_staging, length);
   const bool secure = s_text_subscribed && s_status.connected && s_status.encrypted &&
-      s_status.bonded && s_status.key_size == 16 && !s_text_cancelled;
+      s_status.bonded && s_status.key_size == 16 && !s_text_cancelled &&
+      (s_text_neutral || (s_text_events.ready && bytes[0] == s_text_events.receiver_version));
   s_text_requested = false;
   s_text_length = 0; memset(s_text_staging, 0, sizeof(s_text_staging));
   portEXIT_CRITICAL(&s_lock);
@@ -700,8 +715,12 @@ qdd_ble_text_send_t qdd_ble_text_indicate(const uint8_t *bytes, size_t length,
   if (!s_status.connected || !s_status.encrypted || !s_status.bonded || s_status.key_size != 16 ||
       !s_text_subscribed || !s_text_handle) { portEXIT_CRITICAL(&s_lock); return QDD_BLE_TEXT_FAILED; }
   if (s_text_indication_busy) { portEXIT_CRITICAL(&s_lock); return QDD_BLE_TEXT_BUSY; }
+  const bool neutral = length == 10 && (bytes[0] == 1 || bytes[0] == 2) && bytes[1] == 4;
+  if (!neutral && (!s_text_events.ready || bytes[0] != s_text_events.receiver_version)) {
+    portEXIT_CRITICAL(&s_lock); return QDD_BLE_TEXT_FAILED;
+  }
   s_text_indication_busy = s_text_requested = true; s_text_cancelled = false;
-  s_text_neutral = length == 10 && bytes[0] == 1 && bytes[1] == 4;
+  s_text_neutral = neutral;
   if (!++s_text_next_token) ++s_text_next_token;
   *token = s_text_flight_token = s_text_next_token;
   s_text_deadline = deadline_ms; s_text_allowed = allowed;

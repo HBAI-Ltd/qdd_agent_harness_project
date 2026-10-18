@@ -126,6 +126,7 @@ export function initDownloadWizard(document) {
   const note = document.getElementById("install-download-note");
   // Keep the complete, usable HTML guide if any required element is missing.
   if ([...panes, previous, next, counter, navigation, windows, android, note].some(node => !node)) return null;
+  const platformLinks = [...document.querySelectorAll("[data-install-platform]")];
   let step = 1, busy = false, platform = root.getAttribute("data-platform") === "windows" ? "windows" : "android";
   const render = () => {
     panes.forEach((pane, index) => { pane.hidden = index !== step - 1; });
@@ -136,11 +137,15 @@ export function initDownloadWizard(document) {
     next.textContent = step === 2 ? "已下载，下一步" : "下一步";
     windows.hidden = platform !== "windows";
     android.hidden = platform !== "android";
+    for (const link of platformLinks) {
+      if (busy) link.setAttribute("aria-disabled", "true"); else link.removeAttribute("aria-disabled");
+    }
   };
   previous.addEventListener("click", () => { if (!busy && step > 1) { step--; render(); } });
   next.addEventListener("click", () => { if (!busy && step < 3) { step++; render(); } });
-  for (const link of document.querySelectorAll("[data-install-platform]")) {
-    link.addEventListener("click", () => {
+  for (const link of platformLinks) {
+    link.addEventListener("click", event => {
+      if (busy) { event.preventDefault(); return; }
       platform = link.getAttribute("data-install-platform") === "windows" ? "windows" : "android";
       note.textContent = "已交给浏览器下载。请在下载列表确认文件，再点击“已下载，下一步”。";
       render();
@@ -149,7 +154,10 @@ export function initDownloadWizard(document) {
   }
   navigation.hidden = counter.hidden = false;
   render();
-  return { setBusy(value) { busy = !!value; render(); } };
+  return {
+    setBusy(value) { busy = !!value; render(); },
+    setPlatform(value) { if (!busy) { platform = value === "windows" ? "windows" : "android"; render(); } }
+  };
 }
 
 function init() {
@@ -169,6 +177,7 @@ function init() {
   const begin = async event => {
     event?.preventDefault(); if (active) return;
     active=new AbortController(); retry.hidden=true; cancel.hidden=false; progress.hidden=false;
+    wizard?.setPlatform("windows");
     wizard?.setBusy(true);
     links.forEach(link=>link.setAttribute("aria-disabled","true")); status.textContent="正在连接设备…";
     try {

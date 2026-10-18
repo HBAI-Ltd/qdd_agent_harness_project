@@ -8,7 +8,7 @@ import tempfile
 import unittest
 ROOT = Path(__file__).resolve().parents[1]
 def function(source: str, name: str) -> str:
-    match = re.search(rf"(?m)^(?:static\s+)?(?:void|bool|qdd_ble_text_send_t)\s+{name}\s*\([^;]*?\)\s*\{{", source)
+    match = re.search(rf"(?m)^(?:static\s+)?(?:void|bool|int|uint64_t|qdd_ble_text_events_t|qdd_ble_text_send_t)\s+{name}\s*\([^;]*?\)\s*\{{", source)
     if not match:
         raise AssertionError(f"missing production function {name}")
     depth = 1
@@ -22,18 +22,19 @@ class TextIntegration(unittest.TestCase):
         source = (ROOT / "main/qdd_main.c").read_text(encoding="utf-8")
         with tempfile.TemporaryDirectory(prefix="qdd-text-host-") as temporary:
             directory = Path(temporary)
-            (directory / "qdd_text_main_extract.h").write_text(function(source,"text_fast_allowed") + "\n" + function(source,"sync_text") + "\n" + function(source,"on_text_line"),encoding="utf-8")
+            names = ("report", "text_fast_allowed", "text_release_paste", "text_before_hid", "paste_report", "text_batch_ready", "sync_text", "sync_safety", "on_text_line", "on_line")
+            (directory / "qdd_text_main_extract.h").write_text("\n".join(function(source,name) for name in names),encoding="utf-8")
             executable = directory / ("test.exe" if os.name == "nt" else "test")
             subprocess.run([os.environ.get("CC","cc"),"-std=c11","-Wall","-Wextra","-Werror",
                 "-I"+str(ROOT/"main"),"-I"+str(ROOT/"tests/qdd_wifi_host"),"-I"+str(directory),
                 str(ROOT/"tests/test_qdd_text_main.c"),str(ROOT/"main/qdd_text.c"),str(ROOT/"main/qdd_hid.c"),
-                str(ROOT/"main/qdd_control.c"),"-o",str(executable)],check=True)
+                str(ROOT/"main/qdd_control.c"),str(ROOT/"main/qdd_driver_protocol.c"),str(ROOT/"main/qdd_setup_model.c"),str(ROOT/"main/qdd_net_config.c"),"-o",str(executable)],check=True)
             subprocess.run([str(executable)],check=True)
     def test_actual_ble_public_queue_and_service_changed_slot(self):
         source = (ROOT/"main/qdd_ble.c").read_text(encoding="utf-8")
         with tempfile.TemporaryDirectory(prefix="qdd-text-ble-") as temporary:
             directory = Path(temporary)
-            bodies = [function(source,name) for name in ("text_send_failed","text_send_event","qdd_ble_text_cancel_pending","qdd_ble_text_indicate")]
+            bodies = [function(source,name) for name in ("text_little","text_access","qdd_ble_text_events","qdd_ble_text_current","text_send_failed","text_send_event","qdd_ble_text_cancel_pending","qdd_ble_text_indicate")]
             (directory/"qdd_text_ble_extract.h").write_text("\n".join(bodies),encoding="utf-8")
             start = source.index("    case BLE_GAP_EVENT_NOTIFY_TX: {")
             end = source.index("    case BLE_GAP_EVENT_DISCONNECT:",start)
@@ -60,7 +61,15 @@ class TextIntegration(unittest.TestCase):
     def test_route_and_build_are_integrated(self):
         main = (ROOT/"main/qdd_main.c").read_text(encoding="utf-8")
         self.assertIn('strncmp(line, "QDDTXT/1 ", 9)',main)
-        self.assertIn("sync_text();",function(main,"sync_safety"))
+        self.assertIn("sync_text(start_paste);",function(main,"sync_safety"))
+        routing = function(main,"on_line")
+        self.assertLess(routing.index("text_before_hid(command.op)"),routing.index("qdd_hid_execute(&s_state"))
+        self.assertNotIn("sync_safety(true)",routing)
+        self.assertEqual(routing.count("sync_safety(false)"),2)
+        loop = function(main,"app_main")
+        self.assertEqual(loop.count("sync_safety(true)"),1)
+        self.assertGreater(loop.index("sync_safety(true)"),loop.index("qdd_stream_feed(&s_tcp_stream"))
+        self.assertGreater(loop.index("sync_safety(true)"),loop.index("qdd_stream_feed(&s_usb_stream"))
         self.assertIn('"qdd_text.c"',(ROOT/"main/CMakeLists.txt").read_text(encoding="utf-8"))
         header = (ROOT/"main/qdd_hid.h").read_text(encoding="utf-8")
         self.assertIn("#define QDD_LINE_MAX 128",header)

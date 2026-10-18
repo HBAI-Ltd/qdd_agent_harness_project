@@ -45,9 +45,24 @@ Cargo 包不需要加入 TypeScript 项目引用。
 - `build/windows/exe-smoke.json`：打包程序的离线夹具验证结果。
 
 若旧 EXE 正在使用，设置绝对路径环境变量 `QDD_RUST_OUTPUT_DIR` 指向独立版本目录
-（例如 `F:\aidol\qdd_agent_harness_project\apps\android-mcp-rust\build\windows\v43`），
+（例如 `F:\aidol\qdd_agent_harness_project\apps\android-mcp-rust\build\windows\v56`），
 再运行 `npm run size --workspace @qdd/android-mcp-rust` 与 `test:exe`，两者使用同一目录。
 默认输出路径不变，无需停止用户正在运行的旧版本；更新 stdio MCP 配置时须切换到新版路径。
+
+## 手机正在投屏，但操作台连接失败
+
+手机投屏和设备控制器使用各自的连接地址。错误提示会写明失败的是“手机画面”还是
+“设备控制器”，并显示目标 IP、端口和原始系统原因。`os error 10061` 表示该目标拒绝
+连接，单凭手机显示“正在投屏”不能确认电脑保存的地址仍正确。
+
+点击错误提示下的“检查连接设置 / 重新查找”，核对当前设备后再点保存。
+查找不会自动保存或重发输入；若只找到控制器，可手动填写手机 App 显示的投屏地址。
+存在多块控制器时须选择本次要连接的设备。连接恢复后，再点击画面继续控制。
+
+只填手机 IP（例如 `192.168.1.20`）时，默认使用投屏端口 `8791`；完整
+`http://` / `https://` 网址仍使用其显式端口或标准端口，不迁移已有保存地址。
+网页“重新连接”重试当前配置，换 Wi-Fi 后地址变化时需重新查找并保存。
+画面恢复不会清除尚未恢复的控制器错误，也不会自动恢复键鼠输入。
 
 ## 离线安装与兼容 USB 接收页
 
@@ -81,7 +96,7 @@ node apps/android-mcp-rust/tools/test-usb-receiver.mjs
 使用 Python 3.8+ 审计已有版本并复现源码归档：
 
 ```powershell
-python tools/pack-transfer.py --artifact-dir build/windows/v47
+python tools/pack-transfer.py --artifact-dir build/windows/v56
 ```
 
 工具核对 ZIP 文件名/CRC，在空临时目录解压，验证 exact EXE 哈希并执行 `--self-test`，
@@ -148,13 +163,21 @@ ASCII 文字、单键、点击及 Home/Back 使用短按脉冲：按下真正写
 工具调用 ID，满后关闭并重建会话，不淘汰旧记录再放行重放。两个新 ID 的相同文字仍是
 两次有意输入；该机制无法把任意新 ID 的重试自动识别为旧动作。结果不确定时先观察，不能盲重试。
 
-包含非 ASCII 的文字走新版 ESP 的加密 BLE 文本通道和手机投屏 App 的 QDD 输入法。
-用户须自行启用并选择该输入法，再聚焦可编辑输入框；缺少对应固件/IME 会明确拒绝，
-不会把拼音当中文，也不回退到 ADB 或网络远程输入。整串须为合法 UTF-8、无 NUL，最多 512B。
-`QDDTXT/1` 先查编辑 epoch，再按连续 offset 分块，COMMIT 只发送一次；其 queued ACK
-不代表已输入，随后仅查询 STATUS，最多 10s 等待手机 accepted/rejected，原 PING 和安全截止不变。
-断线、取消、超时或提交后焦点改变返回 `textTransfer.status:"uncertain"`，不自动再提交。
-`accepted` 仅表示手机 InputConnection API 接受，还要检查新的真实画面与目标输入框内容。
+操作台“发送文字”按钮和 MCP 文字工具支持中文、表情及混合文字。
+包含非 ASCII 的文字通过 ESP 加密 BLE 交给手机的“设备中文输入”，由当前输入连接直接提交。
+首次在手机投屏 App 中选择当前控制器，启用并选中“设备中文输入”，再点选目标 App 的可编辑
+输入框。保持该输入法选中即可连续使用；切换到其他键盘后，需要重新选择设备输入法。
+不使用剪贴板、无障碍服务或 ADB 输入。每次最多 512 个 UTF-8 字节，不允许 NUL。
+
+`QDDTXT/1` 显式检查 `mode=ime` 和当前编辑器 epoch，使用
+`BEGIN/DATA → COMMIT → STATUS`。BLE 使用版本 1；新版剪贴板接收器模式会在上传正文前
+被拒绝并提示更新/选择输入法，不会把剪贴板结果当作输入成功，也不发送 Ctrl+V。
+COMMIT 只提交一次；确认丢失、取消或焦点/连接变化时不重发，不能用新事务盲目重试。
+
+`accepted` 表示当前 `InputConnection.commitText` 接受了文字，**不证明目标 App 已显示或保存**；
+`insertionVerified` 仍为 false。请检查真实画面后继续，超时尤其不能重复点击发送。
+网页保留输入内容，区分输入法未就绪、明确拒绝与结果不确定。输入法的首次启用和选择
+必须由用户在 Android 系统界面确认，普通 App 不会静默修改系统键盘。
 
 ## 测试与迁移范围
 

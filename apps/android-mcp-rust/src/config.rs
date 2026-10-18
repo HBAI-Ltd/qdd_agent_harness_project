@@ -86,12 +86,19 @@ impl Config {
       bail!("连接配置格式不正确。");
     }
     let mut screen = field(value, "ANDROID_SCREEN_URL", "").replace('：', ":");
+    // Bare IP input uses the phone app's port. Full URLs also represent saved
+    // configurations, so retain HTTP/HTTPS defaults and explicit custom ports.
+    let implicit_screen_port = !screen.contains("://")
+      && !screen.split('/').next().unwrap_or_default().contains(':');
     if !screen.contains("://") {
       screen = format!("http://{screen}");
     }
-    let endpoint = Endpoint::parse(&screen).context("请填写手机投屏 App 显示的内网地址")?;
+    let mut endpoint = Endpoint::parse(&screen).context("请填写手机投屏 App 显示的内网地址")?;
     if endpoint.path != "/" {
       bail!("手机投屏地址不应包含页面路径或查询参数。");
+    }
+    if implicit_screen_port {
+      endpoint.port = 8791;
     }
     let (esp_host, esp_tcp_port) = normalize_controller(
       &field(value, "ESP_HOST", ""),
@@ -226,6 +233,37 @@ pub fn environment_defaults() -> Value {
 #[cfg(test)]
 mod tests {
   use super::*;
+  #[test]
+  fn phone_address_defaults_only_bare_addresses_and_roundtrips() {
+    for (address, expected, expected_port) in [
+      ("192.168.1.2", "http://192.168.1.2:8791", 8791),
+      (" 192.168.1.2/ ", "http://192.168.1.2:8791", 8791),
+      ("192.168.1.2:8792", "http://192.168.1.2:8792", 8792),
+      ("192.168.1.2：8791/", "http://192.168.1.2:8791", 8791),
+      ("192.168.1.2:80", "http://192.168.1.2", 80),
+      ("http://192.168.1.2", "http://192.168.1.2", 80),
+      ("http://192.168.1.2/", "http://192.168.1.2", 80),
+      ("http://192.168.1.2:80/", "http://192.168.1.2", 80),
+      ("http://192.168.1.2:8791/", "http://192.168.1.2:8791", 8791),
+      ("https://192.168.1.2", "https://192.168.1.2", 443),
+      ("https://192.168.1.2:443/", "https://192.168.1.2", 443),
+      ("https://192.168.1.2:9443/", "https://192.168.1.2:9443", 9443),
+    ] {
+      let config = Config::normalize(&json!({
+        "ANDROID_SCREEN_URL": address,
+        "ESP_HOST": "192.168.1.3"
+      })).unwrap();
+      assert_eq!(config.screen_url, expected, "input {address:?}");
+      assert_eq!(Endpoint::parse(&config.screen_url).unwrap().port, expected_port);
+      let saved = serde_json::to_vec(&config.value()).unwrap();
+      let loaded = Config::normalize(&serde_json::from_slice(&saved).unwrap()).unwrap();
+      assert_eq!(loaded.value(), config.value(), "saved input {address:?}");
+    }
+    for address in ["", "8.8.8.8", "192.168.1.2:0", "192.168.1.2:",
+      "192.168.1.2/path", "http://192.168.1.2/?q=1", "192.168.1.2/#fragment"] {
+      assert!(Config::normalize(&json!({"ANDROID_SCREEN_URL":address,"ESP_HOST":"192.168.1.3"})).is_err(), "input {address:?}");
+    }
+  }
   #[test]
   fn settings_normalize_pasted_board_page_and_reject_public_phone() {
     let value = json!({"ANDROID_SCREEN_URL":"192.168.1.2:8791","ESP_HOST":"http://192.168.1.3:3334/","unknown":"ignored"});

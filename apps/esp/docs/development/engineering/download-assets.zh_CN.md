@@ -17,8 +17,8 @@ Chrome/Edge 本地打开；点击选择设备才开始接收。接收时禁止�
 
 已有 `assets` 分区的设备继续只使用该资源；分区数据损坏时明确报错。
 没有 `assets` 的板（例如当前 COM5 factory 布局）使用固件 Flash 内置 ZIP 回退。
-`tools/prepare_desktop_zip.py` 核对 v50 清单、ZIP 内容及解压 EXE 身份。
-该回退增加 943,153 字节 Flash，共用原 2 KiB 读写/校验缓存，不改分区、不将整包
+`tools/prepare_desktop_zip.py` 核对 v59 清单、ZIP 内容及解压 EXE 身份。
+该回退内置的 ZIP 大小以对应清单为准，共用原 2 KiB 读写/校验缓存，不改分区、不将整包
 放进 RAM。最终应用仍须满足目标设备实际应用分区容量。
 
 ## 浏览器 USB 接收页构建
@@ -91,9 +91,9 @@ EXE 附件文件名及解码后 EXE 哈希，ESP 不解压。这与 `assets` 中
 清单执行：
 
 ```powershell
-$driverZip = (Resolve-Path -LiteralPath '../android-mcp-rust/build/windows/v47/设备操作台.zip').Path
-python tools/pack_download_assets.py create --zip $driverZip --exe-manifest ../android-mcp-rust/build/windows/v47/manifest.json --partition-table build/target-partition-table.bin --output build/driver-assets.bin
-python tools/pack_download_assets.py verify --exe-manifest ../android-mcp-rust/build/windows/v47/manifest.json --partition-table build/target-partition-table.bin --output build/driver-assets.bin
+$driverZip = (Resolve-Path -LiteralPath '../android-mcp-rust/build/windows/v59/设备操作台.zip').Path
+python tools/pack_download_assets.py create --zip $driverZip --exe-manifest ../android-mcp-rust/build/windows/v59/manifest.json --partition-table build/target-partition-table.bin --output build/driver-assets.bin
+python tools/pack_download_assets.py verify --exe-manifest ../android-mcp-rust/build/windows/v59/manifest.json --partition-table build/target-partition-table.bin --output build/driver-assets.bin
 ```
 
 `create --exe <path>` 仍可生成 v1，`--exe` 与 `--zip` 互斥；`verify` 自动识别

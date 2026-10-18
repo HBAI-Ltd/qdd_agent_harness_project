@@ -37,6 +37,19 @@ def archive(contents=EXE, *, name=NAME, method=8, flags=0x800, external=0,
 
 
 class ZipAuditTests(unittest.TestCase):
+    def test_source_archive_preserves_operator_regression_fixtures(self):
+        entries = PACK.source_entries()
+        names = {"apps/android-mcp-rust/tools/fixtures/" + filename for filename in
+                 ("operator-text-cases.js", "operator-recovery-cases.js")}
+        for name in names:
+            self.assertTrue(name in entries, "Source archive omitted an operator regression fixture")
+            expected = (PACK.REPO / name).read_bytes()
+            self.assertEqual(entries[name], expected)
+            with zipfile.ZipFile(io.BytesIO(PACK.deterministic_zip(entries))) as archive:
+                self.assertEqual(archive.read(name), expected)
+        self.assertEqual({entry for entry in entries
+                          if entry.startswith("apps/android-mcp-rust/tools/") and entry.endswith(".js")}, names)
+
     def test_source_allowlist_includes_only_native_helper_sources(self):
         entries = PACK.source_entries()
         prefix = "apps/android-mcp-rust/tools/usb-driver/"

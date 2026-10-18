@@ -132,7 +132,7 @@
         },
         "text": {
           "type": "string",
-          "description": "ASCII uses HID. Non-ASCII uses the selected QDD phone IME over encrypted ESP BLE, at most 512 UTF-8 bytes, never NUL. Focus the field first. Uncertain delivery must not be resubmitted blindly."
+          "description": "ASCII uses HID. Non-ASCII uses the selected Device Chinese Input IME over encrypted ESP BLE, at most 512 UTF-8 bytes, never NUL. Select the current controller in the phone App, enable and select the device IME once, then focus the target field. Keep it selected for continuous use. No accessibility or clipboard. IME acceptance is not verified insertion; inspect the returned image. Uncertain delivery must not be resubmitted blindly."
         },
         "x": {
           "type": "integer",
@@ -568,13 +568,13 @@
   },
   {
     "name": "android_type",
-    "description": "Type into the focused field once. ASCII uses short HID key pulses whose neutral release does not wait for the press ACK. Text containing non-ASCII uses the updated ESP encrypted BLE text channel and selected QDD phone IME (maximum 512 UTF-8 bytes, no NUL). It sends COMMIT once, then only polls status until the phone accepts or rejects it. Queued is not success; cancellation or timeout after COMMIT is uncertain and must not be blindly resubmitted. Accepted means InputConnection API accepted, requiring screenshot verification. Missing firmware/IME fails clearly without typing pinyin as Chinese.",
+    "description": "Type into the focused field once. ASCII uses short HID pulses. Non-ASCII uses the user-selected Device Chinese Input IME over encrypted ESP BLE (maximum 512 UTF-8 bytes, no NUL). In the phone App select the current controller, enable and select the device IME once, then focus an editable field. Keep it selected for continuous use; switching away requires selecting it again. No accessibility or clipboard. BEGIN/DATA uploads one transaction; COMMIT submits once and only STATUS is polled while waiting. accepted confirms the InputConnection accepted the text, not target display or saving; insertionVerified stays false. Inspect a new screenshot. Clipboard modes are rejected before uploading text. Cancellation, lost ACK or timeout never replays input: observe first and never blindly resubmit.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "text": {
           "type": "string",
-          "description": "ASCII text/tabs/newlines, or non-ASCII UTF-8 up to 512 bytes via the selected QDD IME. NUL is forbidden."
+          "description": "ASCII text/tabs/newlines, or non-ASCII UTF-8 up to 512 bytes via the selected device IME and encrypted ESP BLE. NUL is forbidden. Inspect the target field before any intentional repeat."
         }
       },
       "required": [

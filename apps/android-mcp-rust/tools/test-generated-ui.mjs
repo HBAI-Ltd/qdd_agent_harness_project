@@ -12,6 +12,7 @@ const prepared = await prepareAssets();
 for (const folder of ["assets", "tests", "src"]) await mkdir(join(output, folder), { recursive: true });
 for (const [name, bytes] of prepared.assets) await writeFile(join(output, "assets", name), bytes);
 await writeFile(join(output, "src/http.ts"), await readFile(join(nodeRoot, "src/http.ts")));
+await writeFile(join(output, "tests/settings-fixture.mjs"), await readFile(join(ROOT, "tools/settings-fixture.mjs")));
 for (const name of ["operator.test.mjs", "screen-channel.test.mjs"]) {
   let source = await readFile(join(nodeRoot, "tests", name), "utf8");
   if (name === "operator.test.mjs") {
@@ -20,9 +21,28 @@ for (const name of ["operator.test.mjs", "screen-channel.test.mjs"]) {
     const old = "body\\.remote-active, body\\.remote-active";
     assert.equal(source.split(old).length, 2);
     source = source.replace(old, "body\\.remote-active,\\s*body\\.remote-active");
+    // Extend the shared full-page fixture only for Rust's Unicode response
+    // contract. Production assets still come exclusively from this workspace.
+    const responseHook = '    return new Response(JSON.stringify({ jsonrpc: "2.0", id: message.id, result }), { headers });';
+    assert.equal(source.split(responseHook).length, 2);
+    const fixtureHook = "function fixture(runtimeVersion = serverRuntimeVersion, options = {}) {";
+    assert.equal(source.split(fixtureHook).length, 2);
+    source = source.replace(fixtureHook, fixtureHook + "\n  const typeResponse = options.typeResponse, toolResponse = options.toolResponse;");
+    source = source.replace(responseHook, '    if (name === "android_type" && typeResponse) result = await typeResponse(args);\n    if (toolResponse) result = await toolResponse(name, args) ?? result;\n' + responseHook);
+    const domHook = "    getElementById: element,";
+    assert.equal(source.split(domHook).length, 2);
+    source = source.replace(domHook, domHook + '\n    createElement(tagName) { return { tagName: tagName.toUpperCase(), hidden: false, textContent: "" }; },');
+    const appendHook = "      getBoundingClientRect() { layoutReads++; return bounds; },";
+    assert.equal(source.split(appendHook).length, 2);
+    source = source.replace(appendHook, '      append(child) { if (child.id) elements.set(child.id, child); },\n' + appendHook);
+    source = source.replace("DataView, TextDecoder, Blob", "DataView, TextDecoder, TextEncoder, Blob");
+    source = source.replace('    videoError() { videos.at(-1).emit("error"); },',
+      '    videoError() { videos.at(-1).emit("error"); },\n    videoUnavailable(message) { videos.at(-1).emit("unavailable", { message }); },');
+    source += "\n" + await readFile(join(ROOT, "tools", "fixtures", "operator-text-cases.js"), "utf8");
+    source += "\n" + await readFile(join(ROOT, "tools", "fixtures", "operator-recovery-cases.js"), "utf8");
   }
   await writeFile(join(output, "tests", name), source);
 }
-const child = spawn(process.execPath, ["--test", join(output, "tests/operator.test.mjs"), join(output, "tests/screen-channel.test.mjs")], { stdio: "inherit", windowsHide: true });
+const child = spawn(process.execPath, ["--test", ...process.argv.slice(2), join(output, "tests/operator.test.mjs"), join(output, "tests/screen-channel.test.mjs")], { stdio: "inherit", windowsHide: true });
 child.once("error", (error) => { console.error(error); process.exitCode = 1; });
 child.once("exit", (code) => { process.exitCode = code ?? 1; });

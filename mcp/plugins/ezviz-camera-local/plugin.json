@@ -1,0 +1,37 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "ezviz-camera-local",
+  "version": "0.1.0",
+  "description": "通过本机萤石控制台接入本人开放平台应用，查询设备与录像、保存实际截图并执行用户要求的短时云台操作。",
+  "author": {
+    "name": "本地个人工具"
+  },
+  "keywords": [
+    "萤石",
+    "EZVIZ",
+    "本地",
+    "摄像头",
+    "录像"
+  ],
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "萤石云（本地）",
+        "shortDescription": "独立萤石接入、录像与持久化图片采集",
+        "longDescription": "连接本机127.0.0.1:8791的萤石服务。应用凭据只在本地网页配置，提供设备、实时预览、云/SD录像和本地图片/视频保存。尚无真实设备联调结果，加密流需要后续EZOPEN播放器集成。",
+        "developerName": "本地个人工具",
+        "category": "Productivity",
+        "capabilities": [
+          "Read",
+          "Write"
+        ],
+        "defaultPrompt": [
+          "列出我授权的萤石摄像头",
+          "查询选定萤石摄像头今天的录像",
+          "按1fps保存选定萤石摄像头的30秒图片"
+        ],
+        "brandColor": "#C68B4C"
+      }
+    }
+  }
+}

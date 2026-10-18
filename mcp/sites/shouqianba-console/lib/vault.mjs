@@ -1,0 +1,9 @@
+import {spawn} from 'node:child_process';
+import {readFile,writeFile,mkdir,rename,rm} from 'node:fs/promises';
+import {dirname} from 'node:path';
+const encrypt='$text=[Console]::In.ReadToEnd();$secure=ConvertTo-SecureString -String $text -AsPlainText -Force;[Console]::Out.Write((ConvertFrom-SecureString $secure))';
+const decrypt='$secure=ConvertTo-SecureString ([Console]::In.ReadToEnd());$ptr=[Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure);try{[Console]::Out.Write([Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr))}finally{[Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr)}';
+function protect(input,script){return new Promise((resolve,reject)=>{const child=spawn('powershell.exe',['-NoProfile','-NonInteractive','-Command',"$ErrorActionPreference='Stop';[Console]::InputEncoding=[Text.Encoding]::UTF8;[Console]::OutputEncoding=[Text.Encoding]::UTF8;"+script],{env:{...process.env,PSModulePath:(process.env.SystemRoot||'C:\\Windows')+'\\System32\\WindowsPowerShell\\v1.0\\Modules'},windowsHide:true,stdio:['pipe','pipe','ignore']});let output='';child.stdout.setEncoding('utf8');child.stdout.on('data',c=>output+=c);child.on('error',()=>reject(new Error('Windows 凭据服务不可用')));child.on('close',code=>code===0?resolve(output):reject(new Error('Windows 凭据加解密失败')));child.stdin.on('error',()=>{});child.stdin.end(input);});}
+export async function readVault(path){try{return JSON.parse((await protect((await readFile(path,'utf8')).trim(),decrypt)).replace(/^\uFEFF/,''));}catch(e){if(e.code==='ENOENT')return null;throw e;}}
+export async function writeVault(path,value){await mkdir(dirname(path),{recursive:true});const data=await protect(JSON.stringify(value),encrypt);await writeFile(path+'.tmp',data,{mode:0o600});await rename(path+'.tmp',path);}
+export async function clearVault(path){await rm(path,{force:true});}

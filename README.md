@@ -2,6 +2,8 @@
 
 Aidol 创造营参赛项目——钱多多门店人工智能助手：店铺管理 harness。
 
+监控与经营数据的独立 MCP 连接器位于 [mcp/](mcp/README.md)，包含海康互联、天翼视联、萤石与收钱吧的源码、配置示例及运行说明。
+
 本仓库包含 **harness**（数据源 + agent + 网关）与 Vue / Element Plus 工作台前端。前端使用 [docs/api.md](docs/api.md) 中的接口，启动和界面说明见 [apps/web/README.md](apps/web/README.md)。
 
 店长许愿 → agent 通过数据源取数 → 生成**零后端、零 SQL** 的静态页面 → 页面运行时经网关**直连**数据工具，只在需要时调用 agent。

@@ -1,0 +1,28 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "haik-camera-local",
+  "version": "1.1.0",
+  "description": "通过本机海康互联控制台查看本人授权摄像头、录像和本地截图采集，并执行明确要求的短时云台操作。",
+  "author": {
+    "name": "本地个人工具"
+  },
+  "keywords": ["海康互联", "摄像头", "本地", "录像"],
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "海康互联（本地）",
+        "shortDescription": "本人摄像头、录像、截图与本地采集",
+        "longDescription": "连接本机 127.0.0.1:8787 的海康互联服务，查看授权摄像头、实时预览与历史录像，保存截图或视频到本机，并在用户明确要求时短时操作云台。登录由本地网页完成。",
+        "developerName": "本地个人工具",
+        "category": "Productivity",
+        "capabilities": ["Read", "Write"],
+        "defaultPrompt": [
+          "查看我的海康互联摄像头列表",
+          "查询今天的海康云录像",
+          "从选定的海康摄像头保存一张截图"
+        ],
+        "brandColor": "#C41E3A"
+      }
+    }
+  }
+}

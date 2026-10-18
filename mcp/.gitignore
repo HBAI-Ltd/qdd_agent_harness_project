@@ -1,0 +1,11 @@
+node_modules/
+.local/
+dist-local/
+dist/
+.env
+.env.*
+!*.example.json
+*.dpapi
+*.pid
+*.log
+*.tsbuildinfo

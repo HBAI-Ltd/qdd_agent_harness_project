@@ -4,7 +4,29 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { utils, write } from "xlsx";
-import { AttachmentStore } from "./attachments.js";
+import { AttachmentStore, MAX_ATTACHMENT_BYTES } from "./attachments.js";
+
+test("chat image loading trusts stored metadata, validates formats and bounds total size", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "qdd-attachment-images-"));
+  t.after(async () => {
+    assert.equal(path.dirname(root), path.resolve(tmpdir()));
+    assert.match(path.basename(root), /^qdd-attachment-images-/);
+    await rm(root, { recursive: true, force: true });
+  });
+  const store = new AttachmentStore(root);
+  const text = await store.save("notes.txt", Buffer.from("hello"));
+  assert.deepEqual(await store.imagesForModel([{ ...text, mime: "image/png" }]), []);
+  const image = await store.save("photo.png", Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+  assert.equal((await store.imagesForModel([{ ...image, mime: "text/plain" }])).length, 1);
+  const invalid = await store.save("invalid.png", Buffer.from("not an image"));
+  await assert.rejects(store.imagesForModel([invalid]), /类型不匹配/);
+  const unsupported = await store.save("photo.svg", Buffer.from("<svg/>"), "image/svg+xml");
+  await assert.rejects(store.imagesForModel([unsupported]), /PNG.*JPEG.*GIF.*WebP/);
+  const largeBytes = Buffer.alloc(MAX_ATTACHMENT_BYTES / 2 + 1);
+  Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).copy(largeBytes);
+  const large = await store.save("large.png", largeBytes);
+  await assert.rejects(store.imagesForModel([large, large]), /总大小不能超过 50 MiB/);
+});
 
 test("uploaded Excel attachments expose all sheets and preserve original bytes", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "qdd-excel-"));

@@ -56,7 +56,7 @@ const composerItems = computed<AttachmentItem[]>(() =>
     size: a.size,
     status: a.status,
     ...(a.error ? { error: a.error } : {}),
-    ...(a.ref ? { id: a.ref.id } : {}),
+    ...(a.ref ? { id: a.ref.id, mime: a.ref.mime } : {}),
   })),
 );
 const canSend = computed(
@@ -90,7 +90,7 @@ function refreshChatModels() {
   void loadChatOptions();
 }
 function historyItems(event: SessionEvent): AttachmentItem[] {
-  return event.type === "user" ? (event.attachments ?? []).map((a) => ({ key: a.id, id: a.id, path: a.path, size: a.size })) : [];
+  return event.type === "user" ? (event.attachments ?? []).map((a) => ({ key: a.id, id: a.id, path: a.path, size: a.size, mime: a.mime })) : [];
 }
 function pickFiles(event: Event) {
   const input = event.target as HTMLInputElement;
@@ -368,6 +368,8 @@ onMounted(() => {
                 v-if="historyItems(entry.event).length"
                 class="chat-bubble-attachments"
                 :items="historyItems(entry.event)"
+                :gateway-url="workspace.gatewayUrl.value"
+                :token="workspace.token.value"
                 @open="openAttachment" />
             </div>
             <template v-else>
@@ -414,7 +416,8 @@ onMounted(() => {
                     </template>
                   </summary>
                   <div class="chat-process-details">
-                    <MarkdownContent v-if="part.event.type === 'thinking'" :content="part.event.text" />
+                    <MarkdownContent v-if="part.event.type === 'thinking'" :content="part.event.text"
+                      :gateway-url="workspace.gatewayUrl.value" :token="workspace.token.value" />
                     <template v-else-if="part.event.type === 'tool'">
                       <template v-if="part.event.input">
                         <p class="chat-process-label">参数</p>
@@ -473,7 +476,8 @@ onMounted(() => {
                       <p v-if="gap.suggestion">{{ gap.suggestion }}</p>
                     </div>
                   </div>
-                  <MarkdownContent v-else class="chat-message-text chat-message-markdown" :content="eventText(part.event)" />
+                  <MarkdownContent v-else class="chat-message-text chat-message-markdown" :content="eventText(part.event)"
+                    :gateway-url="workspace.gatewayUrl.value" :token="workspace.token.value" />
                   <div v-if="part.event.type === 'say' || part.event.type === 'published'" class="chat-message-actions">
                     <ElButton v-if="part.event.type === 'say'" link @click="copyMessage(part.event.text)">
                       <AgentIcon name="copy" :size="14" />
@@ -541,6 +545,8 @@ onMounted(() => {
         v-if="composerItems.length"
         class="chat-composer-attachments"
         :items="composerItems"
+        :gateway-url="workspace.gatewayUrl.value"
+        :token="workspace.token.value"
         removable
         @remove="attach.removeAttachment"
         @remove-folder="attach.removeFolder"

@@ -2,6 +2,8 @@
 
 Aidol 创造营参赛项目——钱多多门店人工智能助手：店铺管理 harness。
 
+监控与经营数据的独立 MCP 连接器位于 [mcp/](mcp/README.md)，包含海康互联、天翼视联、萤石与收钱吧的源码、配置示例及运行说明。
+
 本仓库包含 **harness**（数据源 + agent + 网关）与 Vue / Element Plus 工作台前端。前端使用 [docs/api.md](docs/api.md) 中的接口，启动和界面说明见 [apps/web/README.md](apps/web/README.md)。
 
 店长许愿 → agent 通过数据源取数 → 生成**零后端、零 SQL** 的静态页面 → 页面运行时经网关**直连**数据工具，只在需要时调用 agent。
@@ -24,7 +26,7 @@ Aidol 创造营参赛项目——钱多多门店人工智能助手：店铺管�
 ### 页面如何取数
 
 - `qdd.tool(name, args)`：页面直连只读数据工具，不经过 agent。agent 发布时必须声明页面用到的工具，网关按页面 token 校验，未声明的一律 403。
-- `qdd.ask(question, context)`：需要 agent 能力时使用（只读工具），页面需声明 `useAgent`。
+- `qdd.ask(question, context, optionsOrOnEvent)`：需要 agent 能力时使用（只读工具），页面需声明 `useAgent`。第三参数可传进度回调，或 `{ images: [{ url, detail? }], onEvent? }`；支持 Base64 data URL 和 HTTPS 图片 URL，默认所有模型支持图片识别，沿用当前模型配置，限制及示例见 [图片问答](docs/api.md#图片问答)。
 - `snapshot_data` 生成的 `data/*.js`：实时数据不可用时的兜底。
 
 ### 连续状态与聚合（零 SQL）
@@ -37,25 +39,38 @@ Aidol 创造营参赛项目——钱多多门店人工智能助手：店铺管�
 
 ### 需求对齐与能力缺口
 
-- **引导式提问**：新许愿写页面前，agent 必须先用 `clarify` 逐项对齐（对象、时间范围、口径、矛盾取舍、估测假设），候选项来自真实数据、推荐项在前；前端或终端回答（终端支持编号多选、回车选推荐、直接输入自定义）。`llm.clarify` 可设为 `required`（默认）/ `auto` / `off`。
+- **对话意图**：问候、解释、一次性查数与分析、已有结论的追问用 `reply` 回答；需要看板、交互工具或修改当前页面时才写文件并用 `finish` 发布。技能、定时任务与通知按实际工具结果回复，不要求附带页面。回复结论先行，业务事实说明来源与统计区间，区分事实、可能原因和推演假设。
+- **引导式提问**：`llm.clarify` 可设为 `required`（默认）/ `auto` / `off`。`required` 在首次会话写新页面前必须先用 `clarify` 对齐，明确需求只问一个确认题；`auto` 只问影响结果的歧义；`off` 与无人值守不调用提问。续聊和修改已有页面不重复强制确认。候选项来自真实数据、推荐项在前；前端或终端回答（终端支持编号多选、回车选推荐、直接输入自定义）。未回答不代表写入授权。
 - **能力缺口**：`gaps` 由 harness 校验生成（如结论数字未能核验），无需模型提交；网关把检测到的缺口固定展示在页面顶部，页面代码无法移除。数据缺失、估测假设或能力受限仍需在页面或回复正文中说明。
+
+对话提示词位于 `apps/cli/src/agent/prompt.ts`。策略与结束工具的回归测试位于 `apps/cli/src/agent/conversation-prompt.test.ts`，使用 Node.js 内置测试运行器：`npm run build` 后执行 `node --test apps/cli/dist/agent/conversation-prompt.test.js`；也包含在 `npm test` 中。
+
+### 图片与截图连续分析
+
+- 浏览器截图、MCP `image` 内容和摄像头结果中的 `job.frames` 会作为真正的 `image_url` 输入传给下一轮模型，不再只返回路径或“无法查看图片”的文字。同批工具全部返回后才附加图片，保持工具调用与结果配对；截图后继续分析、调用后续工具，最后再 `reply` / `finish`。
+- 本地摄像头 JPEG 从该连接器对应的 `mcp/.local/{haik,tysl,ezviz}-captures/<jobId>/frame_*.jpg` 读取并转为 Base64，不把 `127.0.0.1` 地址交给公网模型。禁止任意宿主路径、目录穿越和符号链接越界。对话上传的 PNG/JPEG/GIF/WebP 图片在首轮用户消息中直接发送 Base64，单张及每条消息图片总大小不超过 50 MiB；历史图片可通过 `read_attachment` 再次读取；网络图片可用 `view_image({url})`，HTTPS URL 直接交给模型服务商，网关不代为下载。
+- 浏览器、MCP 和摄像头工具每次结果最多 4 张图片，Base64 单张不超过 5 MiB、合计不超过 10 MiB；多路摄像头可分工具调用，采集帧列表通过 `offset` / `limit` 分页。读取、格式或模型错误会明确反馈，不以文件大小或在线状态代替看图判断。
+- 默认所有模型都支持图片识别，直接沿用会话选定的模型发送视觉输入，不按模型名称拦截，不自动切换模型；服务商实际返回的接口错误会如实反馈。图片保存在受 Git 忽略的会话 `messages.json` 中供续聊，事件日志只记录工具元信息，不记录 Base64 正文。
+
+离线回归位于 `apps/cli/src/tool-images.test.ts`，覆盖六路截图后的连续模型调用、MCP 图文结果、浏览器截图、图片附件及续聊重载、网络 URL、限制与错误、取消后的消息配对。构建后执行 `node --test apps/cli/dist/tool-images.test.js`；不向真实模型发送门店画面。`apps/cli/src/browser.test.ts` 另用真实本机浏览器验证截图 Base64 进入下一轮后，仍能继续读页并结束回复。
 
 ### 拒绝后端与未授权更改
 
 - **鉴权**：所有 API 需网关 token；页面只拿到自己的页面级 token（HMAC 派生），无法访问会话、设置或其它工具。
 - **写入沙箱**：agent 只能写当前页面目录下的静态文件；`data/` 只能由 harness 快照生成。
 - **零后端守卫**（`guard.ts`）：拒绝 fetch/XHR/WebSocket/表单提交/eval、SQL 与浏览器 SQL 引擎、云后端、服务端代码、非白名单域名。
-- **草稿 + 原子发布**，失败不留半成品；页面带 CSP，只能连回网关。
-- **写入类数据工具**：不开放直接调用；只能在许愿会话里由 agent 发起，并等店长通过 `approval_required` 授权（终端或前端），配置 `allowWrite: true` 才免确认。
+- **草稿 + 原子发布**，失败不留半成品；页面带 CSP，默认只能连回网关，播放器可使用显式配置的视频源。
+- **写入类数据工具**：不开放直接调用；只能在许愿会话里由 agent 发起。普通对话需店长通过 `approval_required` 授权（终端或前端），配置 `allowWrite: true` 可免确认；定时任务会话自动授权。
 
 ### 工作台：技能、定时任务、连接器
 
+- **对话编辑定时任务**：先用 `list_schedules` 查看任务 ID 和配置，再调用 `edit_schedules`（每次编辑一个任务，需店长确认）。必填 `id`，可选 `name`、`cron`、`prompt`、`enabled`、`skill`（名称或 ID）、`slug`（已有页面）、`notify`（连接器 ID 或 `auto`）。未传字段保持不变，`skill`/`slug`/`notify` 传 `null` 解除绑定。例如 `{"id":"任务ID","cron":"30 9 * * *","enabled":true}`；修改只影响后续执行，不会取消正在执行的任务。定时执行会话不可调用创建或编辑工具。回归测试位于 `apps/cli/src/edit-schedules.test.ts`，运行 `npm run build` 后执行 `node --test apps/cli/dist/edit-schedules.test.js`。
 - **待办与总览**：`GET /api/overview` / `GET /api/pending` 汇总所有会话里待店长处理的授权和问题；授权等待时长由 `approvalTimeoutMin`（默认 60 分钟）控制。
 - **技能**（`workspace/skills/`）：可复用的做事方法；agent 可从对话中 `save_skill`（需店长确认）、`load_skill`。
-- **定时任务**（`workspace/schedules.json`）：5 段 cron，网关内调度；到点无人值守执行（可绑定技能、在页面上刷新），结论推送到连接器；停机错过的执行会补跑。店长说「每天 9 点…」时 agent 可用 `create_schedule` 直接创建（需店长确认）；定时执行中的推送若需确认会进入工作台待办，可用于「店长确认后再发」。
+- **定时任务**（`workspace/schedules.json`）：5 段 cron，网关内调度；到点无人值守执行（可绑定技能、在页面上刷新），结论推送到连接器；停机错过的执行会补跑。店长说「每天 9 点…」时 agent 可用 `create_schedule` 直接创建（需店长确认）；任务执行中的工具调用自动授权，不提问、不进入工作台待办等待确认，包括立即运行和定时会话续聊。只读连接器限制、参数校验和数据核验仍生效。
 - 每次定时执行使用独立会话 ID，与前端刷新无关。手动修改同一页面时，会停止占用页面的后台定时执行，待其完全退出后继续修改；交接和修改期间保留页面锁，其他会话不能同时写入。只取消当前执行，不停用定时配置；普通会话之间的并发修改仍会被拒绝。
 - **记录数据集**（`records/<name>`）：试吃报损、临期处置回填、巡检等逐条登记的数据。agent 用 `define_record` 提出结构（需店长确认），页面用 `qdd.records.add/update/remove/list` 读写，网关按结构校验并只允许页面访问代码中用到的记录；修改按 id 覆盖、作废写墓碑，`store__aggregate` 可直接汇总（计数指标 `records`）。
-- **连接器**（`workspace/connectors.json`）：目前开放飞书（群机器人 webhook / 企业自建应用），安装前先验证，凭据加密存储；agent 用 `send_notification` 推送（按连接器权限需店长确认）。
+- **连接器**（`workspace/connectors.json`）：在连接器页由用户选择安装飞书、收银系统（收钱吧）或门店摄像头（海康互联、天翼视联、萤石），默认不安装任何厂商。安装前先验证本地服务；选择保存后立即加载相应工具，删除后撤销，重启后保留用户选择。飞书凭据加密存储；agent 用 `send_notification` 推送（按连接器权限需店长确认）。
 
 ### 浏览器
 
@@ -79,7 +94,39 @@ npm run qdd -- token                                     # 查看网关 token，
 
 另开终端运行 `npm run dev:web`，打开 `http://127.0.0.1:5177`。
 前端默认地址会跟随后端的 `HOST`、`PORT` 配置；若浏览器保留旧地址，在设置中点击「使用配置地址」。
-`gateway.corsOrigins` 必须包含当前前端来源。没有 MCP 服务时，可只保留该网关配置并移除示例 `erp` 项。
+`gateway.corsOrigins` 必须包含当前前端来源。默认 `mcpServers` 为 `{}`。先按 [mcp/README.md](mcp/README.md) 启动所需本地服务，再在工作台连接器页选择平台并点击「验证并安装」。启动 MCP 服务只让它可用，不会自动安装连接器。`mcpServers` 仍可配置自定义 MCP；四个内置厂商的同名配置只覆盖连接地址和鉴权，实际启用取决于用户的安装选择。
+
+安装收钱吧后，后端默认读取 `mcp/.local/shouqianba/mcp-key`；该密钥由本地服务生成，无需复制到表单或 `.env`。自定义 MCP 可用 `bearerTokenFile` 或 `bearerTokenEnv` 指定鉴权来源，两者只能配置一个；文件相对路径基于项目根目录。密钥文件与厂商会话位于 Git 忽略的 `mcp/.local/`，不要提交。安装与账号登录分别进行，商户或摄像头账号仍需在各自本地控制台完成登录。
+
+任务内视频播放器需要跨源取流时，在 `mediaOrigins` 填写视频地址的 HTTPS origin，例如 `"mediaOrigins": ["https://stream.example.com:8443"]`；本机 HLS 服务也支持精确的 HTTP 回环来源，例如 `"http://127.0.0.1:8790"`（仅 `localhost`、`127.0.0.1`、`[::1]`）。要允许所有视频来源，显式设置 `"mediaOrigins": ["*"]`：播放器连接允许任意 HTTP、HTTPS、WS、WSS 来源，媒体允许任意 HTTP、HTTPS、blob 和 data 来源。默认仍为空数组，也可继续使用精确来源和端口；`"*"` 必须单独使用，不接受 `https://*.example.com`、签名路径、查询参数、凭据或指令注入。
+
+修改 `mediaOrigins` 后重新加载任务页面即可生效，网关会在每次加载 HTML 时读取最新配置。页面业务代码仍禁止直接 fetch、XHR、WebSocket 和表单提交。播放器可使用 blob 媒体及本地/blob worker；非空 `mediaOrigins` 允许 WASM 解码，不开启 JavaScript eval，也不会把媒体来源加入脚本或 iframe 白名单。
+
+海康 FLV/H.265 播放器与解码器通过 `/assets/camera-player/` 同源提供，包含官方 `ezuikit-flv` 的脚本、样式、WASM 和许可证。无需在任务页面复制临时签名地址或加载其他解码服务。资源及配置热更新测试位于 `apps/cli/src/camera-player-assets.test.ts`；真实浏览器合成视频回归运行 `node scripts/test-camera-player-browser.mjs`。
+
+视频 CSP 专项测试位于 `apps/cli/src/media-csp.test.ts`；构建后运行 `node --test apps/cli/dist/media-csp.test.js`，验证默认隔离、精确来源和端口、注入拒绝及业务请求守卫，不连接摄像头。
+
+### 监控推流播放器
+
+Agent 的白名单播放器规范支持在任务 iframe 内生成监控播放页面，无需嵌入外部播放器站点：
+
+| 格式 | 播放方案 |
+| --- | --- |
+| HTTP-FLV | 已安装的 `ezuikit-flv@2.1.1`，通过同源 `/assets/camera-player/index.js`、`style.css`、`decoder.js` / `decoder.wasm` 提供 |
+| HLS | 优先原生 video；否则使用网关同源 `/assets/camera-player/hls.min.js`（hls.js@1.7.3），无需访问 CDN |
+| RTMP / RTMPS / RTSP | 浏览器不能直接播放；页面明确提示提供转流后的 HLS / HTTP-FLV 地址。本项目不新增转流服务，也不通过替换 URL 协议伪造播放地址 |
+
+播放器的内部取流不等于允许页面业务代码直接联网。视频地址通过已授权的 `qdd.tool` 获取，或由用户在页面输入；不要把签名地址写死在页面中，也不要为视频域名授予脚本 CDN 权限。跨源媒体需要配置上述 `mediaOrigins`，并由媒体服务提供 CORS；HLS 清单、分片、密钥和重定向来源都必须允许。HTTPS 页面仍受浏览器混合内容限制。
+
+FLV 在点击播放后创建 `autoPlay: true` 的 SDK 实例，成功状态兼容 `playing` / `videoFrame` 事件和 `getState().playing`；WASM 使用 canvas 时不能只检查 video 元素。天翼本地接口目前只保留一路预览，监控页面应显式切换摄像头，诊断不能额外请求预览抢占画面；hls.js 解析清单成功不代表视频已解码。
+
+天翼本地服务对 `/streams/<id>/index.m3u8` 和对应 TS 分片开放跨源读取，任务 iframe 可直接播放返回的 HLS 地址。监控相关回归可用 `npm test --prefix mcp/apps/tysl-console`（含实际 HTTP 媒体响应验证）和 `node scripts/test-camera-player-browser.mjs`（本地合成 FLV、WASM 与 Worker 验证）运行；当前生成的总台另有 `node scripts/test-generated-monitor.mjs` 验证播放与切换逻辑。
+
+FLV 使用同源解码器；HLS 使用 `enableWorker: false`，避免被 CSP 拦截的 CDN worker。Agent 规范要求点击播放、失败提示、手动重试、切换/离页释放资源，以及 RTMP 转流提示；不承诺所有编码、有声自动播放或全屏可用。可许愿：“生成监控页面，通过已授权工具获取 HTTP-FLV 或 HLS 地址，在任务 iframe 播放；仅有 RTMP 时提示需要转流。”
+
+规范与守卫回归：[camera-player-prompt.test.ts](apps/cli/src/agent/camera-player-prompt.test.ts)，构建后运行 `node --test apps/cli/dist/agent/camera-player-prompt.test.js apps/cli/dist/media-csp.test.js`。实际 iframe FLV 播放回归运行 `node scripts/test-camera-player-browser.mjs`，需要本机 Chrome/Edge 和 FFmpeg（可通过 `CHROME_PATH` / `FFMPEG_PATH` 指定），仅使用合成视频，不连接真实摄像头。
+
+MCP 鉴权专项测试位于 `apps/cli/src/datasource/mcp-auth.test.ts`；构建后运行 `node --test apps/cli/dist/datasource/mcp-auth.test.js`，验证密钥文件读取、会话重连和环境变量兼容性，不连接厂商服务。
 
 终端也可直接许愿，会话与前端共享：
 
@@ -142,4 +189,4 @@ AI Passport 环境配置与命令见 [apps/esp/README.zh_CN.md](apps/esp/README.
 根 `npm run build` 继续只构建 TypeScript 工程；固件通过 `build:esp` 单独构建。
 
 安卓连接、配对、只读投屏及 MCP 配置见 [apps/android-mcp/README.zh_CN.md](apps/android-mcp/README.zh_CN.md)。
-该 MCP 服务直接返回手机原分辨率 JPEG 图像，需要支持 MCP 图像的视觉客户端；现有门店 harness 的文本 MCP 适配器尚不转发图像内容。
+该 MCP 服务直接返回手机原分辨率 JPEG 图像；门店 harness 会保留 MCP 图像并通过 Base64 传给模型，需要选用支持视觉输入及工具调用的模型。

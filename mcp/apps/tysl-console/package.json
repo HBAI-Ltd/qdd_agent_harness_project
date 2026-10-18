@@ -1,0 +1,8 @@
+{
+  "name":"tysl-local-console",
+  "version":"0.2.0",
+  "private":true,
+  "type":"module",
+  "engines":{"node":">=22.13.0"},
+  "scripts":{"start":"node local/server.mjs","mcp":"node local/mcp-stdio.mjs","test":"node --test tests/*.test.mjs"}
+}

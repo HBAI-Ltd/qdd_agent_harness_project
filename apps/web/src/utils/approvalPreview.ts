@@ -34,6 +34,8 @@ export function approvalPresentation(tool: string) {
       return { title: "确认登记表结构", category: "建立或扩展登记表", description: "确认登记字段后，助手将建立或扩展这张表，供门店逐条登记。", decline: "再改改", approve: "确认登记表结构" };
     case "create_schedule":
       return { title: "确认创建定时任务", category: "创建前确认", description: "核对执行规则、任务内容与推送接收方，确认后启用定时执行。", decline: "暂不创建", approve: "确认创建定时任务" };
+    case "edit_schedules":
+      return { title: "确认修改定时任务", category: "修改前确认", description: "核对任务 ID 和 changes 中的修改项；未列出的配置保持不变，null 表示解除绑定。修改不会取消正在执行的任务。", decline: "暂不修改", approve: "确认修改定时任务" };
     default:
       return { title: "需要你的授权", category: "写入操作", description: "助手申请执行以下操作，请确认后继续。", decline: "拒绝", approve: "允许执行" };
   }

@@ -98,7 +98,7 @@ function mount(t) {
     loading: () => !!find(root, hasClass("preview-loading")),
     error: () => textContent(find(root, hasClass("preview-error")) ?? { children: [] }),
     load(node = frame()) { node.props.onLoad({ currentTarget: node, target: node }); },
-    respond(node = frame(), type = "page:ready", payload = null, origin = "null", source = node.contentWindow) {
+    respond(node = frame(), type = "page:ready", payload = null, origin = props.gatewayUrl === browserWindow.location.origin ? "null" : new URL(props.page.url).origin, source = node.contentWindow) {
       const initial = node.sent.at(-1)?.message;
       assert.ok(initial, "the host has initialized the frame");
       browserWindow.dispatchEvent(Object.assign(new Event("message"), {
@@ -109,6 +109,23 @@ function mount(t) {
     async tick(ms) { t.mock.timers.tick(ms); await nextTick(); },
   };
 }
+
+test("cross-origin preview permits external popups and preserves the gateway origin", (t) => {
+  const f = mount(t);
+  assert.deepEqual(new Set(f.frame().props.sandbox.split(/\s+/)), new Set([
+    "allow-scripts", "allow-downloads", "allow-same-origin", "allow-popups", "allow-popups-to-escape-sandbox",
+  ]));
+});
+
+test("same-origin preview permits external popups while keeping the frame opaque", async (t) => {
+  const f = mount(t);
+  f.props.gatewayUrl = "https://frontend.example";
+  f.props.page.url = "https://frontend.example/pages/sales-report/index.html";
+  await nextTick();
+  assert.deepEqual(new Set(f.frame().props.sandbox.split(/\s+/)), new Set([
+    "allow-scripts", "allow-downloads", "allow-popups", "allow-popups-to-escape-sandbox",
+  ]));
+});
 
 test("a pending iframe request stops showing loading and reports a retryable timeout", async (t) => {
   const f = mount(t);
@@ -141,7 +158,7 @@ test("load establishes the real bridge and readiness clears both deadlines", asy
   await f.tick(10000);
   f.load();
   assert.equal(f.frame().sent.length, 1);
-  assert.equal(f.frame().sent[0].origin, "*");
+  assert.equal(f.frame().sent[0].origin, "https://gateway.example");
   assert.equal(f.frame().sent[0].message.type, "host:init");
   f.respond();
   await nextTick();
@@ -151,6 +168,108 @@ test("load establishes the real bridge and readiness clears both deadlines", asy
   assert.equal(f.error(), "");
   assert.equal(f.messages[0].type, "page:ready");
 });
+
+test("repeated page-list snapshots preserve the ready frame and bridge while updating metadata", async (t) => {
+  const f = mount(t);
+  f.load();
+  f.respond();
+  await nextTick();
+  const originalFrame = f.frame();
+  const readyMessage = f.messages[0];
+  for (let i = 0; i < 20; i++) {
+    f.props.page = JSON.parse(JSON.stringify(f.props.page));
+    await nextTick();
+    assert.ok(f.frame() === originalFrame, "unchanged page identity must not recreate the iframe");
+    assert.equal(f.loading(), false);
+    assert.equal(f.error(), "");
+  }
+  f.props.page = {
+    ...f.props.page,
+    title: "更新后的销售看板",
+    kind: "scheduled",
+    schedules: [{ id: "daily", name: "每日销售更新", enabled: false }],
+    pinnedAt: "2026-10-18T06:00:00Z",
+    stale: "请复核销售数据",
+    records: ["sales_log"],
+  };
+  await nextTick();
+  assert.ok(f.frame() === originalFrame, "metadata updates must preserve the iframe");
+  assert.equal(f.loading(), false);
+  assert.equal(originalFrame.props.title, "更新后的销售看板 — 任务页面");
+  assert.match(textContent(f.root), /每日销售更新\s*已暂停/);
+  assert.match(textContent(f.root), /取消置顶/);
+  assert.match(textContent(f.root), /请复核销售数据/);
+  assert.match(textContent(f.root), /sales_log/);
+  assert.equal(originalFrame.sent.length, 1, "metadata updates must not restart the handshake");
+  assert.equal(readyMessage.reply("host:received", { type: "page:ready" }), true);
+  assert.equal(originalFrame.sent.at(-1).message.bridgeId, originalFrame.sent[0].message.bridgeId);
+});
+
+test("page-list snapshots do not restart a pending document's load deadline", async (t) => {
+  const f = mount(t);
+  const originalFrame = f.frame();
+  for (let i = 0; i < 3; i++) {
+    await f.tick(4000);
+    f.props.page = { ...f.props.page };
+    await nextTick();
+    assert.ok(f.frame() === originalFrame, "list snapshots must preserve the pending document");
+  }
+  await f.tick(2999);
+  assert.equal(f.loading(), true);
+  await f.tick(1);
+  assert.equal(f.loading(), false);
+  assert.match(f.error(), /加载超时/);
+});
+
+test("page-list snapshots preserve a pending SDK handshake and its deadline", async (t) => {
+  const f = mount(t);
+  f.load();
+  const originalFrame = f.frame();
+  await f.tick(7000);
+  f.props.page = { ...f.props.page };
+  await nextTick();
+  assert.ok(f.frame() === originalFrame, "list snapshots must preserve the pending handshake");
+  assert.equal(originalFrame.sent.length, 1);
+  await f.tick(999);
+  assert.equal(f.loading(), true);
+  await f.tick(1);
+  assert.equal(f.loading(), false);
+  assert.match(f.error(), /未建立通信/);
+  f.respond(originalFrame);
+  await nextTick();
+  assert.equal(f.loading(), false);
+  assert.equal(f.error(), "");
+});
+
+for (const [name, update] of [
+  ["page version", (props) => { props.page.version++; }],
+  ["page URL", (props) => { props.page.url = "/pages/sales-report/index.html?token=new-page-token"; }],
+  ["active page", (props) => { props.page = { ...props.page, slug: "stock-report", url: "/pages/stock-report/" }; }],
+  ["gateway URL", (props) => { props.gatewayUrl = "https://new-gateway.example"; }],
+]) {
+  test(`a changed ${name} replaces the frame and establishes a fresh bridge`, async (t) => {
+    const f = mount(t);
+    f.props.page.url = "/pages/sales-report/";
+    await nextTick();
+    f.load();
+    f.respond(f.frame(), "page:ready", null, f.props.gatewayUrl);
+    await nextTick();
+    const originalFrame = f.frame();
+    const readyMessage = f.messages[0];
+    update(f.props);
+    await nextTick();
+    assert.notEqual(f.frame(), originalFrame);
+    assert.equal(f.frame().props.src, new URL(f.props.page.url, f.props.gatewayUrl).href);
+    assert.equal(f.loading(), true);
+    assert.equal(readyMessage.reply("host:received"), false);
+    f.load();
+    f.respond(f.frame(), "page:ready", null, f.props.gatewayUrl);
+    await nextTick();
+    assert.equal(f.loading(), false);
+    assert.equal(f.error(), "");
+    assert.notEqual(f.frame().sent[0].message.bridgeId, originalFrame.sent[0].message.bridgeId);
+  });
+}
 
 test("a loaded document without an SDK acknowledgement reports a handshake timeout", async (t) => {
   const f = mount(t);
@@ -216,12 +335,12 @@ test("unmount removes the message listener and pending deadlines", async (t) => 
   assert.equal(f.messages.length, 0);
 });
 
-test("cross-origin task frames are opaque and reject claimed gateway origins and sibling sources", async (t) => {
+test("cross-origin task frames preserve their gateway origin and reject opaque origins and sibling sources", async (t) => {
   const f = mount(t);
-  assert.equal(f.frame().props.sandbox, "allow-scripts allow-downloads");
+  assert.ok(f.frame().props.sandbox.includes("allow-same-origin"));
   f.load();
-  f.respond(f.frame(), "page:ready", null, "https://gateway.example");
-  f.respond(f.frame(), "page:ready", null, "null", {});
+  f.respond(f.frame(), "page:ready", null, "null");
+  f.respond(f.frame(), "page:ready", null, "https://gateway.example", {});
   await nextTick();
   assert.equal(f.loading(), true);
   assert.equal(f.messages.length, 0);
@@ -236,7 +355,7 @@ test("same-origin gateways use the same opaque bridge and remain supported witho
   f.props.gatewayUrl = "https://frontend.example";
   f.props.page.url = "https://frontend.example/pages/sales-report/?page_token=page-token";
   await nextTick();
-  assert.equal(f.frame().props.sandbox, "allow-scripts allow-downloads");
+  assert.ok(!f.frame().props.sandbox.includes("allow-same-origin"));
   f.load();
   assert.equal(f.frame().sent[0].origin, "*");
   f.respond();

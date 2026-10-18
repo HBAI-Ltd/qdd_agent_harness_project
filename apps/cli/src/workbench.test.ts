@@ -251,7 +251,10 @@ describe("workbench gateway", () => {
     const schedule = (await res.json()) as Schedule;
     assert.ok(schedule.nextRunAt && new Date(schedule.nextRunAt) > new Date());
 
-    script.push(call("reply", { text: "今天没有快过期的商品", gaps: [] }));
+    script.push(
+      call("send_notification", { text: "定时检查完成" }),
+      call("reply", { text: "今天没有快过期的商品", gaps: [] }),
+    );
     const before = seen.length;
     const { sessionId } = (await (await post(`/api/schedules/${schedule.id}/run`, {})).json()) as { sessionId: string };
     const meta = await idle(sessionId);
@@ -267,6 +270,8 @@ describe("workbench gateway", () => {
     assert.equal(done.lastRun!.status, "ok");
     assert.deepEqual(done.lastRun!.notified, { connectorId: webhookId, ok: true });
     assert.equal(feishu.messages.at(-1)!.text, "【临期预警】今天没有快过期的商品");
+    assert.ok(feishu.messages.some((message) => message.text === "定时检查完成"));
+    assert.deepEqual(await gateway.hub.pending(), []);
 
     // 连接器被定时任务使用时不能删除
     assert.equal((await api(`/api/connectors/${webhookId}`, { method: "DELETE" })).status, 409);

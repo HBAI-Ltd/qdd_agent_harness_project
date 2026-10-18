@@ -32,7 +32,7 @@ export interface CreateOptions extends Partial<ChatSelection> {
   origin?: SessionMeta["origin"];
   /** 预先加载的技能 */
   skillId?: string | undefined;
-  /** 无人值守（定时任务）：不提问，授权仍进入工作台待办 */
+  /** 无人值守：不提问；仅 origin 为 schedule 的会话自动授权。 */
   unattended?: boolean;
   attachments?: AttachmentRef[] | undefined;
 }
@@ -44,6 +44,7 @@ export interface SendOptions extends Partial<ChatSelection> {
 export class SessionHub {
   private readonly directories = new Map<string, string>();
   private readonly running = new Map<string, AbortController>();
+  private readonly recoveries = new Map<string, Promise<SessionMeta>>();
   private readonly activeMetas = new Map<string, SessionMeta>();
   /** 页面 → 正在修改它的会话，同一页面同时只允许一个会话修改 */
   private readonly editing = new Map<string, string>();
@@ -103,8 +104,14 @@ export class SessionHub {
         }
         const meta = { summary: "", ...(JSON.parse(raw) as Partial<SessionMeta>) } as SessionMeta;
         this.directories.set(id, directory);
-        // 进程重启后遗留的 running 状态视为中断
-        if (meta.status === "running" && !this.running.has(id)) meta.status = "error";
+        if ((meta.status === "running" || meta.status === "waiting") && !this.running.has(id)) {
+          let recovery = this.recoveries.get(id);
+          if (!recovery) {
+            recovery = this.recoverInterrupted(meta).finally(() => this.recoveries.delete(id));
+            this.recoveries.set(id, recovery);
+          }
+          return recovery;
+        }
         return meta;
       }
       throw new NotFound("会话不存在");
@@ -112,6 +119,16 @@ export class SessionHub {
       if (error instanceof NotFound) throw error;
       throw new NotFound("会话不存在");
     }
+  }
+
+  private async recoverInterrupted(meta: SessionMeta): Promise<SessionMeta> {
+    // 并发详情/列表请求可能读到恢复前的快照，写入终态前重新确认。
+    const current = JSON.parse(await readFile(this.file(meta.id, "meta.json"), "utf8")) as SessionMeta;
+    if ((current.status === "running" || current.status === "waiting") && !this.running.has(meta.id)) {
+      await this.emit(meta.id, { type: "error", message: "服务已重启，本轮执行已中断，请重新发送消息继续。" });
+      await this.setStatus(current, "error");
+    }
+    return { ...current, summary: current.summary ?? "" };
   }
 
   async detail(id: string): Promise<SessionDetail> {
@@ -261,21 +278,34 @@ export class SessionHub {
     return this.meta(id);
   }
 
+  /** 在首次 await 前预留页面，手动修改可以等待无人值守任务退出后接管。 */
+  private acquirePage(meta: SessionMeta, slug: string): SessionMeta | undefined {
+    let interrupted: SessionMeta | undefined;
+    const holder = this.editing.get(slug);
+    if (holder && holder !== meta.id) {
+      const active = this.activeMetas.get(holder);
+      if (!this.unattended.has(meta.id) && this.unattended.has(holder) && active?.origin?.kind === "schedule") interrupted = active;
+      else throw new Conflict(`页面 ${slug} 正在被会话 ${holder} 修改`);
+    }
+    // 先预留给手动修改；旧任务退出时只能释放自己仍持有的锁。
+    this.editing.set(slug, meta.id);
+    return interrupted;
+  }
+
+  private async stopScheduledEdit(id: string, interrupted: SessionMeta): Promise<void> {
+    this.cancel(interrupted.id);
+    try {
+      await this.emit(id, { type: "say", text: `正在停止定时任务「${interrupted.origin?.scheduleName ?? interrupted.title}」的本次执行，退出后继续修改页面；后续仍按原计划运行。` });
+    } finally {
+      await this.wait(interrupted.id);
+    }
+  }
+
   private async start(meta: SessionMeta, text: string, attachments: AttachmentRef[], skillId?: string, input: Partial<ChatSelection> = {}): Promise<void> {
     if (this.running.has(meta.id)) throw new Conflict("会话正在运行，请等待完成");
     const selection = resolveChatSelection(this.loaded.config.llm, input, meta);
     const chat = this.chat({ ...resolveModel(this.loaded.config.llm, selection.model), reasoningEffort: selection.reasoningEffort }); // 缺少 API key 时在这里同步报错
-    let interrupted: SessionMeta | undefined;
-    if (meta.slug) {
-      const holder = this.editing.get(meta.slug);
-      if (holder && holder !== meta.id) {
-        const active = this.activeMetas.get(holder);
-        if (!this.unattended.has(meta.id) && this.unattended.has(holder) && active?.origin?.kind === "schedule") interrupted = active;
-        else throw new Conflict(`页面 ${meta.slug} 正在被会话 ${holder} 修改`);
-      }
-      // 先预留给手动修改；旧任务退出时只能释放自己仍持有的锁。
-      this.editing.set(meta.slug, meta.id);
-    }
+    const interrupted = meta.slug ? this.acquirePage(meta, meta.slug) : undefined;
     const controller = new AbortController();
     this.running.set(meta.id, controller);
     this.activeMetas.set(meta.id, meta);
@@ -298,14 +328,7 @@ export class SessionHub {
   private async run(meta: SessionMeta, text: string, attachments: AttachmentRef[], chat: ChatFn, controller: AbortController, skillId?: string, interrupted?: SessionMeta): Promise<void> {
     const id = meta.id;
     try {
-      if (interrupted) {
-        this.cancel(interrupted.id);
-        try {
-          await this.emit(id, { type: "say", text: `正在停止定时任务「${interrupted.origin?.scheduleName ?? interrupted.title}」的本次执行，退出后继续修改页面；后续仍按原计划运行。` });
-        } finally {
-          await this.wait(interrupted.id);
-        }
-      }
+      if (interrupted) await this.stopScheduledEdit(id, interrupted);
       controller.signal.throwIfAborted();
       let history: ChatMessage[] = [];
       try {
@@ -317,9 +340,36 @@ export class SessionHub {
         this.loaded,
         this.sources,
         chat,
-        { wish: text, sessionId: id, slug: meta.slug ?? undefined, history, skillId, workbench: this.workbench, attachments, attachmentStore: this.attachments },
+        { wish: text, sessionId: id, origin: meta.origin, slug: meta.slug ?? undefined, history, skillId, workbench: this.workbench, attachments, attachmentStore: this.attachments },
         {
           signal: controller.signal,
+          selectPage: async (page) => {
+            controller.signal.throwIfAborted();
+            const previousSlug = meta.slug;
+            const interrupted = this.acquirePage(meta, page.slug);
+            try {
+              if (interrupted) await this.stopScheduledEdit(id, interrupted);
+              controller.signal.throwIfAborted();
+              const previousUpdatedAt = meta.updatedAt;
+              meta.slug = page.slug;
+              meta.updatedAt = new Date().toISOString();
+              try {
+                await this.saveMeta(meta);
+              } catch (error) {
+                meta.slug = previousSlug;
+                meta.updatedAt = previousUpdatedAt;
+                throw error;
+              }
+            } catch (error) {
+              if (page.slug !== previousSlug && this.editing.get(page.slug) === id) {
+                if (interrupted && this.running.has(interrupted.id)) this.editing.set(page.slug, interrupted.id);
+                else this.editing.delete(page.slug);
+              }
+              throw error;
+            }
+            if (previousSlug && previousSlug !== page.slug && this.editing.get(previousSlug) === id) this.editing.delete(previousSlug);
+            for (const l of this.metaListeners) l({ ...meta });
+          },
           onEvent: (e: AgentEvent) => {
             if (e.kind === "skill") void this.emit(id, { type: "skill", skill: e.skill, action: e.action });
             else if (e.kind === "browser") void this.emit(id, { type: "browser", browser: e.state });

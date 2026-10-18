@@ -1,0 +1,14 @@
+{
+  "name": "qdd-local-mcp-connectors",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.5.0"
+  },
+  "scripts": {
+    "setup": "node scripts/setup.mjs",
+    "build": "npm --prefix sites/haik-console run build && npm --prefix apps/ezviz-console run build",
+    "test": "npm --prefix sites/haik-console test && npm --prefix apps/tysl-console test && npm --prefix apps/ezviz-console test && npm --prefix sites/shouqianba-console test"
+  }
+}

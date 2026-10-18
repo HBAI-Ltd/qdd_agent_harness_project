@@ -208,9 +208,15 @@ export const SDK_JS = `(() => {
     return (await call("/api/tools/" + encodeURIComponent(name), "POST", args || {})).result;
   }
 
-  /** 调用 agent。onEvent 可选，接收 { type: "tool", name } 进度。 */
-  async function ask(question, context, onEvent) {
-    const res = await fetch("/api/ask", { method: "POST", headers, body: JSON.stringify({ question, context }) });
+  /** 第三参数兼容 onEvent 回调，或 { images, onEvent } 选项。 */
+  async function ask(question, context, options) {
+    if (options !== undefined && typeof options !== "function" && (!options || typeof options !== "object" || Array.isArray(options))) {
+      throw new TypeError("qdd.ask 第三参数必须是回调或 { images, onEvent }");
+    }
+    const onEvent = typeof options === "function" ? options : options?.onEvent;
+    if (onEvent !== undefined && typeof onEvent !== "function") throw new TypeError("qdd.ask onEvent 必须是函数");
+    const images = typeof options === "object" ? options.images : undefined;
+    const res = await fetch("/api/ask", { method: "POST", headers, body: JSON.stringify({ question, context, images }) });
     if (!res.ok || !res.body) {
       const body = await res.json().catch(() => ({}));
       throw new Error(body.error || "HTTP " + res.status);

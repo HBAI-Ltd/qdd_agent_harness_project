@@ -694,6 +694,90 @@ test("answer, approval, and cancellation responses cannot reload or select an ob
   }
 });
 
+for (const action of ["approvals", "questions"]) {
+  for (const status of ["error", "idle", "running", "waiting"]) {
+    test(`${action} 404 refreshes history and ${status} state without accepting an expired request`, async () => {
+      const original = { ...session("selected"), status: "waiting", events: [
+        { type: "approval_required", requestId: "expired", tool: "save_skill", source: "builtin", args: {}, at: "2026-10-17T01:00:00Z" },
+      ] };
+      const service = backend([original]);
+      const { workspace } = mountWorkspace();
+      await ready(workspace);
+      const response = service.hold(`/api/sessions/selected/${action}/expired`, "POST");
+      const pending = action === "approvals"
+        ? workspace.resolveApproval("expired", true)
+        : workspace.answerQuestions("expired", {});
+      const updatedAt = "2026-10-17T03:00:00Z";
+      const events = [...original.events,
+        { type: "approval_resolved", requestId: "expired", approved: false, at: updatedAt },
+        { type: "status", status, at: updatedAt },
+      ];
+      service.sessions.set("selected", { ...original, status, updatedAt, events });
+      response.respond({ error: "请求不存在或已过期" }, 404);
+      assert.equal(await pending, false);
+      assert.match(workspace.error.value, /请求不存在或已过期/);
+      assert.equal(workspace.activeSession.value.status, status);
+      assert.deepEqual(workspace.activeSession.value.events, events);
+      assert.equal(workspace.eventActionBusy.value, false);
+      assert.equal(workspace.sending.value, status === "running" || status === "waiting");
+      assert.equal(workspace.canCancel.value, status === "running" || status === "waiting");
+      assert.equal(workspace.cancelling.value, false);
+      await until(() => service.streamCount("selected") === 1, "The refreshed conversation must keep exactly one stream");
+      const streamCall = service.calls.filter((call) => call.path === "/api/sessions/selected/events").at(-1);
+      assert.equal(streamCall.search, `?since=${events.length}`);
+      const expectedLength = events.length + 1;
+      service.emitSession("selected", { type: "status", status: "idle", at: "2026-10-17T03:00:01Z" });
+      await until(() => workspace.activeSession.value.events.length === expectedLength, "Live events must resume without duplicates");
+      assert.equal(workspace.sending.value, false);
+    });
+  }
+}
+
+test("a restarted waiting session can be stopped using the recovered terminal metadata", async () => {
+  const original = { ...session("selected"), status: "waiting" };
+  const service = backend([original]);
+  const { workspace } = mountWorkspace();
+  await ready(workspace);
+  const response = service.hold("/api/sessions/selected/cancel", "POST");
+  const pending = workspace.cancel();
+  response.respond({ ...original, status: "error", updatedAt: "2026-10-17T03:00:00Z" });
+  assert.equal(await pending, true);
+  assert.equal(workspace.cancelling.value, false);
+  assert.equal(workspace.sending.value, false);
+  assert.equal(workspace.canCancel.value, false);
+  assert.equal(await workspace.sendMessage("继续"), true);
+});
+
+test("an obsolete approval 404 cannot refresh or change the newly selected conversation", async () => {
+  const service = backend([session("A", "2026-10-17T02:00:00Z"), session("B")]);
+  const { workspace } = mountWorkspace();
+  await ready(workspace);
+  const response = service.hold("/api/sessions/A/approvals/expired", "POST");
+  const pending = workspace.resolveApproval("expired", true);
+  await workspace.selectSession("B");
+  const count = service.calls.filter((call) => call.path === "/api/sessions/A").length;
+  response.respond({ error: "授权请求不存在或已过期" }, 404);
+  assert.equal(await pending, false);
+  assert.equal(workspace.activeSessionId.value, "B");
+  assert.equal(workspace.error.value, "");
+  assert.equal(service.calls.filter((call) => call.path === "/api/sessions/A").length, count);
+});
+
+test("approval expiry and a failed state refresh are both reported without unlocking a running task", async () => {
+  const service = backend([{ ...session("selected"), status: "running" }]);
+  const { workspace } = mountWorkspace();
+  await ready(workspace);
+  const response = service.hold("/api/sessions/selected/approvals/expired", "POST");
+  const pending = workspace.resolveApproval("expired", true);
+  service.failNextDetail("selected");
+  response.respond({ error: "授权请求不存在或已过期" }, 404);
+  assert.equal(await pending, false);
+  assert.match(workspace.error.value, /授权请求不存在或已过期.*同步会话失败.*Temporary detail failure/);
+  assert.equal(workspace.sending.value, true);
+  assert.equal(workspace.canCancel.value, true);
+  assert.equal(workspace.eventActionBusy.value, false);
+});
+
 test("errors from an obsolete send are kept out of the newly selected conversation", async () => {
   const service = backend([session("A", "2026-10-17T02:00:00Z"), session("B")]);
   const { workspace } = mountWorkspace();

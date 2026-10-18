@@ -221,7 +221,7 @@ async function main() {
     }
 
     case "sessions": {
-      const hub = new SessionHub(loaded, await DataSources.open({ ...loaded, config: { ...config, mcpServers: {} } }), chat);
+      const hub = new SessionHub(loaded, await DataSources.open(loaded, { connectMcp: false }), chat);
       const [id] = rest;
       if (id) {
         const detail = await hub.detail(id);
@@ -250,7 +250,7 @@ async function main() {
     }
 
     case "datasets": {
-      const sources = await DataSources.open({ ...loaded, config: { ...config, mcpServers: {} } });
+      const sources = await DataSources.open(loaded, { connectMcp: false });
       for (const d of await sources.datasets.list()) {
         console.log(`${d.name.padEnd(20)} ${d.kind.padEnd(10)} v${d.version}  截至 ${d.watermark ?? "-"}  ${d.rowCount} 行${d.source ? `  ← ${d.source.tool}` : ""}`);
       }
@@ -273,7 +273,7 @@ async function main() {
     case "compact": {
       const [name, at] = rest;
       if (!name || !at) throw new Error('用法：npm run qdd -- compact <数据集> "YYYY-MM-DD HH:mm"');
-      const sources = await DataSources.open({ ...loaded, config: { ...config, mcpServers: {} } });
+      const sources = await DataSources.open(loaded, { connectMcp: false });
       console.log(`已生成检查点 ${name} @ ${at}（${await compactDataset(sources.datasets, name, at)} 个实体）`);
       return;
     }
@@ -283,7 +283,7 @@ async function main() {
       const [sub, arg] = rest;
       if (!sub || sub === "list") {
         const sources = await openSources(loaded);
-        const mcp = Object.entries(config.mcpServers).map(([name, server]) => ({
+        const mcp = Object.entries(sources.mcpServers).map(([name, server]) => ({
           name,
           allowWrite: server.allowWrite === true,
           error: sources.warnings.find((w) => w.startsWith(`MCP 服务 ${name} 接入失败`)),

@@ -1,0 +1,17 @@
+node_modules/
+.local/
+dist-local/
+dist/
+.env
+.env.*
+!*.example.json
+*.dpapi
+*.pid
+*.log
+*.tsbuildinfo
+**/mcp-key
+**/browser-key
+**/native-profile.json
+**/shouqianba-client-config.json
+**/keepalive-history.json
+**/session*.json

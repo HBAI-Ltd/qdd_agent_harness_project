@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { renderMarkdown } from "../src/utils/markdown.ts";
+import { markdownMedia, renderMarkdown } from "../src/utils/markdown.ts";
+import { mediaKind, safeMediaUrl } from "../src/utils/media.ts";
 
 test("renders assistant headings, formatting, lists, quotes and line breaks", () => {
   const html = renderMarkdown("## 销售分析\n\n**增长**与*趋势*，`revenue`。\n下一行\n\n- 门店 A\n- 门店 B\n\n1. 核对数据\n2. 生成报告\n\n> 仅供参考\n\n~~过期~~");
@@ -75,4 +76,37 @@ test("supports partial streamed Markdown and safely closes newly completed code 
   assert.match(completed, /<strong>分析中<\/strong>/);
   assert.match(completed, /<\/code><\/pre>\n<p>完成<\/p>/);
   assert.equal(renderMarkdown(""), "");
+});
+
+test("extracts media from Markdown images, links and autolinks, including signed and extensionless streams", () => {
+  const content = '![门店](https://example.com/snapshot)\n\n[图片](/photo.JPG?signature=1)\n\nhttps://example.com/clip.MP4?token=abc\n\n[直播](https://example.com/live "application/vnd.apple.mpegurl")\n\n[FLV](https://example.com/live.flv)\n\n[重复](https://example.com/live.flv)';
+  assert.deepEqual(markdownMedia(content).map(({ src, kind }) => ({ src, kind })), [
+    { src: "https://example.com/snapshot", kind: "image" },
+    { src: "/photo.JPG?signature=1", kind: "image" },
+    { src: "https://example.com/clip.MP4?token=abc", kind: "video" },
+    { src: "https://example.com/live", kind: "hls" },
+    { src: "https://example.com/live.flv", kind: "flv" },
+  ]);
+  assert.match(renderMarkdown(content, true), /<a href="https:\/\/example.com\/snapshot"/);
+  assert.doesNotMatch(renderMarkdown(content, true), /<img/);
+});
+
+test("media extraction excludes code, raw HTML, credentials and unsafe protocols", () => {
+  assert.deepEqual(markdownMedia('`https://example.com/clip.mp4`\n\n```md\n![image](https://example.com/a.png)\n```\n\n<video src="https://example.com/a.mp4"></video>\n\n[bad](javascript:run.mp4)\n\n![bad](data:image/png;base64,abc)\n\n[private](https://user:pass@example.com/a.mp4)'), []);
+  for (const url of ["javascript:run.mp4", "data:video/mp4;base64,abc", "file:///test.mp4", "https://u:p@example.com/x", "https://example.com\\x", " https://example.com/x"]) {
+    assert.equal(safeMediaUrl(url), false, url);
+  }
+  assert.equal(mediaKind("clip.mp4", "video/x-flv"), "flv");
+  assert.equal(mediaKind("stream", "application/vnd.apple.mpegurl"), "hls");
+  assert.equal(mediaKind("file", "image/png"), "image");
+  assert.equal(mediaKind("report.pdf"), undefined);
+});
+
+test("streaming Markdown only exposes completed media links and escapes image labels", () => {
+  assert.deepEqual(markdownMedia("[直播](https://example.com/live.m3u8"), []);
+  assert.equal(markdownMedia("[直播](https://example.com/live.m3u8)").length, 1);
+  assert.match(renderMarkdown('![<script>](https://example.com/a.png)', true), /&lt;script&gt;/);
+  const linkedImage = renderMarkdown("[![截图](/photo.png)](/clip.mp4)", true);
+  assert.equal((linkedImage.match(/<a /g) ?? []).length, 1);
+  assert.deepEqual(markdownMedia("[![截图](/photo.png)](/clip.mp4)").map((item) => item.kind), ["video", "image"]);
 });

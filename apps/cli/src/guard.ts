@@ -74,22 +74,58 @@ export function checkFile(rel: string, content: string, cdnAllowlist: string[]):
   return result;
 }
 
-/** 浏览器侧兜底：即使守卫被绕过，CSP 也会阻止页面联网与提交。 */
-export function pageCsp(cdnAllowlist: string[], frameAncestors: string[], scope: { origin: string; slug: string }): string {
+/** 接受 HTTPS 或明确的 HTTP 回环视频源，或单独的 "*"；不接受 URL 通配符或 CSP 指令。 */
+export function parseMediaOrigins(value: unknown): string[] {
+  if (!Array.isArray(value)) throw new Error('mediaOrigins 必须是 HTTPS/HTTP 回环 origin 数组或 ["*"]');
+  if (value.length === 1 && value[0] === "*") return ["*"];
+  return [
+    ...new Set(
+      value.map((entry: unknown, index: number) => {
+        const invalid = () =>
+          new Error(`mediaOrigins 第 ${index + 1} 项必须是无路径、凭据或通配符的 HTTPS origin，HTTP 仅允许 localhost、127.0.0.1 或 [::1]`);
+        if (typeof entry !== "string") throw invalid();
+        const match = /^https?:\/\/([^\s/?#@\\;'"<>*%]+)\/?$/i.exec(entry);
+        if (!match) throw invalid();
+        let url: URL;
+        try {
+          url = new URL(entry);
+        } catch {
+          throw invalid();
+        }
+        if (!url.hostname || url.username || url.password || url.pathname !== "/" || url.search || url.hash) throw invalid();
+        // Check the literal authority as URL normalizes alternative IP spellings
+        // such as 127.1 and 2130706433 to 127.0.0.1.
+        if (url.protocol === "http:" && !/^(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/i.test(match[1]!)) throw invalid();
+        return url.origin;
+      }),
+    ),
+  ];
+}
+
+/** 浏览器侧兜底：视频来源按显式配置放行，业务请求及表单仍受守卫限制。 */
+export function pageCsp(
+  cdnAllowlist: string[],
+  frameAncestors: string[],
+  scope: { origin: string; slug: string },
+  mediaOrigins: string[] = [],
+): string {
   const cdn = cdnAllowlist.map((h) => `https://${h}`).join(" ");
   const page = `${scope.origin}/pages/${scope.slug}/`;
   const assets = `${scope.origin}/assets/`;
+  const origins = parseMediaOrigins(mediaOrigins);
+  const allMedia = origins.length === 1 && origins[0] === "*";
+  const media = origins.join(" ");
   return [
-    "default-src 'none'",
-    `script-src ${page} ${assets} ${scope.origin}/sdk/ 'unsafe-inline' ${cdn}`,
-    `style-src ${page} ${assets} 'unsafe-inline' ${cdn}`,
-    `font-src ${page} ${assets} data: ${cdn}`,
+    "default-src 'self'",
+    `script-src ${page} ${assets} ${scope.origin}/sdk/ 'unsafe-inline' 'self' ${media ? " 'wasm-unsafe-eval'" : ""} ${cdn}`,
+    `style-src ${page} ${assets} 'self' 'unsafe-inline' ${cdn}`,
+    `font-src ${page} ${assets} 'self' data: ${cdn}`,
     `img-src ${page} ${assets} data: blob:`,
-    `connect-src ${scope.origin}/api/`,
+    allMedia ? `connect-src ${scope.origin}/api/ 'self' http: https: ws: wss:` : `connect-src ${scope.origin}/api/ 'self' ${media}`.trim(),
+    allMedia ? "media-src 'self' http: https: blob: data:" : `media-src 'self' blob: ${media}`.trim(),
     "form-action 'none'",
-    "frame-src 'none'",
-    "worker-src 'none'",
-    "sandbox allow-scripts allow-downloads allow-modals",
+    "frame-src 'self'",
+    "worker-src 'self' blob:",
     `frame-ancestors 'self' ${frameAncestors.join(" ")}`.trim(),
     "object-src 'none'",
     "base-uri 'none'",

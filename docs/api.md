@@ -25,6 +25,15 @@ harness 不提供界面，前端通过本网关完成：许愿与会话、展示
 ## 许愿与会话
 
 ```http
+POST /api/chat/images                { "url": "http://127.0.0.1:8787/captures/<32位十六进制任务ID>/frame_000001.jpg" }
+                                    → image/jpeg（二进制，Cache-Control: no-store）
+```
+
+对话里的摄像头截图经此接口读取，前端携带网关 token 后将响应转换为 Blob URL 显示，避免监控服务的同源资源策略阻止跨端口图片加载。页面 token 不可使用此接口；网关 token 不进入图片链接。仅允许已安装、状态为 `connected` 且运行时工具成功加载的海康、天翼、萤石连接器来源，以及 `/captures/<32位小写十六进制ID>/frame_<6位序号>.jpg` 路径。拒绝凭据、查询串、片段、路径编码绕过和重定向，不转发浏览器或 MCP 凭据。截图最多 10 MiB，读取超时 10 秒，校验响应 MIME 与 JPEG 文件标记。
+
+错误体沿用 `{ "error": string }`：400 地址或请求格式不合法；401 缺少网关鉴权；403 来源未接入、连接器不可用或源拒绝访问；404 截图不存在或过期；405 非 POST；413 请求体超过 4 KiB 或截图超过 10 MiB；502 源响应失败、跳转或无效 JPEG；504 读取超时。后端回归测试位于 `apps/cli/src/chat-images.test.ts`，执行 `npm run build` 后用 `node --test apps/cli/dist/chat-images.test.js` 单独运行，也纳入 `npm test`。
+
+```http
 GET /api/chat/options                → ChatOptions（需网关 token）
 ```
 
@@ -59,6 +68,14 @@ POST /api/sessions/:id/questions/:requestId   { "answers": { "<问题id>": ["<�
 POST /api/sessions/:id/cancel        → 202
 ```
 
+同一会话要求修改界面时，默认沿用 `SessionMeta.slug`，先读取现有文件再发布更新。新对话也可以直接指定已有页面名称或 slug，例如「把品类销售页面的图表改成按周」；agent 用 `edit_page({ slug })` 选择已有页面，再通过 `list_files` / `read_file` / `write_file` / `finish` 修改。页面地址、创建时间和未修改的文件保留，`version` 递增，页面列表不增加重复项。
+
+`edit_page` 必须在本轮写文件、生成数据快照或确认绑定新页面的定时任务之前调用；目标不存在或被另一个普通会话占用时，选择失败且保留原绑定。选中成功即保存会话的 `slug`，即使本轮仅回复或随后失败，续聊仍沿用选中的页面。手动修改可以等待该页面正在执行的定时任务退出后接管，后续定时计划照常运行；定时任务本身不能切换目标页面。
+
+页面修改回归测试位于 `apps/cli/src/page-editing.test.ts` 和 `apps/cli/src/page-editing-schedule.test.ts`，与其他后端测试一样通过 `npm test` 执行。
+
+授权或问题不存在、过期时返回 404；前端保留错误提示并重新读取会话详情及续接事件流，不将过期误判为授权成功或强制结束仍在运行的任务。服务重启后，没有对应运行任务的 `running` / `waiting` 会话会在读取时持久化为 `error`，并追加中断原因及终态事件。旧授权不可继续提交；取消接口返回恢复后的元信息，前端解除停止/发送锁，可在原会话重新发送消息。
+
 普通对话保存在 `workspace/sessions/`，定时任务执行对话（含立即运行）保存在 `workspace/schedule-sessions/`，均使用 `<id>.meta.json`、`<id>.events.jsonl`、`<id>.messages.json`。工作区初始化时会自动将旧目录中带 `origin.kind: "schedule"` 的记录迁入新目录。定时执行记录不进入 `/api/sessions` 列表、普通会话统计或全局 `session_updated` 推送；仍可通过执行结果中的 `sessionId` 查看详情、订阅事件并处理授权。
 
 每轮选择都会实际用于模型请求，并保存到 `SessionMeta.model` / `reasoningEffort`。续聊省略选择时沿用该会话上轮设置；仅切换模型时保留兼容的强度，不兼容则使用目标模型的默认强度。旧会话没有这些字段时沿用网关默认设置。未知模型或该模型不支持的强度返回 400，且不启动执行。
@@ -84,7 +101,18 @@ POST /api/sessions/:id/cancel        → 202
 
 `default` 省略服务商 `reasoning_effort`，DeepSeek 仍沿用原有 `llm.thinking` 开关；`none` 关闭思考，其余强度透传 `reasoning_effort`。DeepSeek 官方接口未声明能力时提供 `default / none / low / high / max`，对应 [DeepSeek 思考模式文档](https://api-docs.deepseek.com/zh-cn/guides/thinking_mode/)；其他兼容服务默认仅提供 `default`，请在每个模型的 `reasoningEfforts` 中显式声明其支持的强度（包括关闭思考的 `none`）。可声明的值为 `default / none / minimal / low / medium / high / xhigh / max / ultra`；不能仅凭名称推断服务商支持某个档位。`defaultReasoningEffort` 必须包含在该模型的候选强度中。
 
-附件无需二进制上传接口：前端将附件正文转换为 Markdown，再和用户文字一起放入 `wish` 或 `text`；沿用现有请求体上限 1 MiB。
+文本正文仍可放入 `wish` 或 `text`（请求体上限 1 MiB）。上传图片或其他二进制附件时，先向 `POST /api/attachments` 发送原始字节，携带管理端鉴权、实际 `Content-Type` 和 URI 编码的 `X-File-Name`，取得附件引用，再在创建或续聊请求中传入 `attachments: [附件id]`。上传上限为 50 MiB；聊天上传图片单张及每条消息图片总大小均不超过 50 MiB，不套用页面图片问答的 5 MiB 限制。
+
+对话图片处理：
+
+- 聊天上传的 PNG/JPEG/GIF/WebP 图片直接编码为 Base64 data URL，在首轮用户消息中发送，无需模型先调用工具；`read_attachment` 也可再次读取历史图片（单张最多 50 MiB）；文本与 Excel 的按段读取行为不变。网络图片链接通过 `view_image({url})` 转成真正的图片输入，仅支持模型服务商可访问、无内嵌凭据的 HTTPS URL。
+- 浏览器 `screenshot` 和 MCP `image` 内容自动转为图片输入。摄像头返回的 `job.frames` / `frames` 使用 HTTPS URL，或从已接入摄像头对应的本地采集目录读取 JPEG 并编码为 Base64；不允许任意本地文件、目录穿越或符号链接越界。
+- 浏览器、MCP 和摄像头每次工具结果最多 4 张图片，Base64 单张最多 5 MiB、合计最多 10 MiB，网络 URL 最长 8192 字符。多帧采集用 `offset` / `limit` 分批读取；多个摄像头工具可各自携带图片。
+- 同批所有 `tool` 回复先完整返回，再追加带来源工具名与调用 ID 的 `user` 图片消息，序列化为 OpenAI 兼容的 `text` + `image_url` 内容块；原工具 JSON 结果和授权策略不变。随后继续模型轮转，图片未分析前不能在同批工具末尾提前 `reply` / `finish`。
+- 默认所有模型都支持图片识别，沿用会话选择的模型，不按模型名称拦截，不自动切换。文件缺失、格式/大小错误或服务商拒绝图片时明确报错，不返回虚构的分析结论。
+- 图片正文不进入 SSE 事件日志，但会和完整模型对话一起保存到 `<id>.messages.json`，供续聊、进程重启后恢复使用；这些文件包含图片或临时签名 URL，应按门店敏感资料保护。
+
+图片轮转回归位于 `apps/cli/src/tool-images.test.ts`，构建后运行 `node --test apps/cli/dist/tool-images.test.js`，也包含在 `npm test` 中。
 
 模型选择的回归测试位于 `apps/cli/src/chat-options.test.ts`（与其他后端测试使用 `*.test.ts` 命名），执行 `npm test` 可同时验证网关校验、续聊继承、会话重载与实际服务商请求字段。
 
@@ -171,7 +199,8 @@ POST   /api/schedules/:id/run    立即执行一次 → 202 { "sessionId" }
 历史接口需网关鉴权；任务不存在返回 404，尚未执行返回 `[]`。例如请求 `GET /api/schedules/<任务ID>/sessions`，返回 `[{"id":"<会话ID>","title":"经营日报","summary":"日报已完成","slug":null,"status":"idle","origin":{"kind":"schedule","scheduleId":"<任务ID>","scheduleName":"经营日报"},"createdAt":"2026-10-18T00:00:00.000Z","updatedAt":"2026-10-18T00:01:00.000Z"}]`。使用其中的 `id` 请求 `GET /api/sessions/:id` 回放完整对话。
 
 - `cron` 为 5 段（分 时 日 月 周），按网关时区；例：`0 8 * * *` 每天 8 点、`0 9 * * 1` 每周一 9 点、`0 */2 * * *` 每 2 小时。
-- 到点以**无人值守**方式发起会话（`SessionMeta.origin = { kind: "schedule", … }`）：不提问；写入类操作进入工作台待办等待授权。
+- 到点以**无人值守**方式发起会话（`SessionMeta.origin = { kind: "schedule", … }`）：不提问；工具调用（含写入、浏览器操作、保存技能和消息推送）自动授权，不产生 `approval_required` 或等待人工确认的 `waiting` 状态。立即运行、定时会话续聊（含网关重启后）使用相同策略；普通对话仍按原规则确认，单独设置无人值守不代表自动授权。只读连接器限制、参数校验、数据核验和页面隔离仍生效。
+- 定时任务会话（含立即运行）发布页面时，不将任务提示词记入页面的 `wish`：已有页面保留原值，新页面使用空字符串。任务提示词仍用于执行并保存在执行会话中；普通对话发布页面的 `wish` 记录方式不变。
 - 完成后把结论推送到 `notify` 连接器；配置推送目标即视为店长授权该任务的推送。执行结果记录在 `lastRun`（含推送结果）。
 - 网关停机期间错过的执行，启动后补跑一次。变化时推送 `schedules_changed`。任务列表与详情通过 `currentRun: { sessionId, status }` 返回当前执行状态（仅执行期间存在），前端无需从普通对话列表查找执行记录。
 - agent 也能在会话中用 `create_schedule` 创建任务：先以 `approval_required`（`tool: "create_schedule"`，参数含名称、cron、下次执行时间、任务描述、绑定页面、推送目标）请店长确认，确认后才写入。这类任务带 `createdBy: { kind: "agent", sessionId }`；定时执行的会话本身不能再创建任务。
@@ -188,7 +217,21 @@ POST   /api/connectors/:id/verify   重新验证并记录 status/detail
 POST   /api/connectors/:id/test     { "text"? } 发送测试消息
 ```
 
-`connectors` 包含内置数据（`origin: builtin`）、配置文件中的 MCP 服务（`origin: mcp`，只读展示）与通过 API 安装的连接器（`origin: installed`）。`catalog` 中 `available: false` 的类型（收银、ERP、摄像头、门店手机、外卖平台、企业微信）暂未开放安装。
+`connectors` 包含内置数据（`origin: builtin`）、自定义 MCP 服务（`origin: mcp`，只读展示）与通过 API 安装的连接器（`origin: installed`）。飞书、收银系统与门店摄像头开放安装；ERP、门店手机、外卖平台、企业微信暂未开放。收银和摄像头条目提供 `providers: [{ id, name }]` 供用户选择，默认不安装任何平台。
+
+**本地 MCP** 安装请求示例：
+
+```json
+{ "type": "pos", "mode": "mcp", "provider": "shouqianba", "name": "门店收银" }
+```
+
+```json
+{ "type": "camera", "mode": "mcp", "provider": "haik", "name": "门店摄像头" }
+```
+
+摄像头可选择 `haik`、`tysl`、`ezviz`，收银可选择 `shouqianba`。只有用户提交安装才验证对应 MCP 并持久保存，验证失败不保存；重复平台返回输入错误。安装成功后工具立即可用，删除后立即撤销，重启后恢复用户选择。四家厂商的 `mcpServers` 配置仅作为连接参数覆盖，不表示已安装。返回的 `config` 包含 `mode: "mcp"`、`provider` 和本地 `consoleUrl`，不含密钥；账号登录在控制台另行完成。
+
+本地 MCP 的 `PUT` 仅支持修改名称，`verify` 验证本地 MCP 连接；不发送短信或业务请求。收银权限固定为 `read`，摄像头固定为 `confirm`。本地 MCP 不支持 `/test` 消息推送，也不能作为定时任务的消息接收方。
 
 `permission`：`read` 只查看（不能推送）/ `confirm` 每次推送需店长确认（默认）/ `auto` 无需确认。
 
@@ -350,6 +393,52 @@ await qdd.records.update("loss_log", id, { qty: 3 });
 await qdd.records.remove("loss_log", id); // 作废
 await qdd.records.list("loss_log", { from: "2026-10-01", limit: 100 }); // { schema, rows, total }
 ```
+
+### 图片问答
+
+`qdd.ask(question, context?, optionsOrOnEvent?)` 返回 `Promise<string>`。原有的第三参数进度回调保持兼容；传选项对象可附加图片：
+
+```js
+try {
+  const answer = await qdd.ask("分析图片中的货架陈列问题", { store: "当前门店" }, {
+    images: [
+      { url: imageDataUrl, detail: "high" },
+      // 也支持由用户提供、模型服务商可访问的 HTTPS 图片 URL。
+    ],
+    onEvent(event) {
+      if (event.type === "tool") statusElement.textContent = `正在查询：${event.name}`;
+    },
+  });
+  answerElement.textContent = answer;
+} catch (error) {
+  answerElement.textContent = `分析失败：${error.message}`;
+}
+```
+
+本地 `<input type="file">` 选中的图片可通过 `FileReader.readAsDataURL(file)` 得到 `imageDataUrl`；截图可用 `canvas.toDataURL("image/jpeg", 0.85)`，跨源画面需满足 CORS。读取/截图失败必须显示错误。图片放在 `images` 中，不要放入 `context`（上下文仍按文本处理并截取前 20,000 字符）。只在用户明确提交时发送图片，不要把图片数据或签名 URL 写进日志、生成页面源码或 `qdd.state`。
+
+接口：`POST /api/ask`
+
+```json
+{
+  "question": "分析这张图片",
+  "context": { "store": "当前门店" },
+  "images": [
+    { "url": "https://images.example.com/shelf.jpg", "detail": "auto" }
+  ]
+}
+```
+
+- `images` 可省略或为空数组；最多 **4 张**。每项必须包含 `url`，`detail` 可省略或为 `auto` / `low` / `high`。
+- Base64 data URL：仅支持 PNG、JPEG、GIF、WebP；网关检查编码和文件头与 MIME 的一致性，完整解码由模型服务商负责。按解码后字节数计算，单张最多 **5 MiB**、合计最多 **10 MiB**。
+- HTTPS URL：最多 **8192 字符**，不允许内嵌用户名密码。网关**不下载**远程图片，直接传给模型服务商；远程图片的格式、大小、访问权限由服务商校验。带签名的链接也会发送给服务商，不会附带网关凭据；需要本地登录或仅内网可访问的图片应先转为 data URL。
+- 该接口的 JSON 请求体上限为 **15 MiB**，其他接口上限不变。无效图片参数返回 HTTP 400，请求体超限返回 413。
+- 页面仍须在 `finish` 中声明 `useAgent: true`，SDK 自动携带页面凭据；未声明返回 403，凭据无效返回 401。
+- 沿用当前默认模型配置，不自动选择或切换视觉模型；使用者须确保模型及 OpenAI 兼容接口支持 `image_url` 内容块和工具调用。模型拒绝图片或执行失败时，以 SSE `{"type":"error","message":"..."}` 返回，SDK 会抛出异常。
+- SSE 工具进度为 `{"type":"tool","name":"..."}`，最终回答为 `{"type":"answer","text":"..."}`；该入口仍只能调用只读数据工具。
+- 只读工具返回的 MCP 图片或摄像头采集帧同样会在所有工具结果之后附加为图片输入，并继续回答；不会因此开放截图写入、云台操作或其他写权限。
+
+回归测试位于 `apps/cli/src/ask-images.test.ts`，使用 Node.js 内置测试器，不连接真实模型或远程图片。执行 `npm run build` 后运行 `node --test apps/cli/dist/ask-images.test.js`，验证图片边界、权限、SDK 兼容性、模型请求格式及错误回传。
 
 ## 任务模板与主界面通信
 

@@ -1,0 +1,20 @@
+{
+  "headers": {
+    "User-Agent": "",
+    "STN-ClientType": "",
+    "STN-OsVersion": "",
+    "STN-SoftVersion": "",
+    "appName": "",
+    "STN-PhoneType": "Local Windows"
+  },
+  "sdk": {
+    "appName": "",
+    "netType": 0,
+    "clientType": 0,
+    "osVersion": "",
+    "appID": "",
+    "appKey": "",
+    "sdkVersion": ""
+  },
+  "loginAuthorization": ""
+}

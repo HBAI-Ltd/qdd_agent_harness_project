@@ -44,6 +44,9 @@ test("malformed schedules preserve the raw approval fallback", () => {
 test("approval copy retains explicit opt-in decisions and the existing skill and general labels", () => {
   assert.equal(approvalPresentation("define_record").approve, "确认登记表结构");
   assert.equal(approvalPresentation("create_schedule").decline, "暂不创建");
+  assert.equal(approvalPresentation("edit_schedules").approve, "确认修改定时任务");
+  assert.equal(approvalPresentation("edit_schedules").decline, "暂不修改");
+  assert.equal(scheduleApprovalPreview(request("edit_schedules", { id: "task-1", changes: { enabled: false } })), undefined);
   assert.equal(approvalPresentation("save_skill").approve, "就这样，保存为技能");
   assert.equal(approvalPresentation("browser").approve, "允许执行");
 });

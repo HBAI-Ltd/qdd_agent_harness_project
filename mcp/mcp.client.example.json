@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "haik-local": {"url": "http://127.0.0.1:8787/mcp"},
+    "tysl-local": {"url": "http://127.0.0.1:8790/mcp"},
+    "ezviz-local": {"url": "http://127.0.0.1:8791/mcp"},
+    "shouqianba-local": {
+      "command": "node",
+      "args": ["C:/path/to/qdd_agent_harness_project/mcp/sites/shouqianba-console/mcp-stdio.mjs"]
+    }
+  }
+}

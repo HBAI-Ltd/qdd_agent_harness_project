@@ -2,8 +2,10 @@ import { watch } from "node:fs";
 import { mkdir, readFile, realpath, stat } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import type { AnswerBody, AskBody, SelectModelBody, BrowserStreamEvent, CreateWishBody, GatewayEvent, HarnessConfig, JsonObject, Overview, PageView, RecordInput, SendMessageBody, ToolInfo } from "@qdd/shared";
 import { runAsk } from "../agent/ask.js";
+import { MAX_ASK_BODY_BYTES, parseAskImages } from "../agent/ask-images.js";
 import { chatOptions } from "../agent/chat-options.js";
 import type { ChatFn } from "../agent/llm.js";
 import { AttachmentError, MAX_ATTACHMENT_BYTES } from "../attachments.js";
@@ -15,6 +17,7 @@ import { pageCsp } from "../guard.js";
 import { BadRequest, Conflict, NotFound, SessionHub } from "../sessions.js";
 import { pinPage, readPages, readPins, readStyle, unpinPage, resetStyle, toScriptJson, writeAtomic, writeStyle } from "../web/site.js";
 import { Auth } from "./auth.js";
+import { chatImageOrigins, readChatImage } from "./chat-images.js";
 import { handleMcp } from "./mcp-endpoint.js";
 import { buildComputeScript, SDK_JS } from "./sdk.js";
 import { CameraLogin } from "../workbench/cameras.js";
@@ -29,7 +32,11 @@ const MIME: Record<string, string> = {
   ".css": "text/css; charset=utf-8",
   ".json": "application/json; charset=utf-8",
   ".svg": "image/svg+xml",
+  ".wasm": "application/wasm",
 };
+const CAMERA_PLAYER_ROOT = path.dirname(fileURLToPath(import.meta.resolve("ezuikit-flv")));
+const HLS_PLAYER_ROOT = path.dirname(fileURLToPath(import.meta.resolve("hls.js/dist/hls.min.js")));
+const CAMERA_PLAYER_FILES = new Set(["index.js", "style.css", "decoder.js", "decoder.wasm", "LICENSE"]);
 const MAX_BODY = 1024 * 1024;
 const MAX_STATE = 64 * 1024;
 const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
@@ -72,6 +79,18 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
   const hub = new SessionHub(loaded, sources, options.chat, workbench);
   const scheduler = new Scheduler(loaded, hub, workbench);
   workbench.scheduler = scheduler;
+  // Media permissions can change while the gateway is running; apply them to
+  // the next page load without restarting conversations or camera sessions.
+  const currentPageCsp = async (scope: { origin: string; slug: string }): Promise<string> => {
+    let mediaOrigins = config.mediaOrigins;
+    try {
+      const latest = JSON.parse(await readFile(path.join(paths.root, "harness.config.json"), "utf8")) as Partial<HarnessConfig>;
+      mediaOrigins = latest.mediaOrigins ?? config.mediaOrigins;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw new HttpError(500, "无法读取视频源配置，请检查配置文件格式");
+    }
+    return pageCsp(config.cdnAllowlist, config.gateway.corsOrigins, scope, mediaOrigins);
+  };
   const globalClients = new Set<ServerResponse>();
   const computeJs = await buildComputeScript();
   await mkdir(paths.state, { recursive: true });
@@ -90,9 +109,9 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
   });
   if (options.scheduler !== false) scheduler.start();
 
-  const cameras = new CameraLogin(config);
+  const cameras = new CameraLogin(() => sources.mcpServers);
   const mcpInfo = (): McpConnectorInfo[] =>
-    Object.entries(config.mcpServers).map(([name, server]) => ({
+    Object.entries(sources.mcpServers).map(([name, server]) => ({
       name,
       allowWrite: server.allowWrite === true,
       error: sources.warnings.find((w) => w.startsWith(`MCP 服务 ${name} 接入失败`)),
@@ -175,7 +194,13 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
     if (p === "/health") return json(res, 200, { status: "ok" });
     if (p === "/sdk/qdd.js") return send(res, 200, MIME[".js"]!, SDK_JS);
     if (p === "/sdk/compute.js") return send(res, 200, MIME[".js"]!, computeJs);
-    if (p.startsWith("/assets/")) return serveFile(res, path.join(paths.site, "assets"), p.slice("/assets/".length));
+    if (p.startsWith("/assets/camera-player/")) {
+      const asset = p.slice("/assets/camera-player/".length);
+      if (asset === "hls.min.js") return serveFile(res, HLS_PLAYER_ROOT, asset, HLS_PLAYER_ROOT);
+      if (!CAMERA_PLAYER_FILES.has(asset)) throw new HttpError(404, "Not Found");
+      return serveFile(res, CAMERA_PLAYER_ROOT, asset, CAMERA_PLAYER_ROOT);
+    }
+    if (p.startsWith("/assets/")) return serveFile(res, path.join(paths.site, "assets"), p.slice("/assets/".length), paths.site);
     if (p.startsWith("/pages/")) return servePage(req, res, url);
 
     if (p === "/mcp") {
@@ -215,14 +240,15 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
         if (!page.useAgent) throw new HttpError(403, `页面 ${slug} 未声明使用 agent`);
         askSources = sources.restricted(page.tools);
       }
-      const body = (await readJson(req)) as AskBody;
+      const body = (await readJson(req, MAX_ASK_BODY_BYTES)) as AskBody;
       if (typeof body?.question !== "string" || !body.question.trim()) throw new HttpError(400, "question 不能为空");
+      const images = parseAskImages(body.images);
       const chat = options.chat(resolveModel(config.llm));
-      const stream = openSse(req, res);
+      const stream = openSse(res);
       const controller = new AbortController();
-      res.on("close", () => controller.abort());
+      res.once("close", () => controller.abort());
       try {
-        const text = await runAsk(askSources, chat, body.question, body.context, (name) => stream({ type: "tool", name }), controller.signal);
+        const text = await runAsk(askSources, chat, body.question, body.context, (name) => stream({ type: "tool", name }), controller.signal, images);
         stream({ type: "answer", text });
       } catch (error) {
         stream({ type: "error", message: (error as Error).message });
@@ -301,8 +327,16 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
     if (!p.startsWith("/api/")) throw new HttpError(404, "Not Found");
     requireAdmin(req, url);
 
+    if (p === "/api/chat/images") {
+      if (m !== "POST") throw new HttpError(405, "图片读取接口只接受 POST");
+      const body = await readJson(req, 4096);
+      const connectors = await workbench.connectors.list(mcpInfo());
+      const image = await readChatImage(body, chatImageOrigins(sources, connectors));
+      return send(res, 200, "image/jpeg", image);
+    }
+
     if (p === "/api/events" && m === "GET") {
-      openSse(req, res);
+      openSse(res);
       globalClients.add(res);
       res.on("close", () => globalClients.delete(res));
       return;
@@ -463,7 +497,7 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
         return json(res, 200, state);
       }
       if (sub === "/stream" && m === "GET") {
-        const stream = openSse(req, res);
+        const stream = openSse(res);
         // 背压：写缓冲未清空时只保留最新一帧，drain 后补发
         let pendingFrame: BrowserStreamEvent | undefined;
         res.on("drain", () => {
@@ -502,6 +536,7 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
       if (m === "GET") return json(res, 200, { catalog: CONNECTOR_CATALOG, connectors: await workbench.connectors.list(mcpInfo()) });
       if (m === "POST") {
         const installed = await workbench.connectors.install(await readJson(req));
+        if (installed.type === "pos" || installed.type === "camera") await sources.reloadMcp(loaded);
         broadcast({ type: "connectors_changed" });
         return json(res, 201, installed);
       }
@@ -527,6 +562,7 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
       const action = connector[2];
       if (action === "/verify" && m === "POST") {
         const view = await workbench.connectors.verify(id);
+        if ((view.type === "pos" || view.type === "camera") && view.status === "connected") await sources.reloadMcp(loaded);
         broadcast({ type: "connectors_changed" });
         return json(res, 200, view);
       }
@@ -546,7 +582,9 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
         if (m === "DELETE") {
           const using = (await scheduler.list()).filter((x) => x.notify?.connectorId === id);
           if (using.length) throw new HttpError(409, `连接器被定时任务使用中：${using.map((x) => x.name).join("、")}`);
+          const view = await workbench.connectors.get(id);
           await workbench.connectors.remove(id);
+          if (view.type === "pos" || view.type === "camera") await sources.reloadMcp(loaded);
           broadcast({ type: "connectors_changed" });
           return json(res, 200, { ok: true });
         }
@@ -569,7 +607,7 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
       if (sub === "/events" && m === "GET") {
         // 先回放历史事件，再推送实时事件；since=N 跳过前 N 条。
         const detail = await hub.detail(id);
-        const stream = openSse(req, res);
+        const stream = openSse(res);
         const since = Math.max(0, Number(url.searchParams.get("since")) || 0);
         for (const e of detail.events.slice(since)) stream(e);
         const off = hub.subscribe(id, stream);
@@ -659,7 +697,7 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
     if (!host || /[\s/@\\?#]/.test(host)) throw new HttpError(400, "Host 不合法");
     let origin: string;
     try { origin = new URL(`http://${host}`).origin; } catch { throw new HttpError(400, "Host 不合法"); }
-    res.setHeader("Content-Security-Policy", pageCsp(config.cdnAllowlist, config.gateway.corsOrigins, { origin, slug: pageSegment }));
+    res.setHeader("Content-Security-Policy", await currentPageCsp({ origin, slug: pageSegment }));
     if (ext !== ".html") return send(res, 200, MIME[ext] ?? "application/octet-stream", await readFile(file));
 
     const boot =
@@ -674,8 +712,8 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
     send(res, 200, MIME[".html"]!, out);
   }
 
-  async function serveFile(res: ServerResponse, root: string, rel: string): Promise<void> {
-    const file = await resolveFile(root, rel, paths.site);
+  async function serveFile(res: ServerResponse, root: string, rel: string, trustedRoot: string): Promise<void> {
+    const file = await resolveFile(root, rel, trustedRoot);
     if (!file) throw new HttpError(404, "Not Found");
     send(res, 200, MIME[path.extname(file).toLowerCase()] ?? "application/octet-stream", await readFile(file));
   }
@@ -805,11 +843,11 @@ function json(res: ServerResponse, status: number, body: unknown): void {
   send(res, status, "application/json; charset=utf-8", JSON.stringify(body));
 }
 
-function openSse(_req: IncomingMessage, res: ServerResponse): (data: unknown) => void {
+function openSse(res: ServerResponse): (data: unknown) => void {
   res.writeHead(200, { "Content-Type": "text/event-stream; charset=utf-8", Connection: "keep-alive" });
   res.write(": connected\n\n");
   const ping = setInterval(() => res.write(": ping\n\n"), 25_000);
-  res.on("close", () => clearInterval(ping));
+  res.once("close", () => clearInterval(ping));
   return (data) => {
     if (!res.writableEnded && !res.destroyed) res.write(`data: ${JSON.stringify(data)}\n\n`);
   };
@@ -829,12 +867,12 @@ async function readBuffer(req: IncomingMessage, limit = MAX_BODY): Promise<Buffe
   return Buffer.concat(chunks);
 }
 
-async function readBody(req: IncomingMessage): Promise<string> {
-  return (await readBuffer(req)).toString("utf8");
+async function readBody(req: IncomingMessage, limit = MAX_BODY): Promise<string> {
+  return (await readBuffer(req, limit)).toString("utf8");
 }
 
-async function readJson(req: IncomingMessage): Promise<unknown> {
-  const text = await readBody(req);
+async function readJson(req: IncomingMessage, limit = MAX_BODY): Promise<unknown> {
+  const text = await readBody(req, limit);
   if (!text) return undefined;
   try {
     return JSON.parse(text);

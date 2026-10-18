@@ -120,6 +120,13 @@ export async function downloadAttachment(base: string, token: string, id: string
   return (await request(base, token, `/api/attachments/${encodeURIComponent(id)}`, { signal: signal ?? null })).blob();
 }
 
+/** Read protected camera frames through the gateway without exposing its token in image URLs. */
+export async function downloadChatImage(base: string, token: string, url: string, signal?: AbortSignal): Promise<Blob> {
+  return (await request(base, token, "/api/chat/images", {
+    method: "POST", body: JSON.stringify({ url }), cache: "no-store", signal: signal ?? null,
+  })).blob();
+}
+
 export async function answerQuestions(base: string, token: string, id: string, requestId: string, answers: ClarifyAnswers, signal?: AbortSignal): Promise<void> {
   const body: AnswerBody = { answers };
   await json(base, token, `/api/sessions/${encodeURIComponent(id)}/questions/${encodeURIComponent(requestId)}`, {

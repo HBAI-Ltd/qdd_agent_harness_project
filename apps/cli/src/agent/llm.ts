@@ -1,4 +1,4 @@
-import type { HarnessConfig, JsonObject } from "@qdd/shared";
+import type { AskImage, HarnessConfig, JsonObject } from "@qdd/shared";
 import { setTimeout as delay } from "node:timers/promises";
 import { isDeepSeek } from "./chat-options.js";
 
@@ -11,6 +11,8 @@ export interface ToolCall {
 export interface ChatMessage {
   role: "system" | "user" | "assistant" | "tool";
   content: string | null;
+  /** User images become image_url content blocks in the provider request. */
+  images?: AskImage[];
   tool_calls?: ToolCall[];
   tool_call_id?: string;
   /** DeepSeek 思考模式：同一轮工具调用中需要原样回传。 */
@@ -94,6 +96,19 @@ export function createChat(llm: HarnessConfig["llm"]): ChatFn {
   };
 
   return async (messages, tools, signal, onDelta) => {
+    const wireMessages = messages.filter((message) =>
+      message.role !== "assistant" || message.content?.trim() || message.tool_calls?.length,
+    ).map(({ images, finishReason: _finishReason, ...message }) => {
+      if (!images?.length) return message;
+      if (message.role !== "user") throw new Error("图片只能附加到 user 消息");
+      return {
+        ...message,
+        content: [
+          { type: "text", text: message.content ?? "" },
+          ...images.map((image) => ({ type: "image_url", image_url: image })),
+        ],
+      };
+    });
     for (let attempt = 0; ; attempt++) {
       signal?.throwIfAborted();
       const res = await fetch(endpoint, {
@@ -101,10 +116,7 @@ export function createChat(llm: HarnessConfig["llm"]): ChatFn {
         headers: { "Content-Type": "application/json", Accept: "text/event-stream", Authorization: `Bearer ${apiKey}` },
         body: JSON.stringify({
           model: llm.model,
-          // 兼容旧会话中误存的纯思考响应；reasoning_content 不能替代正文或工具调用。
-          messages: messages
-            .filter((message) => message.role !== "assistant" || !!message.content?.trim() || !!message.tool_calls?.length)
-            .map(({ finishReason: _finishReason, ...message }) => message),
+          messages: wireMessages,
           tools,
           tool_choice: "auto",
           temperature: 0.2,

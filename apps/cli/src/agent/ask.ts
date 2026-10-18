@@ -1,5 +1,7 @@
+import type { AskImage } from "@qdd/shared";
 import type { DataSources } from "../datasource/registry.js";
 import { formatDate } from "../datasource/store.js";
+import { IMAGE_ANALYSIS_PROMPT, toolImageMessage, toolImages } from "../tool-images.js";
 import { assertCompleteResponse, parseToolArguments, type ChatFn, type ChatMessage, type LlmTool } from "./llm.js";
 
 const MAX_STEPS = 10;
@@ -13,6 +15,7 @@ export async function runAsk(
   context: unknown,
   onTool: (text: string) => void,
   signal?: AbortSignal,
+  images: AskImage[] = [],
 ): Promise<string> {
   signal?.throwIfAborted();
   const readOnly = sources.tools.filter((t) => !t.mutating);
@@ -23,11 +26,12 @@ export async function runAsk(
   const messages: ChatMessage[] = [
     {
       role: "system",
-      content: `你是「钱多多」门店的经营分析助手，今天是 ${formatDate(new Date())}。用只读数据工具核实后回答，不得编造数字。用简体中文，结论先行，简洁。`,
+      content: `你是「钱多多」门店的经营分析助手，今天是 ${formatDate(new Date())}。经营数据用只读数据工具核实，不得编造数字；图片问题直接结合实际图片分析。用简体中文，结论先行，简洁。\n\n${IMAGE_ANALYSIS_PROMPT}`,
     },
     {
       role: "user",
       content: context === undefined ? question : `${question}\n\n页面提供的上下文：\n${JSON.stringify(context).slice(0, 20_000)}`,
+      ...(images.length ? { images } : {}),
     },
   ];
 
@@ -40,6 +44,7 @@ export async function runAsk(
       assertCompleteResponse(reply);
       return reply.content?.trim() ?? "";
     }
+    const imageMessages: ChatMessage[] = [];
     for (const call of reply.tool_calls) {
       signal?.throwIfAborted();
       let output: string;
@@ -49,15 +54,19 @@ export async function runAsk(
         onTool(call.function.name);
         const args = parseToolArguments(call, reply);
         signal?.throwIfAborted();
-        const result = await tool.call(args);
+        const inlineImages: AskImage[] = [];
+        const result = await tool.call(args, (value) => inlineImages.push(...value));
         signal?.throwIfAborted();
         output = JSON.stringify(result).slice(0, RESULT_LIMIT);
+        const images = await toolImages(result, inlineImages, tool.imageRoot, signal);
+        if (images.length) imageMessages.push(toolImageMessage(call.function.name, call.id, images));
       } catch (error) {
         signal?.throwIfAborted();
         output = `错误：${(error as Error).message}`;
       }
       messages.push({ role: "tool", tool_call_id: call.id, content: output });
     }
+    messages.push(...imageMessages);
   }
   throw new Error("问题过于复杂，未能在限定步数内回答");
 }

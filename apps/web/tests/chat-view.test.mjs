@@ -42,6 +42,8 @@ const markdownUrl = new URL("../src/utils/markdown.ts", import.meta.url).href;
 const timelineUrl = new URL("../src/utils/chatTimeline.ts", import.meta.url).href;
 let markdownComponentUrl;
 let attachmentComponentUrl;
+let mediaComponentUrl;
+const mediaUrl = new URL("../src/utils/media.ts", import.meta.url).href;
 const browserUrl = "data:text/javascript," + encodeURIComponent(`
   import { h } from "vue";
   export default {
@@ -56,6 +58,9 @@ const browserUrl = "data:text/javascript," + encodeURIComponent(`
 `);
 const workspaceApiUrl = "data:text/javascript," + encodeURIComponent(`
   export async function downloadAttachment() { return new Blob(); }
+  let imageDownloader = async () => new Blob(["fixture"], { type: "image/jpeg" });
+  export function setChatImageDownloader(download = async () => new Blob(["fixture"], { type: "image/jpeg" })) { imageDownloader = download; }
+  export function downloadChatImage(...args) { return imageDownloader(...args); }
 `);
 const composerUrl = "data:text/javascript," + encodeURIComponent(`
   export async function filesFromDrop(data) { return filesFromInput(data.files); }
@@ -71,11 +76,13 @@ registerHooks({
       if (specifier === "@/api/workspace") return { url: workspaceApiUrl, shortCircuit: true };
       if (specifier === "@/composables/useComposer") return { url: composerUrl, shortCircuit: true };
       if (specifier === "@/utils/markdown") return { url: markdownUrl, shortCircuit: true };
+      if (specifier === "@/utils/media") return { url: mediaUrl, shortCircuit: true };
       if (specifier === "@/utils/chatTimeline") return { url: timelineUrl, shortCircuit: true };
       if (specifier === "@/components/StringSelectOption") return { url: optionUrl, shortCircuit: true };
       if (specifier === "@/components/SessionBrowser.vue") return { url: browserUrl, shortCircuit: true };
       if (specifier === "@/components/MarkdownContent.vue") return { url: markdownComponentUrl, shortCircuit: true };
       if (specifier === "@/components/AttachmentList.vue") return { url: attachmentComponentUrl, shortCircuit: true };
+      if (specifier === "@/components/ChatMedia.vue") return { url: mediaComponentUrl, shortCircuit: true };
       if (specifier.startsWith("@/components/")) return { url: childUrl, shortCircuit: true };
     }
     return nextResolve(specifier, context);
@@ -90,10 +97,12 @@ async function compileComponent(path, id) {
   const script = compileScript(descriptor, { id, inlineTemplate: true });
   return "data:text/javascript," + encodeURIComponent(stripTypeScriptTypes(script.content, { mode: "strip" }));
 }
+mediaComponentUrl = await compileComponent("../src/components/ChatMedia.vue", "chat-media-test");
 markdownComponentUrl = await compileComponent("../src/components/MarkdownContent.vue", "markdown-content-test");
 attachmentComponentUrl = await compileComponent("../src/components/AttachmentList.vue", "attachment-list-test");
 const { default: ChatView } = await import(await compileComponent("../src/views/chat/index.vue", "chat-view-test"));
 const { setContext } = await import(contextUrl);
+const { setChatImageDownloader } = await import(workspaceApiUrl);
 const mounted = [];
 const at = "2026-10-17T03:00:00Z";
 let blockIndex = 0;
@@ -115,6 +124,8 @@ async function mount(initialSession, sendResult = async () => true) {
   const root = { children: [] };
   const calls = { submit: [], selections: [], attachments: [], notifications: [], cancel: 0 };
   const workspace = {
+    gatewayUrl: ref("http://127.0.0.1:3000"),
+    token: ref("test-token"),
     activeSession: ref(initialSession),
     activeSessionId: ref(initialSession?.id ?? null),
     liveBlocks: ref({ sessionId: initialSession?.id ?? null, blocks: {} }),
@@ -230,11 +241,170 @@ function findAll(root, predicate) {
 const hasClass = (value) => (node) => (node.props?.class ?? "").split(" ").includes(value);
 const htmlText = (html) => html.replace(/<[^>]*>/g, "").replace(/&(amp|lt|gt|quot|#39);/g, (_, entity) => ({ amp: "&", lt: "<", gt: ">", quot: '"', "#39": "'" })[entity]).trim();
 const textContent = (node) => (node.text ?? "") + (node.props?.innerHTML ? htmlText(node.props.innerHTML) : "") + node.children.map(textContent).join("");
+const markdownHtml = (node) => findAll(node, (child) => typeof child.props?.innerHTML === "string")[0]?.props.innerHTML;
 const button = (root, label) => findAll(root, (node) => node.tag === "button" && node.props["aria-label"] === label)[0];
 const messages = (root) => findAll(root, hasClass("chat-message-text")).map(textContent);
 const input = (root) => findAll(root, (node) => node.tag === "textarea")[0];
 const form = (root) => findAll(root, (node) => node.tag === "form")[0];
 const submit = (root) => form(root).props.onSubmit({ preventDefault() {} });
+
+test("assistant media and uploaded media appear in history and composer without autoplay", async () => {
+  const image = { id: "photo", path: "folder/photo.png", size: 100, mime: "image/png" };
+  const { root, composer } = await mount(session("idle", [
+    { ...user("看看图片"), attachments: [image] },
+    say("![截图](https://example.com/a.png)\n\n[录像](https://example.com/a.mp4)\n\n[直播](https://example.com/a.m3u8)\n\n[监控](https://example.com/a.flv)"),
+  ]));
+  assert.equal(findAll(root, hasClass("chat-media")).length, 5);
+  assert.equal(findAll(root, (node) => node.tag === "img").length, 1);
+  assert.equal(findAll(root, (node) => node.tag === "video").length, 0);
+  assert.equal(findAll(root, (node) => node.tag === "button" && textContent(node) === "播放视频").length, 3);
+  composer.addFiles([{ path: "video.mp4", file: new File(["fixture"], "video.mp4", { type: "video/mp4" }) }]);
+  await nextTick();
+  assert.equal(findAll(root, hasClass("chat-media")).length, 6);
+  const preview = findAll(root, (node) => node.tag === "button" && textContent(node) === "预览图片")[0];
+  await preview.props.onClick();
+  await nextTick();
+  assert.equal(findAll(root, (node) => node.tag === "img" && node.props.src.startsWith("blob:")).length, 1);
+});
+
+test("failed inline images expose a retry and preserve their original link", async () => {
+  const { root } = await mount(session("idle", [say("![截图](https://example.com/broken.png)")]));
+  const image = findAll(root, (node) => node.tag === "img")[0];
+  image.props.onError();
+  await nextTick();
+  assert.match(textContent(root), /图片加载失败/);
+  assert.equal(findAll(root, (node) => node.tag === "button" && textContent(node) === "重试").length, 1);
+  assert.equal(findAll(root, (node) => node.tag === "a" && node.props.href === "https://example.com/broken.png").length, 1);
+});
+
+const cameraCapture = "http://127.0.0.1:8787/captures/5a7cc6d8d6ad0b5c262605c7dae903ec/frame_000001.jpg";
+async function settleMedia() {
+  await setImmediate();
+  await nextTick();
+}
+
+test("historical camera images load automatically through the gateway while ordinary images retain their URL", async (t) => {
+  const calls = [];
+  const blobs = [];
+  setChatImageDownloader(async (...args) => {
+    calls.push(args);
+    return new Blob(["camera frame"], { type: "image/jpeg" });
+  });
+  t.mock.method(URL, "createObjectURL", (blob) => {
+    blobs.push(blob);
+    return `blob:camera-${blobs.length}`;
+  });
+  const { root } = await mount(session("idle", [
+    thinking(`![巡检截图](${cameraCapture})`),
+    say(`![海康-2](${cameraCapture})\n\n![普通图片](https://example.com/normal.jpg)`),
+  ]));
+  await settleMedia();
+  assert.equal(calls.length, 2);
+  for (const [base, token, url, signal] of calls) {
+    assert.equal(base, "http://127.0.0.1:3000");
+    assert.equal(token, "test-token");
+    assert.equal(url, cameraCapture);
+    assert.equal(signal.aborted, false);
+  }
+  assert.ok(blobs.every((blob) => blob.type === "image/jpeg"));
+  assert.deepEqual(findAll(root, (node) => node.tag === "img").map((node) => node.props.src), [
+    "blob:camera-1", "blob:camera-2", "https://example.com/normal.jpg",
+  ]);
+  assert.equal(findAll(root, (node) => node.tag === "a" && node.props.href === cameraCapture).length, 2);
+  for (const image of findAll(root, (node) => node.tag === "img")) image.props.onLoad();
+  await nextTick();
+  assert.doesNotMatch(textContent(root), /加载中|加载失败/);
+});
+
+test("camera image reloads abort stale requests and revoke blobs when credentials, source, or session change", async (t) => {
+  const requests = [];
+  const created = [];
+  const revoked = [];
+  setChatImageDownloader((base, token, url, signal) => new Promise((resolve) => {
+    requests.push({ base, token, url, signal, resolve });
+  }));
+  t.mock.method(URL, "createObjectURL", (blob) => {
+    created.push(blob);
+    return `blob:camera-${created.length}`;
+  });
+  t.mock.method(URL, "revokeObjectURL", (url) => revoked.push(url));
+  const answer = say(`![截图](${cameraCapture})`);
+  const { root, workspace } = await mount(session("idle", [answer]));
+  assert.equal(requests.length, 1);
+  assert.equal(findAll(root, (node) => node.tag === "img").length, 0);
+
+  workspace.token.value = "new-token";
+  await nextTick();
+  assert.equal(requests[0].signal.aborted, true);
+  assert.equal(requests[1].token, "new-token");
+  requests[0].resolve(new Blob(["stale"]));
+  await settleMedia();
+  assert.equal(created.length, 0);
+  requests[1].resolve(new Blob(["fresh"]));
+  await settleMedia();
+  assert.equal(findAll(root, (node) => node.tag === "img")[0].props.src, "blob:camera-1");
+
+  workspace.gatewayUrl.value = "http://127.0.0.1:3001";
+  await nextTick();
+  assert.equal(requests[1].signal.aborted, true);
+  assert.deepEqual(revoked, ["blob:camera-1"]);
+  assert.equal(requests[2].base, "http://127.0.0.1:3001");
+  requests[2].resolve(new Blob(["another gateway"]));
+  await settleMedia();
+
+  const nextCapture = cameraCapture.replace("frame_000001.jpg", "frame_000002.jpg");
+  workspace.activeSession.value.events[0].content = `![截图](${nextCapture})`;
+  await nextTick();
+  assert.equal(requests[2].signal.aborted, true);
+  assert.deepEqual(revoked, ["blob:camera-1", "blob:camera-2"]);
+  assert.equal(requests[3].url, nextCapture);
+
+  workspace.activeSession.value.events = [];
+  await nextTick();
+  assert.equal(requests[3].signal.aborted, true);
+  requests[3].resolve(new Blob(["unmounted"]));
+  await settleMedia();
+  assert.equal(created.length, 2);
+  assert.equal(findAll(root, (node) => node.tag === "img").length, 0);
+});
+
+test("camera image proxy errors retain the backend reason and retry automatically with the same protected URL", async () => {
+  let attempts = 0;
+  setChatImageDownloader(async (_base, _token, url) => {
+    assert.equal(url, cameraCapture);
+    if (++attempts === 1) throw new Error("监控截图已过期，请重新抓拍");
+    return new Blob(["fresh frame"], { type: "image/jpeg" });
+  });
+  const { root } = await mount(session("idle", [say(`![截图](${cameraCapture})`)]));
+  await settleMedia();
+  assert.match(textContent(root), /监控截图已过期，请重新抓拍/);
+  assert.equal(findAll(root, (node) => node.tag === "img").length, 0);
+  const retry = findAll(root, (node) => node.tag === "button" && textContent(node) === "重试")[0];
+  await retry.props.onClick();
+  await settleMedia();
+  assert.equal(attempts, 2);
+  assert.match(findAll(root, (node) => node.tag === "img")[0].props.src, /^blob:/);
+  assert.doesNotMatch(textContent(root), /已过期/);
+});
+
+test("camera images wait for gateway credentials and never fall back to a direct image request", async () => {
+  const calls = [];
+  setChatImageDownloader(async (...args) => {
+    calls.push(args);
+    return new Blob(["frame"]);
+  });
+  const { root, workspace } = await mount(session("idle", []));
+  workspace.token.value = " ";
+  workspace.activeSession.value.events.push(say(`![截图](${cameraCapture})`));
+  await settleMedia();
+  assert.equal(calls.length, 0);
+  assert.equal(findAll(root, (node) => node.tag === "img").length, 0);
+  assert.match(textContent(root), /请连接网关后查看监控截图/);
+  workspace.token.value = "connected-token";
+  await settleMedia();
+  assert.equal(calls.length, 1);
+  assert.match(findAll(root, (node) => node.tag === "img")[0].props.src, /^blob:/);
+});
 
 test("attachment picker accepts arbitrary file types, allows attachment-only sends, and clears sent refs", async () => {
   const { root, attachments, calls } = await mount(undefined);
@@ -373,6 +543,7 @@ afterEach(() => {
     app.unmount();
     scope.stop();
   }
+  setChatImageDownloader();
 });
 
 const browserEvent = (id = "browser-1", status = "running") => ({
@@ -697,8 +868,8 @@ test("each assistant turn renders independently collapsed process rows in the or
   assert.equal(findAll(root, hasClass("chat-activities")).length, 0);
   assert.match(textContent(summary(rows[0])), /思考/);
   assert.match(textContent(summary(rows[1])), /查询库存已完成/);
-  assert.match(findAll(rows[0], hasClass("markdown-content"))[0].props.innerHTML, /<strong>先核对<\/strong>/);
-  assert.match(findAll(answer, hasClass("markdown-content"))[0].props.innerHTML, /<h2>库存结果<\/h2>/);
+  assert.match(markdownHtml(rows[0]), /<strong>先核对<\/strong>/);
+  assert.match(markdownHtml(answer), /<h2>库存结果<\/h2>/);
   // Native <details> owns open state; toggling one row does not change another.
   rows[0].open = true;
   assert.equal(rows[1].open, undefined);
@@ -812,7 +983,7 @@ test("streamed thinking and answer Markdown update in place and done snapshots p
   assert.equal(findAll(root, hasClass("chat-message-assistant"))[0], assistant);
   assert.equal(inlineActivity(root), loading);
   thought.open = true;
-  assert.match(findAll(thought, hasClass("markdown-content"))[0].props.innerHTML, /<strong>先核对<\/strong>/);
+  assert.match(markdownHtml(thought), /<strong>先核对<\/strong>/);
   workspace.liveBlocks.value.blocks["reply:0"].content += "数据来源";
   workspace.liveBlocks.value.blocks["reply:1"] = { type: "text", content: "## 库存结果\n\n库存 **120** 件。" };
   await nextTick();
@@ -820,8 +991,8 @@ test("streamed thinking and answer Markdown update in place and done snapshots p
   assert.deepEqual(replyParts(assistant), [thought, answer]);
   assert.equal(inlineActivity(root), loading);
   assert.match(textContent(thought), /先核对数据来源/);
-  assert.match(findAll(answer, hasClass("markdown-content"))[0].props.innerHTML, /<h2>库存结果<\/h2>/);
-  assert.match(findAll(answer, hasClass("markdown-content"))[0].props.innerHTML, /<strong>120<\/strong>/);
+  assert.match(markdownHtml(answer), /<h2>库存结果<\/h2>/);
+  assert.match(markdownHtml(answer), /<strong>120<\/strong>/);
   workspace.activeSession.value.events.push(thinking("**已核对**最终来源", "reply:0"), textBlock("reply:1", "最终库存 **121** 件。"));
   // A done snapshot wins even if a stale live block survives the same render tick.
   await nextTick();
@@ -996,8 +1167,8 @@ test("actual Markdown component renders answer tables and code and escapes unsaf
     say('| 门店 | 库存 |\n| --- | ---: |\n| A | **120** |\n\n```js\nconst label = "<script>";\n```\n\n<script>alert(1)</script>\n\n[打开](javascript:alert(1))'),
   ]));
   const row = processes(root)[0];
-  const thoughtHtml = findAll(row, hasClass("markdown-content"))[0].props.innerHTML;
-  const answerHtml = findAll(root, hasClass("chat-message-markdown"))[0].props.innerHTML;
+  const thoughtHtml = markdownHtml(row);
+  const answerHtml = markdownHtml(findAll(root, hasClass("chat-message-markdown"))[0]);
   assert.match(thoughtHtml, /<strong>核对来源<\/strong>/);
   assert.match(thoughtHtml, /&lt;img src=x onerror=&quot;alert\(1\)&quot;&gt;/);
   assert.doesNotMatch(thoughtHtml, /<img\b/);

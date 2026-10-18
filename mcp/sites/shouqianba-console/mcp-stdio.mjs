@@ -1,7 +1,7 @@
 import readline from 'node:readline';
-import {readFile} from 'node:fs/promises';
+import {readMcpKey} from './lib/credentials.mjs';
 const url='http://127.0.0.1:'+(process.env.SQB_PORT||8788)+'/mcp';
-const key=(await readFile(process.env.SQB_MCP_KEY_PATH||new URL('../../.local/shouqianba/mcp-key',import.meta.url),'utf8')).trim();
+const key=await readMcpKey(process.env.SQB_STATE_DIR||process.env.SQB_MCP_KEY_PATH||new URL('../../.local/shouqianba/',import.meta.url));
 const input=readline.createInterface({input:process.stdin,crlfDelay:Infinity});
 for await(const line of input){
  if(!line.trim())continue;

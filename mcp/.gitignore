@@ -15,3 +15,4 @@ dist/
 **/shouqianba-client-config.json
 **/keepalive-history.json
 **/session*.json
+*.dpapi.*

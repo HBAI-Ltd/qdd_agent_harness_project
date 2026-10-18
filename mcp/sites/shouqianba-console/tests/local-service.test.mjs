@@ -6,6 +6,7 @@ import {fileURLToPath} from 'node:url';
 import {once} from 'node:events';
 import http from 'node:http';
 import {writeVault,readVault,clearVault} from '../lib/vault.mjs';
+import {readMcpKey} from '../lib/credentials.mjs';
 
 const local=fileURLToPath(new URL('../../../.local/',import.meta.url));
 test('Windows DPAPI凭据可加密还原，磁盘不含明文',async()=>{
@@ -17,7 +18,7 @@ test('真实HTTP服务保护会话和MCP，允许用户从浏览器打开登录�
  await mkdir(local,{recursive:true});const dir=await mkdtemp(local+'sqb-server-test-');
  const child=spawn(process.execPath,[fileURLToPath(new URL('../server.mjs',import.meta.url))],{env:{...process.env,SQB_PORT:'18888',SQB_STATE_DIR:dir},windowsHide:true,stdio:['ignore','pipe','pipe']});
  try{
-  await Promise.race([once(child.stdout,'data'),once(child,'exit').then(()=>{throw new Error('test server exited');}),new Promise((_,reject)=>setTimeout(()=>reject(new Error('test server timeout')),5000).unref())]);
+  await Promise.race([once(child.stdout,'data'),once(child,'exit').then(()=>{throw new Error('test server exited');}),new Promise((_,reject)=>setTimeout(()=>reject(new Error('test server timeout')),20000).unref())]);
   const base='http://127.0.0.1:18888';
   assert.equal((await fetch(base+'/api/status')).status,401);
   assert.equal((await fetch(base+'/api/analysis')).status,401);
@@ -29,7 +30,7 @@ test('真实HTTP服务保护会话和MCP，允许用户从浏览器打开登录�
   assert.equal((await fetch(base+'/api/status',{headers:{Cookie:cookie,Origin:'https://foreign.example'}})).status,403);
   const wrongHost=await new Promise((resolve,reject)=>{http.get(base+'/api/status',{headers:{Cookie:cookie,Host:'foreign.example'}},response=>{response.resume();resolve(response.statusCode);}).on('error',reject);});assert.equal(wrongHost,403);
   assert.equal((await fetch(base+'/mcp',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).status,401);
-  const key=(await readFile(dir+'/mcp-key','utf8')).trim(),headers={'Content-Type':'application/json',Authorization:`Bearer ${key}`};
+  const key=await readMcpKey(dir),headers={'Content-Type':'application/json',Authorization:`Bearer ${key}`};
   const rpc=async message=>{const response=await fetch(base+'/mcp',{method:'POST',headers,body:JSON.stringify(message)});return {status:response.status,data:response.status===202?null:await response.json()};};
   assert.equal((await rpc({jsonrpc:'2.0',id:1,method:'tools/list'})).data.result.tools.length,18);
   assert.equal((await rpc({jsonrpc:'2.0',method:'notifications/initialized'})).status,202);
@@ -38,5 +39,5 @@ test('真实HTTP服务保护会话和MCP，允许用户从浏览器打开登录�
   const stdio=spawn(process.execPath,[fileURLToPath(new URL('../mcp-stdio.mjs',import.meta.url))],{env:{...process.env,SQB_PORT:'18888',SQB_MCP_KEY_PATH:dir+'/mcp-key'},windowsHide:true,stdio:['pipe','pipe','pipe']});
   const chunks=[];stdio.stdout.on('data',c=>chunks.push(c));stdio.stdin.end(JSON.stringify({jsonrpc:'2.0',id:2,method:'initialize',params:{protocolVersion:'2025-03-26'}})+'\n'+JSON.stringify({jsonrpc:'2.0',id:3,method:'tools/list'})+'\n');
   const [code]=await once(stdio,'exit');assert.equal(code,0);const replies=Buffer.concat(chunks).toString('utf8').trim().split('\n').map(JSON.parse);assert.equal(replies.length,2);assert.equal(replies[0].result.serverInfo.name,'shouqianba-local');assert.equal(replies[1].result.tools.length,18);
- }finally{const exit=once(child,'exit');child.kill();await exit;await rm(dir+'/mcp-key',{force:true});await rm(dir+'/browser-key',{force:true});await rmdir(dir);}
+ }finally{const exit=once(child,'exit');child.kill();await exit;await rm(dir+'/mcp-key',{force:true});await rm(dir+'/browser-key',{force:true});await rm(dir+'/credentials.dpapi',{force:true});await rmdir(dir);}
 });

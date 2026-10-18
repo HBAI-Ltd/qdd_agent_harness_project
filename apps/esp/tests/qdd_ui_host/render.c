@@ -535,25 +535,34 @@ static void check_download_settings(lv_display_t *display) {
 }
 
 static void check_guide_footer(unsigned step) {
-    lv_obj_t *up = find_label(lv_screen_active(), "上  上一步");
-    lv_obj_t *down = find_label(lv_screen_active(), "下  下一步");
-    lv_obj_t *confirm = find_label(lv_screen_active(), "确认");
     const char *actions[] = {"", "选择无线网", "下一步", "下一步", "开始配对", "下一步", "进入主页"};
-    lv_obj_t *action = find_label(lv_screen_active(), actions[step]);
-    assert(up && down && confirm && action);
-    lv_area_t ua, da, ca, aa;
-    lv_obj_get_coords(up, &ua); lv_obj_get_coords(down, &da);
-    lv_obj_get_coords(confirm, &ca); lv_obj_get_coords(action, &aa);
-    assert(ua.y1 == 275 && da.y1 == ua.y1 && ua.x2 < da.x1);
-    assert(ca.y1 == 297 && aa.y1 == ca.y1 && aa.x1 == ca.x2 + 11);
-    assert(ca.x2 - ca.x1 + 1 == 40 && ca.y2 - ca.y1 + 1 == 20);
-    assert(ca.x1 >= 12 && aa.x2 < 212 && (ca.x1 + aa.x2) / 2 == 111);
-    assert(lv_obj_get_style_bg_opa(up, 0) == LV_OPA_TRANSP);
-    assert(lv_obj_get_style_bg_opa(down, 0) == LV_OPA_TRANSP);
-    assert(lv_obj_get_style_bg_opa(action, 0) == LV_OPA_TRANSP);
-    assert(lv_obj_get_style_bg_opa(confirm, 0) == LV_OPA_COVER);
-    assert(pixels[280 * 240 + 12] == 0x10A2 && pixels[301 * 240 + 210] == 0x10A2);
-    if (step != 3) assert(has_visible_label(lv_screen_active(), "长按确认：设置"));
+    const char *expected[] = {"上一步", actions[step], "下一步"};
+    for (unsigned row = 0; row < 3; row++) {
+        lv_obj_t *found = NULL;
+        for (uint32_t i = 0; i < lv_obj_get_child_count(lv_screen_active()); i++) {
+            lv_obj_t *child = lv_obj_get_child(lv_screen_active(), (int32_t)i);
+            if (!lv_obj_check_type(child, &lv_label_class)) continue;
+            lv_area_t area; lv_obj_get_coords(child, &area);
+            if (area.y1 == 254 + (int)row * 22 && strcmp(lv_label_get_text(child), expected[row]) == 0) found = child;
+        }
+        assert(found);
+        lv_area_t area; lv_obj_get_coords(found, &area);
+        assert(area.x1 == 20 && area.x2 == 203 && area.y2 - area.y1 + 1 == 20);
+        assert(lv_obj_get_style_text_align(found, 0) == LV_TEXT_ALIGN_CENTER);
+        assert(lv_obj_get_style_bg_opa(found, 0) == LV_OPA_COVER);
+        assert(lv_color_eq(lv_obj_get_style_bg_color(found, 0), lv_color_hex(row == 1 ? 0xD4380D : 0x222222)));
+    }
+    // Three independent cards retain clear gaps and avoid the rounded screen edge.
+    assert(pixels[275 * 240 + 30] == 0x10A2 && pixels[297 * 240 + 30] == 0x10A2);
+    lv_obj_t *notice = find_label(lv_screen_active(), "长按确认：设置");
+    assert(notice);
+    lv_area_t notice_area; lv_obj_get_coords(notice, &notice_area);
+    assert(notice_area.y1 == 235 && notice_area.y2 < 254);
+    if (step == 3) {
+        lv_obj_t *qr = download_qr(lv_screen_active());
+        lv_area_t area; lv_obj_get_coords(qr, &area);
+        assert(area.y1 == 90 && area.y2 == 217 && area.x2 - area.x1 + 1 == 128);
+    }
 }
 
 static void check_usb_install(lv_display_t *display) {
@@ -792,8 +801,8 @@ int main(int argc, char **argv) {
         check_labels(lv_screen_active());
         if (i < 2) {
             assert(has_label(lv_screen_active(), "手机扫码下载并安装"));
-            assert(has_label(lv_screen_active(), "手机也连接同一无线网"));
-            assert(has_visible_label(lv_screen_active(), qdd_ui_guide_step() == 4 ? "开始配对" : "下一步") && has_visible_label(lv_screen_active(), "上  上一步"));
+            assert(has_label(lv_screen_active(), "长按确认：设置"));
+            assert(has_visible_label(lv_screen_active(), qdd_ui_guide_step() == 4 ? "开始配对" : "下一步") && has_visible_label(lv_screen_active(), "上一步"));
         }
         if (i < 5) assert(!has_label(lv_screen_active(), "紧急停止") && !has_label(lv_screen_active(), "取消急停"));
         if (i == 2 || i == 3) assert(has_visible_label(lv_screen_active(), qdd_ui_guide_step() == 4 ? "开始配对" : "下一步") && qdd_ui_guide_step() == 4);
@@ -825,7 +834,7 @@ int main(int argc, char **argv) {
     qdd_ui_refresh(&state, (qdd_ble_status_t){0}, false, 87, 2000, "", 0);
     lv_refr_now(display); check_labels(lv_screen_active());
     assert(qdd_ui_guide_step() == 5 && has_visible_label(lv_screen_active(), "下一步"));
-    assert(has_visible_label(lv_screen_active(), "上  上一步") && !has_label(lv_screen_active(), "紧急停止"));
+    assert(has_visible_label(lv_screen_active(), "上一步") && !has_label(lv_screen_active(), "紧急停止"));
     write_frame("onboarding_skip_bluetooth");
     state.heartbeat_seen = true; state.last_ping_ms = 1900;
     while (qdd_ui_guide_step() >= 1 && qdd_ui_guide_step() <= 6) qdd_ui_guide_navigate(true);

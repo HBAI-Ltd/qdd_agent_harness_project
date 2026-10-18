@@ -16,6 +16,12 @@ harness 不提供界面，前端通过本网关完成：许愿与会话、展示
 
 网关 token 来自环境变量 `QDD_GATEWAY_TOKEN`（至少 16 位）；未设置时首次启动自动生成到 `workspace/.gateway-token`，`npm run qdd -- token` 查看。
 
+页面的 `useAgent` 只开启问答入口；问答 agent 与 `qdd.tool` 一样，只能调用该页面 `tools` 声明的只读工具，不能借问答访问未声明的工具。管理 token 调用问答时可使用全部只读工具。
+
+外部 MCP 工具只有同时满足 `annotations.readOnlyHint: true`、没有 `destructiveHint: true`、名称不含系统识别的写入动作（如 `update`、`delete`、`send`、`exec`）时才视为只读。缺少只读声明或声明冲突时，工具按写入处理：只能由许愿 agent 在店长授权后调用；服务配置 `allowWrite: true` 表示店长已预先授权该服务的写入。直接 `POST /api/tools/:name` 始终拒绝写入类工具，包括管理 token 调用，返回 403。现有 MCP 服务若希望页面直接读取数据，需为工具补充明确的只读注解。
+
+工具调用请求体必须是 JSON 对象（空请求体按 `{}` 处理）。畸形 URL 编码、非法 JSON 或字段格式返回 400；普通请求体超过 1 MiB、页面状态超过 64 KiB（按 UTF-8 字节计）返回 413。
+
 ## 许愿与会话
 
 ```http
@@ -155,6 +161,7 @@ agent 也可在对话中用 `save_skill` 提炼技能（`source: "agent"`），�
 
 ```http
 GET    /api/schedules            → Schedule[]
+GET /api/schedules/:id/sessions → SessionMeta[]（该任务全部执行对话，按 createdAt 倒序；包含旧目录中的定时会话，不混入普通对话）
 POST   /api/schedules            { "name": "经营日报", "cron": "0 8 * * *", "prompt": "汇总昨日销售与异常",
                                    "skillId"?: "技能名或 id", "slug"?: "刷新的页面", "notify"?: { "connectorId": "…" }, "enabled"?: true } → 201
 GET    /api/schedules/:id        → Schedule（含 nextRunAt、lastRun）
@@ -162,6 +169,8 @@ PUT    /api/schedules/:id        部分字段；skillId/slug/notify 传 null 解
 DELETE /api/schedules/:id
 POST   /api/schedules/:id/run    立即执行一次 → 202 { "sessionId" }
 ```
+
+历史接口需网关鉴权；任务不存在返回 404，尚未执行返回 `[]`。例如请求 `GET /api/schedules/<任务ID>/sessions`，返回 `[{"id":"<会话ID>","title":"经营日报","summary":"日报已完成","slug":null,"status":"idle","origin":{"kind":"schedule","scheduleId":"<任务ID>","scheduleName":"经营日报"},"createdAt":"2026-10-18T00:00:00.000Z","updatedAt":"2026-10-18T00:01:00.000Z"}]`。使用其中的 `id` 请求 `GET /api/sessions/:id` 回放完整对话。
 
 - `cron` 为 5 段（分 时 日 月 周），按网关时区；例：`0 8 * * *` 每天 8 点、`0 9 * * 1` 每周一 9 点、`0 */2 * * *` 每 2 小时。
 - 到点以**无人值守**方式发起会话（`SessionMeta.origin = { kind: "schedule", … }`）：不提问；写入类操作进入工作台待办等待授权。
@@ -242,7 +251,11 @@ GET /api/pages → PageView[]
 
 `PageEntry` 中与跨会话相关的字段：`version`（每次发布 +1）、`metrics`（展示的指标）、`datasets`（发布时依赖的数据集版本，可与 `/api/datasets` 对比判断数据是否更新）、`stale`（指标口径变更后的复核提示，非空时建议在界面上提示）。
 
-`PageView.url` 形如 `/pages/<slug>/?page_token=...`，直接作为 iframe 的 `src`（拼上网关地址）即可：网关校验后写入该页面路径的 cookie 并跳转，页面子资源随后凭 cookie 加载。页面带 CSP，只能连回网关，并只允许被 `corsOrigins` 中的源嵌入。
+`PageView.url` 形如 `/pages/<slug>/?page_token=...`，直接作为 iframe 的 `src`（拼上网关地址）即可：网关校验后跳转到 `/pages/<slug>~<page-token>/`，相对脚本、模块、样式和快照继承该目录中的页面令牌进行鉴权，目录深度保持不变。旧 cookie 入口仍可访问并自动跳转。地址含页面权限，请勿公开分享；资源使用 `Referrer-Policy: no-referrer` 防止向外部包服务发送令牌地址。
+
+HTML 与 SVG 等页面资源均返回页面 CSP。静态资源会校验文件的真实路径，拒绝通过符号链接或 Windows junction 读取页面目录、公共资源目录之外的文件。
+
+页面 CSP 和工作台 iframe 均启用不带 `allow-same-origin` 的沙箱：页面不能访问主界面或其它页面的 DOM。脚本与样式只允许本页面目录、公共资源、SDK 和配置的 CDN；网络请求只允许网关 `/api/`，禁止嵌套 iframe、worker 和弹出窗口。页面在浏览器中以 opaque 来源运行，SDK API 请求的 `Origin` 为 `null`：只有有效页面令牌的工具、问答、状态和登记接口响应开放该 CORS 来源，管理接口不开放。模块资源也仅在目录令牌有效时允许该来源。前端 iframe 必须使用 `sandbox="allow-scripts allow-downloads"`，并按 opaque 来源处理经过校验的 SDK 握手。
 
 热重载：订阅全局事件，收到 `pages_changed` 后重新拉取 `/api/pages` 并刷新 iframe。
 
@@ -293,6 +306,7 @@ DELETE /api/records/:name/:id       作废 → { ok: true }
 - 结构由 agent 用 `define_record` 提出（`approval_required`，`tool: "define_record"`），店长确认后建立；也可由前端直接 `POST /api/records`。已存在时只能新增字段、改中文名/候选值；删字段或改类型返回 409。
 - 写入按结构校验：未知字段、类型不符、必填为空、不在候选值内均返回 400。
 - 修改按 id 覆盖、作废写入墓碑；读取和 `store__aggregate`（`dataset: "records/<name>"`，计数用指标 `records`）只看最新且未作废的行，原始行保留在数据集日志中便于追溯。
+- `time`、`from`、`to` 必须是真实有效的日期/时间，`from` 不得晚于 `to`；`limit` 必须是正整数，结果条数最多 1000。
 - 页面只能访问代码中 `qdd.records.*("<name>")` 出现的记录（发布时写入 `PageEntry.records`），其它返回 403；页面不能定义或列出记录。
 
 ## 指标口径与数据集

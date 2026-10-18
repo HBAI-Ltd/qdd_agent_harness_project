@@ -25,7 +25,10 @@ interface BridgeOptions {
 
 /** Only the currently mounted page window can enter the shell's message handler. */
 export function createTaskPageBridge(options: BridgeOptions) {
-  let bridgeId = crypto.randomUUID();
+  // randomUUID requires a secure context; getRandomValues works on LAN HTTP too.
+  const newBridgeId = () => typeof crypto.randomUUID === "function" ? crypto.randomUUID()
+    : Array.from(crypto.getRandomValues(new Uint8Array(16)), (value) => value.toString(16).padStart(2, "0")).join("");
+  let bridgeId = newBridgeId();
   let ready = false;
 
   function send(type: string, payload: PageBridgePayload = null, initialize = false): boolean {
@@ -64,7 +67,7 @@ export function createTaskPageBridge(options: BridgeOptions) {
     receive,
     postMessage: (type: string, payload: PageBridgePayload = null) => send(type, payload),
     initialize: () => send("host:init", options.getContext(), true),
-    reset() { bridgeId = crypto.randomUUID(); ready = false; },
+    reset() { bridgeId = newBridgeId(); ready = false; },
     isReady: () => ready,
   };
 }

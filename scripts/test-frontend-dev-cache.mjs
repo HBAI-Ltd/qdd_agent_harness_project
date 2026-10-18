@@ -164,8 +164,29 @@ try {
   }
   currentRound = undefined;
 
-  await writeFile(fixturePath, probeSource("initial"), { flag: "wx" });
-  fixtureCreated = true;
+  // A successful HTTP import does not prove Chokidar has finished adding a new
+  // file. Wait for its add event so the first edit cannot be folded into that
+  // initial filesystem observation instead of producing an HMR change event.
+  let stopWaitingForFixture;
+  const fixtureWatched = new Promise((resolve, reject) => {
+    const onAdd = (file) => {
+      if (path.resolve(file) === fixturePath) resolve();
+    };
+    const timeout = setTimeout(() => reject(new Error("Vite did not begin watching the HMR fixture within 15 seconds.")), 15000);
+    stopWaitingForFixture = () => {
+      clearTimeout(timeout);
+      server.watcher.off("add", onAdd);
+    };
+    server.watcher.on("add", onAdd);
+  });
+  try {
+    await Promise.all([
+      fixtureWatched,
+      writeFile(fixturePath, probeSource("initial"), { flag: "wx" }).then(() => { fixtureCreated = true; }),
+    ]);
+  } finally {
+    stopWaitingForFixture();
+  }
   const documentId = randomUUID();
   await page.evaluate(async (id, modulePath) => {
     window.__qddDevCacheDocument = id;

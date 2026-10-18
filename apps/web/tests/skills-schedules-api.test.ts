@@ -82,6 +82,17 @@ test("HTTP 409 retains the backend explanation for a skill referenced by a sched
     assert.equal(cause.message, "技能被定时任务使用中：经营日报");
     return true;
   });
+
+});
+
+test("schedule history uses an authenticated task-specific route and supports cancellation", async () => {
+  const signal = new AbortController().signal;
+  const entries = [{ id: "old-run", origin: { kind: "schedule", scheduleId: "job/1" } }];
+  const calls = response(entries);
+  assert.deepEqual(await scheduleApi.listScheduleSessions(base, token, "job/1", signal), entries);
+  assert.equal(calls[0]!.url, base + "/api/schedules/job%2F1/sessions");
+  assert.equal(calls[0]!.init.signal, signal);
+  assert.equal(new Headers(calls[0]!.init.headers).get("Authorization"), `Bearer ${token}`);
 });
 
 test("cron shortcuts use gateway-time rules and preserve a custom existing expression", () => {

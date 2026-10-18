@@ -120,7 +120,8 @@ async function drop(event: DragEvent) {
   event.preventDefault();
   dragDepth.value = 0;
   if (!connected.value) return;
-  attach.addFiles(await filesFromDrop(event.dataTransfer));
+  const data = event.dataTransfer;
+  await attach.addFilesFrom(() => filesFromDrop(data));
   focusComposer();
 }
 async function openAttachment(item: AttachmentItem) {

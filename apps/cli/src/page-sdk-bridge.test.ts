@@ -169,9 +169,11 @@ test("gateway injects only explicit HTTP host origins and the actual gateway ori
   let sources: DataSources | undefined;
   try {
     await writeFile(path.join(root, "harness.config.json"), JSON.stringify({
-      gateway: { host: "127.0.0.1", port: 0, corsOrigins: [HOST_ORIGIN, "null", "*", "file:///tmp", `${HOST_ORIGIN}/path`] },
+      gateway: { host: "127.0.0.1", port: 0, corsOrigins: [HOST_ORIGIN] },
     }));
     const loaded = await loadConfig(root);
+    // Exercise the SDK's independent filtering after configuration validation.
+    loaded.config.gateway.corsOrigins.push("null", "*", "file:///tmp", `${HOST_ORIGIN}/path`);
     await ensureWorkspace(loaded.paths);
     await upsertPage(loaded.paths, {
       slug: SLUG, title: "Test", wish: "test", summary: "", tools: [], useAgent: false, metrics: [], datasets: {},

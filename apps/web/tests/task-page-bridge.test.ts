@@ -222,3 +222,21 @@ test("invalid outbound payloads and transport failures report false", () => {
   fixture.frameWindow.postMessage = () => { throw new Error("Frame is no longer available"); };
   assert.equal(fixture.bridge.postMessage("host:refresh"), false);
 });
+
+test("LAN HTTP without randomUUID still initializes and rotates an unpredictable bridge ID", (t) => {
+  const original = Object.getOwnPropertyDescriptor(crypto, "randomUUID");
+  Object.defineProperty(crypto, "randomUUID", { configurable: true, value: undefined });
+  t.after(() => {
+    if (original) Object.defineProperty(crypto, "randomUUID", original);
+    else Reflect.deleteProperty(crypto, "randomUUID");
+  });
+  const fixture = createFixture();
+  const first = fixture.initialize();
+  assert.match(first.bridgeId, /^[a-f0-9]{32}$/);
+  fixture.ready(first);
+  fixture.bridge.reset();
+  const next = fixture.initialize();
+  assert.notEqual(first.bridgeId, next.bridgeId);
+  assert.equal(fixture.bridge.receive(fixture.event(fixture.pageMessage(first, "page:ready"))), false);
+  fixture.ready(next);
+});

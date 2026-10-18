@@ -194,17 +194,19 @@ stdio 请直接调用 Node，避免 npm 启动横幅破坏协议。服务根据�
 | `android_devices`、`android_screenshot`、`android_hid_status` | 已配置手机、JPEG 图片、桥接就绪状态 |
 | `android_hid_arm`、`android_hid_pause`、`android_release` | 显式启用、取消排队输入、释放按住的报告 |
 | `android_mouse_move`、`android_mouse_click`、`android_scroll` | 相对计数、当前位置点击、滚轮 |
+| `android_preview_tap` | 点击前只读显示目标标记及局部放大图，方便检查控件位置 |
+| `android_pointer_calibration` | 由 AI 读取光标位置，分测量、确认两步标定 |
 | `android_calibrate_pointer`、`android_pointer_home`、`android_tap`、`android_swipe` | 标定后估算坐标 |
 | `android_type`、`android_key`、`android_key_report` | 美式布局 ASCII、组合键、原始键盘报告 |
 | `android_consumer_report`、`android_home`、`android_back` | 原始消费控制用途码及主页/返回 |
 
-目前有 20 个工具。先调用 `android_screenshot`，再用结果中的 `frameId` 调用
+目前有 22 个工具。先调用 `android_screenshot`，再用结果中的 `frameId` 调用
 `android_control`。例如 `{ "action": "move", "frameId": "<最新frameId>", "dx": 80,
 "dy": 0 }` 会移动真实鼠标，并返回动作完成后采集的新画面；后续沿用返回的新
 `frameId`。输入准备在内部完成，move/click/scroll/key/type/home/back 无需指针
 标定。`wait` 只延时观察，不启用输入。实体急停锁始终优先。
 
-`android_control` 的 tap/swipe 仍需明确测量、设置标定；原有独立输入工具保留
+`android_control` 的 hover/tap/swipe 仍需明确测量、设置标定；原有独立输入工具保留
 `android_hid_arm` 和操作后单独截图的兼容流程。人工相对遥控及原始相对移动不需要
 坐标标定。动作后的图片超时时，检查 `actionStarted`、`actionCompleted` 与
 `observedAfterAction`；动作已经完成时，请用 `android_screenshot` 重新观察，不要盲目重做。
@@ -216,6 +218,94 @@ SHA-256、采集时间和会话自己的 `frameId`；超过三秒的源画面会
 归零、点击和滑动在排队结束、实际发送前再次检查截图；过期或被本会话新图替换时停止并暂停输入。
 全局共享手机身份、尺寸和旋转 epoch：任意变化都会使所有会话旧截图失效，停止
 输入并清除标定，包括宽高不变的 180 度旋转。
+
+### 先预览位置，再确认真实光标并点击
+
+控件较小、位置不好判断时，先使用 `android_preview_tap`。传入本会话最新的
+`frameId`、`x`、`y`，以及可选的 `coordinateSpace`（默认 `pixels`，也支持
+`normalized1000`）。服务新采集手机原画，依次返回两张图：带醒目模拟目标标记的
+原尺寸全图，以及目标周围的 2 倍局部放大图。底图来自真实手机，标记仅画在返回
+图片上；不会移动真实鼠标、点击、启用输入或抢占其它输入会话，也不需要标定。
+过期画面、越界坐标，以及手机身份、尺寸或旋转变化都会被拒绝。
+
+```json
+{ "frameId": "<最新frameId>", "x": 540, "y": 1200, "coordinateSpace": "pixels" }
+```
+
+选择位置时以原图尺寸为准。客户端可能缩小显示图片，不能把缩小后的位置直接
+当作原图像素；需要换算回原尺寸，或使用 `normalized1000`。局部放大图具有独立
+的原点和倍率，返回元数据给出原图目标坐标及局部图到原图的换算。后续使用预览
+返回的新 `frameId`。模拟标记用于确认选定的控件位置，不表示真实鼠标已经到达那里。
+
+返回字段 `target: { x, y, coordinateSpace: "pixels" }` 是原图位置，
+`crop: { x, y, width, height, scale: 2 }` 是裁剪范围和放大倍率，`zoomTarget` 则给出
+标记在局部图里的 `zoomPixels` 坐标。局部图位置换算为原图时使用
+`originalX = crop.x + zoomX / crop.scale`，Y 同理，再取整为像素；
+`normalized1000` 的每轴坐标接受 0 到 1000 的整数。
+`simulatedTarget: true`、`realMouseMoved: false`、`realClickSent: false` 明确说明
+本次只做预览。`sourceSha256`/`sourceMimeType` 标识未加标记的底图，
+`annotatedImageSha256` 和 `zoomImageSha256` 分别标识两张合成图片。
+`tapArguments` 提供可直接交给 `android_control` 的原图坐标 tap 参数，确认预览后再使用。
+
+需要先确认真实鼠标时，分三步执行：
+
+1. 预览拟点击的位置，标记没有对准控件时先修改坐标。
+2. 用预览的 `frameId` 和坐标调用 `android_control` 的 `action: "hover"`。
+   它按已测量的标定移动真实鼠标，不按下按键，并返回操作后的真实新画面。
+3. 检查画面里的真实光标；位置正确后，使用 hover 返回的 `frameId` 调用
+   `action: "click"`，在当前位置按下，不再重复坐标移动。偏离时先用小幅相对
+   `move` 修正，查看返回图片，确认光标准确后再点击。
+
+```json
+{ "action": "hover", "frameId": "<预览frameId>", "x": 540, "y": 1200, "coordinateSpace": "pixels" }
+```
+
+```json
+{ "action": "click", "frameId": "<hover返回的frameId>" }
+```
+
+hover 与 tap 使用相同的像素或 `normalized1000` 坐标，并需要标定。这样能在真正
+按下前发现标定或鼠标加速度带来的偏差。原有直接 `tap` 继续兼容；小控件或重要
+操作建议采用“预览 → hover → 看真实光标 → click”的流程。
+
+### 让 AI 测量鼠标位置并标定
+
+AI 按坐标点击、滑动时，优先使用 `android_pointer_calibration`。AI 从原画读取
+圆形鼠标的中心，服务计算比例，用户不用猜横向、纵向倍率。这是测量、确认两阶段
+流程，不是自动计算机视觉识别。
+
+1. **让鼠标移动一小段。** 使用本会话最新截图的 `frameId`，调用
+   `phase: "probe"`。服务会释放按住的输入、准备 ARM，先小幅移动让光标显示出来，
+   并在测量前后按固定时间等待光标稳定。结果依次返回两张原画：测量移动前的
+   **before**、移动后的 **after**，以及 `probeId`、实际发送的带正负号 `dx`/`dy`
+   计数和最新 after 图的 `frameId`。`direction` 可选 `up-left`（默认左上）、
+   `up-right`（右上）、`down-left`（左下）、`down-right`（右下）；选择屏内有空间的
+   方向，避免撞到边缘。`counts` 为每轴 16–127，默认 96。实体急停始终优先。
+
+   ```json
+   { "phase": "probe", "frameId": "<最新frameId>", "direction": "up-left", "counts": 96 }
+   ```
+
+2. **读取圆心并保存。** AI 从返回的 **before** 图读取 `startX`/`startY`，从
+   **after** 图读取 `endX`/`endY`，再携带 `probeId` 和本会话最新画面的 `frameId`
+   调用 `phase: "finish"`。必须使用原图像素坐标，不能用缩小的预览图坐标，也不能
+   把预热移动之前的最初截图当作 before 图。下面四个坐标仅为示例，必须替换为
+   返回图片中实际看到的圆心。
+
+   ```json
+   { "phase": "finish", "probeId": "<probeId>", "frameId": "<最新after图frameId>", "startX": 800, "startY": 1600, "endX": 704, "endY": 1504 }
+   ```
+
+服务按实际移动计算每个截图像素所需的 HID 计数。任意一轴位移不足 12 像素、方向
+相反，或终点被屏幕边缘截断时会拒绝保存。probe 到 finish 之间不要发送其它输入
+或接管鼠标；允许只读截图或用 `android_control` 的 `wait` 取得更新画面，但手机、
+物理尺寸、旋转与输入归属必须保持一致。测量记录只属于发起它的 MCP 会话。
+
+如果看不到光标，或第一张 after 图还没有明显反映移动，先用 `android_screenshot`
+或 `wait` 继续观察，不要重放已经完成的 probe 移动。记录过期或被作废后，不能复用
+旧测量。存在鼠标加速度时，坐标仍是估算值；换手机、旋转屏幕或修改指针速度、
+鼠标设置后需要重新标定。旧的 `android_calibrate_pointer` 手动接口仍兼容，但只
+保存传入倍率，不执行上述测量。原始相对移动、当前位置点击、键盘和滚轮仍无需标定。
 
 比例含义是每个截图像素所需的 HID 计数，例如 200 计数移动 100 像素对应 scale 2。
 坐标仍是估算值，支持像素与 `normalized1000`。指针速度或键鼠设置变化后需重新标定。

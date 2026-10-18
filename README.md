@@ -40,7 +40,7 @@ Aidol 创造营参赛项目——钱多多门店人工智能助手：店铺管�
 ### 需求对齐与能力缺口
 
 - **引导式提问**：新许愿写页面前，agent 必须先用 `clarify` 逐项对齐（对象、时间范围、口径、矛盾取舍、估测假设），候选项来自真实数据、推荐项在前；前端或终端回答（终端支持编号多选、回车选推荐、直接输入自定义）。`llm.clarify` 可设为 `required`（默认）/ `auto` / `off`。
-- **能力缺口**：发布和回复都必须声明 `gaps`（缺数据 / 估测 / 不支持 / 需授权），网关把缺口固定展示在页面顶部，页面代码无法移除。
+- **能力缺口**：`gaps` 由 harness 校验生成（如结论数字未能核验），无需模型提交；网关把检测到的缺口固定展示在页面顶部，页面代码无法移除。数据缺失、估测假设或能力受限仍需在页面或回复正文中说明。
 
 ### 拒绝后端与未授权更改
 
@@ -55,6 +55,7 @@ Aidol 创造营参赛项目——钱多多门店人工智能助手：店铺管�
 - **待办与总览**：`GET /api/overview` / `GET /api/pending` 汇总所有会话里待店长处理的授权和问题；授权等待时长由 `approvalTimeoutMin`（默认 60 分钟）控制。
 - **技能**（`workspace/skills/`）：可复用的做事方法；agent 可从对话中 `save_skill`（需店长确认）、`load_skill`。
 - **定时任务**（`workspace/schedules.json`）：5 段 cron，网关内调度；到点无人值守执行（可绑定技能、在页面上刷新），结论推送到连接器；停机错过的执行会补跑。店长说「每天 9 点…」时 agent 可用 `create_schedule` 直接创建（需店长确认）；定时执行中的推送若需确认会进入工作台待办，可用于「店长确认后再发」。
+- 每次定时执行使用独立会话 ID，与前端刷新无关。手动修改同一页面时，会停止占用页面的后台定时执行，待其完全退出后继续修改；交接和修改期间保留页面锁，其他会话不能同时写入。只取消当前执行，不停用定时配置；普通会话之间的并发修改仍会被拒绝。
 - **记录数据集**（`records/<name>`）：试吃报损、临期处置回填、巡检等逐条登记的数据。agent 用 `define_record` 提出结构（需店长确认），页面用 `qdd.records.add/update/remove/list` 读写，网关按结构校验并只允许页面访问代码中用到的记录；修改按 id 覆盖、作废写墓碑，`store__aggregate` 可直接汇总（计数指标 `records`）。
 - **连接器**（`workspace/connectors.json`）：在连接器页由用户选择安装飞书、收银系统（收钱吧）或门店摄像头（海康互联、天翼视联、萤石），默认不安装任何厂商。安装前先验证本地服务；选择保存后立即加载相应工具，删除后撤销，重启后保留用户选择。飞书凭据加密存储；agent 用 `send_notification` 推送（按连接器权限需店长确认）。
 
@@ -145,6 +146,14 @@ npm run qdd -- reply <会话id> "按周汇总"
 | `start-android.cmd` | 启动连续投屏操作台与 MCP；ESP32 可通过 Wi-Fi 或 USB 连接电脑 |
 
 浏览器集成回归位于 `apps/cli/src/browser.test.ts`，使用本机 Chrome/Edge 与本地网页验证操作、授权和实时画面；没有本机浏览器时跳过。会话终态回归位于 `apps/cli/src/session-completion.test.ts`，验证状态持久化完成前保持运行锁。定时执行记录隔离回归位于 `apps/cli/src/schedule-sessions.test.ts`，验证独立存储、旧记录迁移与对话列表隔离。均通过 `npm test` 执行，使用 Node.js 内置测试器，测试文件命名为 `*.test.ts`。
+
+模型流式响应回归位于 `apps/cli/src/llm.test.ts`，覆盖长工具参数、分块传输、输出截断及参数校验。定向运行：先执行 `npm run build`，再执行 `node --test apps/cli/dist/llm.test.js apps/cli/dist/harness.test.js apps/cli/dist/chat-options.test.js`。
+
+若模型只返回思考内容而没有正文或工具调用，客户端会明确报错，不把这条响应加入对话。续聊时会自动过滤旧历史中的空 assistant 消息，避免触发 `Invalid assistant message: content or tool_calls must be set`；正常工具调用携带的思考内容仍原样保留。
+
+若 `write_file` 报参数 JSON 不完整（例如 `Unterminated string in JSON`），说明模型生成的工具参数无法解析，并非文件已经写入。客户端会识别 `finish_reason=length`，阻止该轮工具执行并反馈缩小输出的提示；流意外结束且没有完成标记时直接报错，不执行部分调用。大页面应拆成较小的 HTML、JS、CSS 文件分多轮写入；同一路径仍是完整覆盖，不支持追加。默认 `llm.maxTokens` 为 8192，可在模型支持范围内调整（模型条目自己的 `maxTokens` 会覆盖全局设置），但不要用补引号或补括号的方式“修复”被截断的文件内容。
+
+DeepSeek 官方 API 的 `deepseek-flash` 当前对应 V4.1 Flash（2026-10-17）。如需使用最大输出预算，在 `harness.config.json` 的对应 `llm.models` 条目中设置 `"maxTokens": 393216`（384 × 1024），不要把该值设为所有模型的通用默认值。[官方参数文档](https://api-docs.deepseek.com/api/create-chat-completion/)规定 `max_tokens` 上限为 393216；实际输出仍受输入与输出合计上下文长度限制，长输出可能增加耗时和费用。修改配置后需重启后端。
 
 ## 目录结构
 

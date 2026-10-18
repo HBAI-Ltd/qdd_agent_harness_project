@@ -1,8 +1,9 @@
+import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { resolveMetrics, type MetricCatalog } from "@qdd/shared";
 import type { HarnessPaths } from "../config.js";
-import { readPages, writeAtomic, writePages } from "../web/site.js";
+import { updatePages, writeAtomic } from "../web/site.js";
 
 /** 记录数据集的计数指标（按 id 计行数）；旧工作区在首次建立记录数据集时补入口径目录。 */
 export const RECORDS_METRIC: MetricCatalog[string] = { label: "记录数", type: "flow", field: "id", agg: "count", digits: 0, description: "登记记录条数（已作废的不计）" };
@@ -37,16 +38,31 @@ export async function ensureMetrics(paths: HarnessPaths): Promise<void> {
   }
 }
 
+const metricUpdates = new Map<string, Promise<string[]>>();
+
 /**
  * 更新指标定义：校验 → 写历史 → 保存 → 标记依赖页面待复核。返回受影响的页面。
  * 调用方负责授权。
  */
 export async function updateMetrics(paths: HarnessPaths, changes: MetricCatalog, reason: string): Promise<string[]> {
+  const key = path.resolve(paths.metrics);
+  // 读取也必须在队列内，否则不同会话仍会从同一旧口径合并并覆盖彼此。
+  const next = (metricUpdates.get(key) ?? Promise.resolve()).catch(() => undefined)
+    .then(() => applyMetricUpdate(paths, changes, reason));
+  metricUpdates.set(key, next);
+  try {
+    return await next;
+  } finally {
+    if (metricUpdates.get(key) === next) metricUpdates.delete(key);
+  }
+}
+
+async function applyMetricUpdate(paths: HarnessPaths, changes: MetricCatalog, reason: string): Promise<string[]> {
   const current = await loadMetrics(paths);
   const next = { ...current, ...changes };
   resolveMetrics(Object.keys(next), next); // 校验比率引用
   const stamp = new Date().toISOString();
-  await writeAtomic(path.join(path.dirname(paths.metrics), "metrics.history", `${stamp.replace(/[^0-9]/g, "")}.json`), JSON.stringify({ at: stamp, reason, before: current, after: next }, null, 2));
+  await writeAtomic(path.join(path.dirname(paths.metrics), "metrics.history", `${stamp.replace(/[^0-9]/g, "")}-${randomUUID()}.json`), JSON.stringify({ at: stamp, reason, before: current, after: next }, null, 2));
   await writeAtomic(paths.metrics, `${JSON.stringify(next, null, 2)}\n`);
 
   const changed = new Set(Object.keys(changes));
@@ -54,15 +70,16 @@ export async function updateMetrics(paths: HarnessPaths, changes: MetricCatalog,
   for (const [name, def] of Object.entries(next)) {
     if (def.type === "ratio" && (changed.has(def.numerator ?? "") || changed.has(def.denominator ?? ""))) changed.add(name);
   }
-  const pages = await readPages(paths);
   const affected: string[] = [];
-  for (const p of pages) {
-    const hit = p.metrics.filter((m) => changed.has(m));
-    if (hit.length) {
-      p.stale = `指标口径已变更（${hit.join("、")}）：${reason}`;
-      affected.push(p.slug);
+  await updatePages(paths, (pages) => {
+    for (const p of pages) {
+      const hit = p.metrics.filter((m) => changed.has(m));
+      if (hit.length) {
+        p.stale = `指标口径已变更（${hit.join("、")}）：${reason}`;
+        affected.push(p.slug);
+      }
     }
-  }
-  if (affected.length) await writePages(paths, pages);
+    return pages;
+  });
   return affected;
 }

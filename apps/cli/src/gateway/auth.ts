@@ -1,5 +1,5 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { readFile, writeFile } from "node:fs/promises";
+import { link, readFile, rm, writeFile } from "node:fs/promises";
 import type { IncomingMessage } from "node:http";
 import type { LoadedConfig } from "../config.js";
 
@@ -13,11 +13,24 @@ export async function resolveGatewayToken({ config, paths }: LoadedConfig): Prom
   try {
     const token = (await readFile(paths.token, "utf8")).trim();
     if (token) return { token, source: paths.token };
-  } catch {
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     // 首次运行
   }
   const token = randomBytes(24).toString("base64url");
-  await writeFile(paths.token, `${token}\n`, { mode: 0o600 });
+  const temporary = `${paths.token}.${process.pid}.${randomBytes(12).toString("hex")}.tmp`;
+  try {
+    await writeFile(temporary, `${token}\n`, { mode: 0o600, flag: "wx" });
+    // 完整文件就绪后原子发布，避免另一进程读到刚创建但尚未写完的 token。
+    await link(temporary, paths.token);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    const existing = (await readFile(paths.token, "utf8")).trim();
+    if (!existing) throw new Error(`网关 token 文件为空：${paths.token}`);
+    return { token: existing, source: paths.token };
+  } finally {
+    await rm(temporary, { force: true });
+  }
   return { token, source: `${paths.token}（新生成）` };
 }
 

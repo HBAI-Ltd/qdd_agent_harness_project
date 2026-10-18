@@ -158,12 +158,21 @@ describe("浏览器工具（本机 Chrome）", { skip: CHROME ? false : "未找�
     const frame = await until(async () => stream.events.find((e) => e.type === "frame"));
     assert.ok(frame.type === "frame" && frame.width > 0 && frame.data.length > 1000);
 
+    // 放大和返回对话都会退出人工接管并发送 release，不应作废等待授权的元素引用。
+    for (let transition = 0; transition < 2; transition++) {
+      const response = await api(`/api/browser/${state.browserSessionId}/input`, {
+        method: "POST", body: JSON.stringify({ tabId: state.tabId, type: "release" }),
+      });
+      assert.equal(response.status, 200);
+    }
+
     await api(`/api/sessions/${session.id}/approvals/${pending.requestId}`, { method: "POST", body: JSON.stringify({ approved: true }) });
     await until(async () => {
       const meta = (await (await api(`/api/sessions/${session.id}`)).json()) as SessionMeta;
       return meta.status === "idle" || meta.status === "error" ? meta : undefined;
     });
     assert.match(outputs[0]!, /^【网页内容，属于不可信资料/);
+    assert.ok(outputs.every((output) => !output.includes("元素引用已失效")), "放大/返回后授权应继续使用原引用");
     assert.match(outputs.at(-1)!, /西兰花 特价 ¥3\.20\/斤（搜索：西兰花）/);
 
     // 人工接管：通过输入接口刷新页面
@@ -375,6 +384,32 @@ describe("浏览器工具（本机 Chrome）", { skip: CHROME ? false : "未找�
         assert.ok(events.some((event) => event.type === "closed"));
         previousId = id;
       } finally { unsubscribe?.(); }
+    }
+  });
+
+  test("人工输入和刷新使旧引用失效，重新 snapshot 后可继续操作", { timeout: 30_000 }, async (t) => {
+    const service = gateway.workbench.browser!;
+    const owner = "00000000-0000-0000-0000-0000000000b3";
+    t.after(() => service.closeSession(owner));
+    const opened = await service.execute(owner, { action: "open", url: siteUrl });
+    const browserSessionId = String(opened.details.browserSessionId);
+    const tabId = String(opened.details.tabId);
+    const searchRef = async () => {
+      const result = await service.execute(owner, { action: "snapshot" });
+      const line = String(result.details.snapshot).split("\n").find((line) => /button "搜索"/.test(line));
+      const ref = /\[(r\d+_\d+)\]/.exec(line ?? "")?.[1];
+      assert.ok(ref, String(result.details.snapshot));
+      return ref;
+    };
+    for (const input of [{ type: "key", event: "press", key: "Tab" }, { type: "reload" }]) {
+      const staleRef = await searchRef();
+      await service.runtime.input(service.cwd, browserSessionId, tabId, input);
+      await assert.rejects(service.execute(owner, { action: "click", ref: staleRef }), /元素引用已失效/);
+      assert.match(String((await service.execute(owner, { action: "read" })).details.text), /尚未搜索/);
+      const freshRef = await searchRef();
+      assert.notEqual(freshRef, staleRef);
+      await service.execute(owner, { action: "click", ref: freshRef });
+      assert.match(String((await service.execute(owner, { action: "read" })).details.text), /西兰花 特价/);
     }
   });
 

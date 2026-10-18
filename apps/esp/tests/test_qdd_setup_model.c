@@ -64,7 +64,7 @@ static void test_list(void) {
 static void test_short_press_menu_navigation(void) {
     qdd_setup_model_t model = {0}; qdd_setup_menu(&model);
     assert(model.page == QDD_SETUP_MENU && model.selection == 0);
-    assert(qdd_setup_key(&model, QDD_SETUP_UP, 0, false) == QDD_SETUP_NONE && model.selection == 4);
+    assert(qdd_setup_key(&model, QDD_SETUP_UP, 0, false) == QDD_SETUP_NONE && model.selection == 5);
     assert(key(&model, QDD_SETUP_OK) == QDD_SETUP_EXIT && model.page == QDD_SETUP_HOME);
     qdd_setup_menu(&model);
     assert(key(&model, QDD_SETUP_OK) == QDD_SETUP_SCAN && model.page == QDD_SETUP_LIST);
@@ -78,7 +78,8 @@ static void test_short_press_menu_navigation(void) {
     key(&model, QDD_SETUP_DOWN); key(&model, QDD_SETUP_OK);
     assert(model.page == QDD_SETUP_HELP);
     key(&model, QDD_SETUP_OK); assert(model.page == QDD_SETUP_MENU && model.selection == 2);
-    key(&model, QDD_SETUP_DOWN); key(&model, QDD_SETUP_DOWN); assert(key(&model, QDD_SETUP_OK) == QDD_SETUP_EXIT);
+    key(&model, QDD_SETUP_DOWN); key(&model, QDD_SETUP_DOWN); key(&model, QDD_SETUP_DOWN);
+    assert(key(&model, QDD_SETUP_OK) == QDD_SETUP_EXIT);
     select_network(&model, false); qdd_setup_error(&model, "连接失败，请重试");
     key(&model, QDD_SETUP_DOWN); key(&model, QDD_SETUP_OK);
     assert(model.page == QDD_SETUP_LIST); password_is_clear(&model);
@@ -88,10 +89,27 @@ static void test_settings_download_is_display_only(void) {
     qdd_setup_model_t model = {0}; qdd_setup_menu(&model);
     for (unsigned i = 0; i < 4; i++) assert(key(&model, QDD_SETUP_DOWN) == QDD_SETUP_NONE);
     assert(model.selection == 4);
+    strcpy(model.credentials.ssid, "Staged network");
+    assert(qdd_setup_append(&model, "staged password"));
+    const qdd_wifi_credentials_t credentials = model.credentials;
     // This settings item must only show the download page, never exit, scan,
     // pair, save credentials or reset the controller.
     assert(key(&model, QDD_SETUP_OK) == QDD_SETUP_NONE);
-    assert(model.page != QDD_SETUP_MENU && model.page != QDD_SETUP_HOME && model.page != QDD_SETUP_RESET);
+    assert(model.page == QDD_SETUP_DOWNLOAD && model.selection == 0);
+    for (unsigned i = 0; i < 8; i++) {
+        assert(key(&model, i % 2 ? QDD_SETUP_UP : QDD_SETUP_DOWN) == QDD_SETUP_NONE);
+        assert(model.page == QDD_SETUP_DOWNLOAD && model.selection == 0);
+    }
+    assert(memcmp(&credentials, &model.credentials, sizeof(credentials)) == 0);
+    assert(key(&model, QDD_SETUP_OK) == QDD_SETUP_NONE);
+    assert(model.page == QDD_SETUP_MENU && model.selection == 4);
+    assert(memcmp(&credentials, &model.credentials, sizeof(credentials)) == 0);
+    assert(key(&model, QDD_SETUP_OK) == QDD_SETUP_NONE && model.page == QDD_SETUP_DOWNLOAD);
+    assert(key(&model, QDD_SETUP_LONG_OK) == QDD_SETUP_NONE);
+    assert(model.page == QDD_SETUP_MENU && model.selection == 4);
+    assert(key(&model, QDD_SETUP_DOWN) == QDD_SETUP_NONE && model.selection == 5);
+    assert(key(&model, QDD_SETUP_OK) == QDD_SETUP_EXIT && model.page == QDD_SETUP_HOME);
+    password_is_clear(&model);
 }
 
 static void test_first_connection_intro(void) {

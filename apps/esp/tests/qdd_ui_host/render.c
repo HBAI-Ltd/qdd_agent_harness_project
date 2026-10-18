@@ -358,8 +358,109 @@ static void check_scan_activity(lv_display_t *display) {
     printf("Scan activity PASS: cached animation, old-list hiding, completion/failure/return cleanup\n");
 }
 
+static lv_obj_t *download_qr(lv_obj_t *object) {
+    if (lv_obj_check_type(object, &lv_qrcode_class)) return object;
+    for (uint32_t i = 0; i < lv_obj_get_child_count(object); i++) {
+        lv_obj_t *found = download_qr(lv_obj_get_child(object, (int32_t)i));
+        if (found) return found;
+    }
+    return NULL;
+}
+
+static uint32_t download_qr_hash(void) {
+    unsigned black = 0, white = 0; uint32_t hash = 2166136261u;
+    for (int y = 74; y < 202; y++) for (int x = 48; x < 176; x++) {
+        const uint16_t pixel = pixels[y * 240 + x];
+        black += pixel == 0; white += pixel == 0xFFFF;
+        hash = (hash ^ pixel) * 16777619u;
+    }
+    assert(black > 1000 && white > 1000); // Modules and quiet zone, not an empty canvas.
+    return hash;
+}
+
+static void check_download_settings(lv_display_t *display) {
+    qdd_setup_model_t setup = {0};
+    qdd_wifi_view_t wifi = {.connected = true, .port = 3333}; strcpy(wifi.ip, "192.168.1.88");
+    qdd_hid_state_t state = {.connected = true, .encrypted = true, .authenticated = true,
+        .bonded = true, .ready = true, .locked = true};
+    const qdd_hid_state_t original_state = state;
+    s_onboarding = (qdd_onboarding_view_t){.downloaded = true, .phone_seen = true, .phone_fresh = true,
+        .phone_projecting = true, .pc_fresh = true};
+    const qdd_onboarding_view_t original_onboarding = s_onboarding;
+    qdd_ui_require_onboarding(true); qdd_ui_wifi(&setup, wifi);
+    qdd_ui_refresh(&state, (qdd_ble_status_t){0}, false, 87, 2000, "", 0);
+    assert(qdd_ui_guide_step() == 0);
+    qdd_setup_menu(&setup);
+    for (unsigned i = 0; i < 4; i++) assert(qdd_setup_key(&setup, QDD_SETUP_DOWN, 0, false) == QDD_SETUP_NONE);
+    qdd_ui_wifi(&setup, wifi); lv_refr_now(display); check_labels(lv_screen_active());
+    assert(has_visible_label(lv_screen_active(), "手机投屏下载")); write_frame("settings_download_selected");
+    assert(qdd_setup_key(&setup, QDD_SETUP_OK, 0, false) == QDD_SETUP_NONE && setup.page == QDD_SETUP_DOWNLOAD);
+    qdd_ui_wifi(&setup, wifi); lv_refr_now(display); check_labels(lv_screen_active());
+    assert(has_visible_label(lv_screen_active(), "手机投屏下载"));
+    assert(has_visible_label(lv_screen_active(), "扫码或浏览器打开地址下载"));
+    assert(has_visible_label(lv_screen_active(), "手机/电脑/ESP同一局域网"));
+    assert(has_visible_label(lv_screen_active(), "192.168.1.88:3334"));
+    assert(has_visible_label(lv_screen_active(), "返回设置"));
+    assert(!has_visible_label(lv_screen_active(), "跳过此步") && !has_visible_label(lv_screen_active(), "紧急停止"));
+    assert(download_qr(lv_screen_active()) && !lv_obj_has_flag(download_qr(lv_screen_active()), LV_OBJ_FLAG_HIDDEN));
+    const uint32_t first_qr = download_qr_hash(); write_frame("settings_download");
+    const unsigned cached_flushes = flushes;
+    lv_mem_monitor_t before, after; lv_mem_monitor(&before);
+    for (unsigned i = 0; i < 100; i++) {
+        qdd_ui_wifi(&setup, wifi); qdd_ui_refresh(&state, (qdd_ble_status_t){0}, false, 87, 2000, "", 0);
+        lv_refr_now(display);
+    }
+    lv_mem_monitor(&after);
+    assert(flushes == cached_flushes && before.free_size == after.free_size && before.used_cnt == after.used_cnt);
+    assert(qdd_ui_guide_step() == 0);
+    assert(qdd_setup_key(&setup, QDD_SETUP_OK, 0, false) == QDD_SETUP_NONE);
+    assert(setup.page == QDD_SETUP_MENU && setup.selection == 4);
+    qdd_ui_wifi(&setup, wifi); lv_refr_now(display); write_frame("settings_download_return");
+    // Returning selects the download item, not its neighbouring reset action.
+    assert(qdd_setup_key(&setup, QDD_SETUP_OK, 0, false) == QDD_SETUP_NONE && setup.page == QDD_SETUP_DOWNLOAD);
+    qdd_ui_wifi(&setup, wifi); lv_refr_now(display);
+    assert(download_qr_hash() == first_qr); // New object with the same URL is populated again.
+    strcpy(wifi.ip, "192.168.1.99"); qdd_ui_wifi(&setup, wifi); lv_refr_now(display); check_labels(lv_screen_active());
+    assert(has_visible_label(lv_screen_active(), "192.168.1.99:3334") && download_qr_hash() != first_qr);
+    write_frame("settings_download_changed_ip");
+    wifi.connected = false; wifi.ip[0] = 0; qdd_ui_wifi(&setup, wifi); lv_refr_now(display); check_labels(lv_screen_active());
+    assert(lv_obj_has_flag(download_qr(lv_screen_active()), LV_OBJ_FLAG_HIDDEN));
+    assert(has_visible_label(lv_screen_active(), "请先连接无线网络") && has_visible_label(lv_screen_active(), "返回设置"));
+    assert(!has_visible_label(lv_screen_active(), "192.168.1.99:3334")); write_frame("settings_download_offline");
+    for (unsigned i = 0; i < 4; i++) {
+        assert(qdd_setup_key(&setup, i % 2 ? QDD_SETUP_UP : QDD_SETUP_DOWN, 0, false) == QDD_SETUP_NONE);
+        assert(setup.page == QDD_SETUP_DOWNLOAD && setup.selection == 0);
+    }
+    wifi.connected = true; strcpy(wifi.ip, "192.168.1.88"); qdd_ui_wifi(&setup, wifi); lv_refr_now(display);
+    assert(download_qr_hash() == first_qr);
+    qdd_setup_exit(&setup); qdd_ui_wifi(&setup, wifi);
+    qdd_ui_refresh(&state, (qdd_ble_status_t){0}, false, 87, 2000, "", 0); lv_refr_now(display);
+    assert(qdd_ui_guide_step() == 0 && has_visible_label(lv_screen_active(), "已紧急停止"));
+    lv_mem_monitor(&before); size_t minimum_free = before.free_size, maximum_free = before.free_size;
+    for (unsigned i = 0; i < 120; i++) {
+        qdd_setup_menu(&setup); setup.selection = 4;
+        assert(qdd_setup_key(&setup, QDD_SETUP_OK, 0, false) == QDD_SETUP_NONE);
+        qdd_ui_wifi(&setup, wifi); lv_refr_now(display); (void)download_qr_hash();
+        assert(qdd_setup_key(&setup, QDD_SETUP_OK, 0, false) == QDD_SETUP_NONE && setup.selection == 4);
+        qdd_ui_wifi(&setup, wifi); lv_refr_now(display);
+        qdd_setup_exit(&setup); qdd_ui_wifi(&setup, wifi);
+        qdd_ui_refresh(&state, (qdd_ble_status_t){0}, false, 87, 2000, "", 0); lv_refr_now(display);
+        lv_mem_monitor(&after);
+        assert(after.used_cnt == before.used_cnt && after.free_biggest_size >= 4096 && after.max_used <= 20 * 1024);
+        if (after.free_size < minimum_free) minimum_free = after.free_size;
+        if (after.free_size > maximum_free) maximum_free = after.free_size;
+        assert(maximum_free - minimum_free <= 128 && after.free_size + 128 >= before.free_size);
+        assert(qdd_ui_guide_step() == 0 && has_visible_label(lv_screen_active(), "已紧急停止"));
+    }
+    assert(memcmp(&state, &original_state, sizeof(state)) == 0);
+    assert(memcmp(&s_onboarding, &original_onboarding, sizeof(s_onboarding)) == 0);
+    qdd_ui_require_onboarding(false);
+    printf("Settings APK download PASS: QR reentry/IP/offline, return routing, completed guide/stop preservation; 100 cached refreshes: 0 flushes; 120 replacements stable.\n");
+    printf("Download 24KiB LVGL pool: free=%zu, largest=%zu, peak_used=%zu.\n", after.free_size, after.free_biggest_size, after.max_used);
+}
+
 int main(int argc, char **argv) {
-    assert(argc == 2 || (argc == 3 && (strcmp(argv[2], "--scan") == 0 || strcmp(argv[2], "--guide") == 0 || strcmp(argv[2], "--pair") == 0 || strcmp(argv[2], "--intro") == 0)));
+    assert(argc == 2 || (argc == 3 && (strcmp(argv[2], "--scan") == 0 || strcmp(argv[2], "--guide") == 0 || strcmp(argv[2], "--pair") == 0 || strcmp(argv[2], "--intro") == 0 || strcmp(argv[2], "--download") == 0)));
     FILE *inventory = fopen(argv[1], "rb");
     assert(inventory);
     char glyphs[2048] = {0};
@@ -383,6 +484,7 @@ int main(int argc, char **argv) {
     if (argc == 3 && strcmp(argv[2], "--intro") == 0) { check_intro(display); return 0; }
     if (argc == 3 && strcmp(argv[2], "--pair") == 0) { check_pairing_settings(display); return 0; }
     if (argc == 3 && strcmp(argv[2], "--scan") == 0) { check_scan_activity(display); return 0; }
+    if (argc == 3 && strcmp(argv[2], "--download") == 0) { check_download_settings(display); return 0; }
     qdd_hid_state_t state = {0};
     qdd_ble_status_t ble = {0};
     qdd_setup_model_t help = {0}; qdd_setup_help(&help);
@@ -681,5 +783,6 @@ int main(int argc, char **argv) {
     printf("LVGL 9.5 glyph/label/layout checks PASS; 100 unchanged refreshes: 0 flushes, stable allocations.\n");
     printf("24KiB LVGL pool: free=%zu, largest=%zu, peak_used=%zu; fonts line heights=%u/%u.\n",
         after.free_size, after.free_biggest_size, after.max_used, qdd_cjk_14.line_height, qdd_cjk_20.line_height);
+    check_download_settings(display);
     return 0;
 }

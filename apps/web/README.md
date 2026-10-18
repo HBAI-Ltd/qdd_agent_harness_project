@@ -28,18 +28,15 @@ npm run dev:web
 npm run qdd -- token
 ```
 
-网关配置的 `gateway.corsOrigins` 需精确包含前端来源，例如 `http://127.0.0.1:5177`；示例配置已包含该地址。若使用 `http://localhost:5177`，需另行添加该来源，并让网关地址也使用 `localhost`。前后端使用相同的主机名与协议，以便页面 cookie 正常工作。修改网关配置后需重启后端。
+网关配置的 `gateway.corsOrigins` 需精确包含前端来源，例如 `http://127.0.0.1:5177`；示例配置已包含该地址。若使用 `http://localhost:5177`，需另行添加该来源。修改网关配置后需重启后端。
 
-生成的任务页面需要直接使用实际网关来源：页面级 token、cookie、SDK 注入、CSP 嵌入权限和父页面通信均由网关处理。`gateway.corsOrigins` 同时控制跨域请求、页面嵌入与 SDK 允许的主界面来源。网关 token 只存于当前浏览器会话，不放入页面地址。
+生成的任务页面需要直接使用实际网关地址：旧页面入口由网关重定向到带页面令牌的静态资源路径，保留相对脚本、模块和主题路径。所有预览 iframe 都采用不保留来源的 sandbox，使不同任务页面及主界面之间无法互读 DOM；允许脚本和文件下载。SDK 通过页 token 访问允许的 API，网关为这些请求提供受限的 `Origin: null` 跨域响应。`gateway.corsOrigins` 同时控制主界面跨域请求、页面嵌入与 SDK 允许的主界面来源。网关 token 只存于当前浏览器会话，不放入页面地址。
 
 - 对话：支持新建对话、历史记录与会话切换，发送经营需求、续聊、查看 SSE 进度，并完成需求确认与显式授权。点击「新建对话」进入空白草稿，首次发送消息时通过 `POST /api/wishes` 建立会话；已有对话通过 `POST /api/sessions/:id/messages` 续聊。
 - 同一轮助手消息使用统一的 `parts` 按输出顺序展示，正文、思考、工具、技能与浏览器记录依次穿插，思考和工具行可独立展开。`text/thinking` 按 `blockId` 累积实时 `delta`，收到 `content/done` 后以完整内容替换；同一回复内按块序号补齐迟到的块，完成时保留原行及展开状态。结构化工具事件读取 `tool.id/name/args/status/progress/result`，按调用 id 在原位置合并进度和结果，状态区分 `running/success/error`；旧版纯文本工具记录仍可查看。
 - 回复中的 loading、等待确认和停止提示放在当前助手消息正文末尾，不单独新增头像或消息行。首个内容块尚未返回时，先展示当前轮的助手容器，随后在同一容器中继续渲染内容。
 - 实时增量不进入持久化事件数组，SSE 重连的 `since` 只计算落盘事件。切换会话、连接、开始新一轮或执行结束会清理未完成增量，重连通过完整回放恢复内容；已结束的会话不会继续显示工具调用中，明确取消时显示「已中断」。持续输出时仅在消息区接近底部时跟随滚动。
 - 助手正文与思考支持 Markdown 标题、表格、代码块、引用、任务列表和链接；用户输入保留原文。表格和代码横向滚动，原始 HTML 按文字显示，危险链接协议不渲染为链接。
-- 对话媒体：Markdown 图片 `![说明](URL)` 和图片链接显示可打开原图的预览；视频链接 `[说明](URL)` 显示播放卡片，支持 MP4/WebM/MOV 等浏览器可解码格式，以及 HLS（`.m3u8`）和 HTTP-FLV（`.flv`）。查询参数保留不变；无扩展名链接用 title 指明 MIME，例如 `[直播](https://example.com/live "application/vnd.apple.mpegurl")` 或 `[监控](https://example.com/live "video/x-flv")`。同一消息块内相同 URL 只展示一张媒体卡片，代码块和原始 HTML 不会触发播放。
-- 视频不自动播放，点击后才加载播放器及流；图片加载失败、视频错误和加载超时均显示提示并可重试。上传的图片/视频在输入区和历史消息中均可点击预览（文件夹内媒体也可预览），通过带鉴权的附件接口读取 Blob，不把网关 token 放进 URL；切换媒体、凭据或卸载组件时取消下载、销毁播放器并释放 Blob URL，原附件下载入口保留。
-- HLS 使用浏览器原生能力或本地打包的 hls.js，FLV 使用本地打包的 mpegts.js/MSE；浏览器必须支持实际视频编码，聊天播放器不提供 H.265 WASM 软解。跨域流及 HLS 子资源需要媒体服务器允许前端来源的 CORS，HTTPS 页面不能播放被浏览器拦截的 HTTP 混合内容。RTSP/RTMP 需数据源提供 HTTP(S) 地址；上传的 HLS 播放列表不会同时上传/解析关联分片。展示媒体不等同于模型能够分析画面。
 - 对话记录来自 `GET /api/sessions`，按更新时间倒序展示；切换时加载 `GET /api/sessions/:id` 并订阅该会话的 SSE。前端按网关保存当前选择，刷新或重新连接后恢复同一会话或新对话草稿状态。
 - 工作台总览：接入 `GET /api/overview` 与 `GET /api/pending`，展示真实计数、已启用定时任务、最近对话和已发布页面。可在总览直接回答问题或授权，也可进入来源对话；侧栏同步技能、任务和已连接来源数量。
 - 任务：按后端 `PageView.kind` 区分定时与一次性页面，支持类型筛选、关联定时任务名称搜索，并展示各任务启停状态。列表和预览可置顶或取消置顶多个页面，侧边栏同步标记，始终保留后端的置顶顺序。侧边栏支持搜索和 `Ctrl K` 展开并聚焦搜索框。页面通过 `PageView.url` 嵌入，保留网关注入的 SDK、样式及页面鉴权。
@@ -48,13 +45,16 @@ npm run qdd -- token
 - 修改已发布页面时，在同一对话面板恢复该页面对应的原始会话，继续其上下文，不额外创建会话。
 - 后端没有任务重命名、删除和手动状态接口，前端不提供这些操作。
 - 对话底部参考 Toonflow 的模型与思考强度组合选择器，模型目录由 `GET /api/models` 返回，可搜索并按服务商分组；未配置 API Key 的模型显示原因且不可选择。思考档位来自 `GET /api/chat/options`，只显示所选模型支持的档位。已有会话切换模型调用 `PUT /api/sessions/:id/model`，下一轮生效；首次发送和续聊都会传递 `model` / `reasoningEffort`，会话重载后恢复已保存的选择。可在 `llm.models` 中配置不同服务商、模型与支持档位，详见根目录 `harness.config.example.json` 和 `docs/api.md`。
-- 附件通过选择、多选、整文件夹、拖放或粘贴添加，原文件上传到网关并随消息发送附件引用；支持仅附件发送、任意扩展名、单文件最多 50 MiB、每条最多 500 个附件，上传期间禁止发送。图片/视频支持上述预览，其他文件仍可下载；模型能否解析文件取决于实际工具与模型能力。
-- 发送时立即清空输入框和附件，并在消息区展示用户消息和等待进度，发送位置切换为「停止回复」；发送失败会恢复未被编辑的草稿及附件，不覆盖发送后继续输入或主动删除的内容。附件与输入草稿按会话、网关隔离，异步转换会保留在原会话，首次会话创建时迁移后续草稿与附件。执行中或等待回答、授权时均可停止，下一条草稿可以继续编辑。停止请求被接受后仍等待真实终态再恢复发送。
+- 附件通过多选、文件夹、拖放或粘贴添加，原始文件通过 `/api/attachments` 上传，消息只携带附件 ID，由助手按需读取；支持任意文件类型及仅附件发送。单文件上限 50 MiB，每条最多 500 个附件；文件夹递归读取遵守数量和层级限制。文件显示在输入框上方，可逐个或按文件夹移除，上传和目录读取期间禁止发送。独立 Markdown/PDF/DOCX 转换工具仍保留单文件 10 MiB、文本 512 KiB 的限制与浏览器回归。
+- 发送时立即清空输入框和本次附件快照，并在消息区展示用户消息和等待进度，发送位置切换为「停止回复」；发送失败会恢复未被编辑的草稿及附件，不覆盖发送后继续输入或主动删除的内容。附件按会话与新建草稿隔离，异步目录读取及上传保留在原会话，首次会话创建时迁移后续草稿与附件。切换网关或 token 会清除附件、取消旧上传与排队文件；断连取消未完成上传，重新连接后需重新选择这些文件。执行中或等待回答、授权时均可停止，下一条草稿可以继续编辑。停止请求被接受后仍等待真实终态再恢复发送。
 - 刷新工作空间保留正在提交的请求和当前会话；续聊、答题、授权与取消通过 SSE 原位更新，避免重载聊天记录。新建请求尚未返回会话 ID 时点击停止，会在创建确认后取消该会话。
 - 提问器：后端已有 `question_required` / `question_answered` 事件和 `POST /api/sessions/:id/questions/:requestId`，前端沿用现有接口；按原型同时展示问题及标签选项，支持推荐默认值、单选、多选、自填、答案汇总和确认。
 - 连接器：使用后端目录与安装列表，支持飞书 Webhook / 企业自建应用安装、设置、验证、测试消息和删除；内置与配置文件 MCP 来源只读展示。安装或重新验证可能发送验证消息，表单明确说明；其他未开放目录类型保持禁用与 `// TODO`。
 - 技能：技能库与模板分组展示，支持按来源筛选和搜索名称、说明、步骤及工具；详情提供运行、编辑和来源对话入口，编辑器支持步骤排序及可选工具设置。加载、断连、失败、空列表与无搜索结果分别展示对应操作。运行时以 `POST /api/wishes` 的 `skillId` 预加载技能；对话中的 `skill` 事件显示加载与保存结果，`save_skill` 授权展示实际名称、步骤与工具。
 - 定时任务：支持真实列表、新建、编辑、删除、启停、立即执行、执行结果及通知状态，可绑定技能、已发布页面和可推送连接器；高级 cron 保留已有自定义规则，空值编辑发送 `null` 解绑。cron 按网关时区执行；配置通知目标即授权该任务完成后自动推送，数据修改默认需确认，并遵守工作空间已有的授权设置。
+- 每个定时任务卡片提供“历史执行对话”入口，通过 `GET /api/schedules/:id/sessions` 按执行时间倒序展示历史会话、状态和摘要，点击“查看对话记录”回放对应执行过程；保留当前/最近执行入口，不将定时任务会话加入普通对话列表。历史弹窗支持刷新、空状态、错误重试，关闭或切换连接会取消旧请求。
+
+定时历史回归：`node --test apps/web/tests/schedules-actions.test.mjs apps/web/tests/schedules-view.test.mjs apps/web/tests/skills-schedules-api.test.ts`；后端构建后运行 `node --test apps/cli/dist/schedule-history.test.js apps/cli/dist/workbench.test.js`。浏览器验证使用临时网关和本地数据：构建前后端并启动 `npm run preview --workspace @qdd/web -- --host 127.0.0.1 --port 4273` 后，运行 `node scripts/test-schedule-history-browser.mjs`，覆盖旧历史跳转、普通列表隔离及 390px 窄屏弹窗；可用 `QDD_WEB_URL`、`CHROME_PATH` 调整预览地址与 Chrome 路径。
 - 对话与总览待办中的 `define_record`、`create_schedule` 授权展示登记字段、执行规则、网关提供的下次时间、关联页面/技能及推送接收方，保留原始参数供核对。助手创建的定时任务显示创建来源，可返回创建对话。
 - 设置中的「门店登记」接入 `/api/records`，支持登记表结构创建与扩展、按日期及条数查询、填写、修改和作废记录。动态表单保留数字零、否和未填写的区别；更新不改登记时间，结构调整不删除或改类型。提交前确认，连接或选择变化后不提交过期表单；写入成功后同步刷新数据与指标。任务卡片和预览按 `PageEntry.records` 提供对应登记表入口，进入 `/settings?record=<name>#settings-records` 自动选择并定位。
 - 浏览器：参考 Toonflow 的浏览器面板，将真实 `browser` 事件的实时 JPEG 画面显示为对话消息区最底部的紧凑卡片，后续回复始终排在画面上方；展示域名、页面标题和连接状态。同一轮的浏览器状态合并更新，整个对话只订阅一条画面流。点击「放大」在弹窗中观看并显示导航、人工接管及中文输入；通过 Teleport 移动同一画面，点击「返回对话」不重复建立连接。卡片与放大窗口中的「关闭浏览器」会调用 `DELETE /api/browser/:id` 真正结束浏览器会话，断开画面流并保存关闭事件；也可在对话中说「关闭浏览器」，由助手调用 `browser` 的 `close` 动作。关闭后必须通过对话重新打开浏览器；输入框下方单独标明的「收起浏览器」仅暂停观看，可通过「查看浏览器」恢复。默认只读，按图片实际尺寸换算接管坐标，校验会话和标签标识，409 不重放输入；窗口失焦或退出放大时释放输入并退出人工接管。页面隐藏时暂停订阅，返回后自动恢复只读观看；切会话、停止观看和卸载时释放输入并关闭订阅，已关闭浏览器不会自动重连。
@@ -113,6 +113,14 @@ node --test apps/web/tests/conversation-selection.test.ts apps/web/tests/convers
 
 ```powershell
 node --test apps/web/tests/*.test.*
+```
+
+原始附件生命周期对抗测试位于 `tests/composer-attachments.test.ts`，覆盖会话切换、重复新建、首发迁移、失败恢复、替换凭据、取消上传、目录读取异常和数量边界。`tests/camera-login.test.mjs` 使用本地模拟响应验证相机登录取消、身份切换、过期验证码回调、重复短信请求和官方返回地址校验，不发送真实短信。附件隔离也可用生产界面和临时网关验证：
+
+```powershell
+npm run build
+npm run build:web
+node apps/web/tests/attachment-isolation-browser.smoke.mjs
 ```
 
 对话排布回归使用真实聊天与 Markdown 组件，覆盖独立折叠、状态更新时保留展开、切换会话重置、工具行合并与旧事件兼容。`tests/chat-timeline.test.ts` 检查显示分组不会修改原始 SSE 事件；`tests/markdown.test.ts` 检查 Markdown 内容与 HTML、链接安全处理：
@@ -180,7 +188,7 @@ node --test apps/web/tests/datasets-api.test.mjs apps/web/tests/workspace-data.t
 
 相关组件回归位于 `tests/workspace-conversation.test.mjs`、`tests/workspace-api.test.ts`、`tests/session-browser.test.mjs`、`tests/skills-view.test.mjs`、`tests/schedules-view.test.mjs`、`tests/schedules-actions.test.mjs` 和 `tests/task-preview.test.mjs`，包含静默事件流取消、离页恢复、离线保存、模板技能、任务启停/立即执行/执行对话、自定义执行规则以及页面加载和握手超时。使用上方全量前端测试命令执行。
 
-真实 Chrome 回归使用独立临时工作区和本机 HTTP 服务，不调用外部模型或发送消息。连接回归使用完整生产构建与真实网关，记录网关实际收到的请求和活动事件流，默认执行 30 次整页跳转、30 次站内切换、5 次离页及 15 次历史前进后退。预览回归将实际 TaskPreview 组件和 SDK 打包为生产模式，验证 30 次正常握手、挂起请求和缺失 SDK 的超时反馈，并覆盖同源隔离与跨源两种预览的独立弹窗。弹窗可正常使用表单和存储，原 iframe 仍保持隔离。浏览器默认使用本机 Chrome；可通过 `CHROME_PATH` 指定路径，连接回归次数可通过 `NAVIGATION_ROUNDS` 调整：
+真实 Chrome 回归使用独立临时工作区和本机 HTTP 服务，不调用外部模型或发送消息。连接回归使用完整生产构建与真实网关，记录网关实际收到的请求和活动事件流，默认执行 30 次整页跳转、30 次站内切换、5 次离页及 15 次历史前进后退。预览回归将实际 TaskPreview 组件和 SDK 打包为生产模式，验证 30 次正常握手、挂起请求和缺失 SDK 的超时反馈。浏览器默认使用本机 Chrome；可通过 `CHROME_PATH` 指定路径，连接回归次数可通过 `NAVIGATION_ROUNDS` 调整：
 
 ```powershell
 npm run build
@@ -189,19 +197,10 @@ node scripts/test-frontend-navigation.mjs
 node scripts/test-task-preview-browser.mjs
 ```
 
-任务页面可以通过用户点击打开独立窗口，使用 `noopener,noreferrer`。直播 FLV 是媒体流，需要播放器解码。任务内可通过网关同源的 `/assets/camera-player/` 加载官方 FLV/H.265 播放器、样式和 WASM，设置 `autoWasm:true` 并关闭 SDK 遥测（`ignoreMonitor:true`）。`mediaOrigins:["*"]` 放行所有视频来源，配置修改后重新加载任务即可生效。独立窗口应打开 MCP 本地播放器，避免直接打开带临时签名的 FLV 地址。海康支持 `/?cameraId=<设备编号>&preview=1&quality=sub`，控制台来源使用实际 MCP 配置地址。关闭画面时销毁播放器，并忽略关闭前尚未返回的取流响应。
-
 模型选择的状态与竞态回归位于 `tests/composer-model-selection.test.ts`，覆盖目录重试、不可用模型、连续切换、失败恢复及凭据变更隔离，包含在上述前端测试命令中。生产界面与真实网关的 Chrome 回归验证模型选择、思考档位、下一轮生效、刷新恢复、附件发送和移动端弹层；模型回复使用本地桩，不调用外部模型：
 
 ```powershell
 npm run build
 npm run build:web
 node scripts/test-chat-composer-browser.mjs
-```
-
-对话媒体回归使用真实 Vue 组件、Chrome 和 FFmpeg 合成的本地图片/MP4/HLS/FLV，不访问外部媒体或模型。覆盖实际解码出帧、无自动播放、流式回复更新不打断视频、附件鉴权、错误提示、凭据切换/卸载资源释放和移动端宽度。脚本位于 [test-chat-media-browser.mjs](../../scripts/test-chat-media-browser.mjs)，可用 `CHROME_PATH` 和 `FFMPEG_PATH` 指定本机程序：
-
-```powershell
-node --test apps/web/tests/markdown.test.ts apps/web/tests/chat-view.test.mjs
-node scripts/test-chat-media-browser.mjs
 ```

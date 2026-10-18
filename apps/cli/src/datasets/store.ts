@@ -29,6 +29,8 @@ export interface DatasetStore {
   define(def: DatasetDefinition): Promise<DatasetManifest>;
   /** 追加行。同主键的行以最后写入为准（重复刷新幂等）；最后一行带 __deleted: true 时该主键视为已删除。 */
   append(name: string, rows: Row[], watermark?: string): Promise<DatasetManifest>;
+  /** 在同一写锁内读取最新行并追加变更；找不到（含已删除）时返回 undefined。 */
+  updateRow(name: string, matches: (row: Row) => boolean, change: (row: Row) => Row): Promise<Row | undefined>;
   /** 整体替换（维度表）。 */
   replace(name: string, rows: Row[], watermark?: string): Promise<DatasetManifest>;
   /** 按时间范围读取（只读涉及的分区）。 */
@@ -104,25 +106,39 @@ export class JsonlDatasetStore implements DatasetStore {
   }
 
   async append(name: string, rows: Row[], watermark?: string): Promise<DatasetManifest> {
+    return this.locked(name, async () => this.appendRows(await this.require(name), rows, watermark));
+  }
+
+  async updateRow(name: string, matches: (row: Row) => boolean, change: (row: Row) => Row): Promise<Row | undefined> {
     return this.locked(name, async () => {
-      const m = await this.require(name);
-      const byPartition = new Map<string, string[]>();
-      for (const r of rows) {
-        this.validate(m, r);
-        const part = m.timeField ? String(r[m.timeField]).slice(0, 10) : ALL_PARTITION;
-        if (!byPartition.has(part)) byPartition.set(part, []);
-        byPartition.get(part)!.push(JSON.stringify(r));
+      const manifest = await this.require(name);
+      for await (const current of this.scan(name)) {
+        if (!matches(current)) continue;
+        const next = change(current);
+        await this.appendRows(manifest, [next]);
+        return next;
       }
-      const log = path.join(this.dir(name), "log");
-      await mkdir(log, { recursive: true });
-      const hash = createHash("sha256").update(m.version);
-      for (const [part, lines] of [...byPartition].sort(([a], [b]) => a.localeCompare(b))) {
-        const text = `${lines.join("\n")}\n`;
-        hash.update(part).update(text);
-        await appendFile(path.join(log, `${part}.jsonl`), text);
-      }
-      return this.bump(m, hash.digest("hex").slice(0, 12), rows, watermark, m.rowCount + rows.length);
+      return undefined;
     });
+  }
+
+  private async appendRows(m: DatasetManifest, rows: Row[], watermark?: string): Promise<DatasetManifest> {
+    const byPartition = new Map<string, string[]>();
+    for (const r of rows) {
+      this.validate(m, r);
+      const part = m.timeField ? String(r[m.timeField]).slice(0, 10) : ALL_PARTITION;
+      if (!byPartition.has(part)) byPartition.set(part, []);
+      byPartition.get(part)!.push(JSON.stringify(r));
+    }
+    const log = path.join(this.dir(m.name), "log");
+    await mkdir(log, { recursive: true });
+    const hash = createHash("sha256").update(m.version);
+    for (const [part, lines] of [...byPartition].sort(([a], [b]) => a.localeCompare(b))) {
+      const text = `${lines.join("\n")}\n`;
+      hash.update(part).update(text);
+      await appendFile(path.join(log, `${part}.jsonl`), text);
+    }
+    return this.bump(m, hash.digest("hex").slice(0, 12), rows, watermark, m.rowCount + rows.length);
   }
 
   async replace(name: string, rows: Row[], watermark?: string): Promise<DatasetManifest> {
@@ -191,12 +207,22 @@ export class JsonlDatasetStore implements DatasetStore {
   }
 
   private validate(m: DatasetManifest, row: Row): void {
+    if (!row || typeof row !== "object" || Array.isArray(row)) throw new Error(`数据集 ${m.name}：每行必须是 JSON 对象`);
     for (const k of [...m.key, ...(m.timeField ? [m.timeField] : [])]) {
       if (row[k] === undefined || row[k] === null) throw new Error(`数据集 ${m.name}：缺少字段 ${k}`);
     }
     for (const [field, type] of Object.entries(m.fields)) {
       const v = row[field];
       if (v !== undefined && v !== null && typeof v !== type) throw new Error(`数据集 ${m.name}：字段 ${field} 应为 ${type}`);
+      if (typeof v === "number" && !Number.isFinite(v)) throw new Error(`数据集 ${m.name}：字段 ${field} 应为有限数字`);
+    }
+    if (m.timeField) {
+      const value = row[m.timeField];
+      const day = typeof value === "string" ? value.slice(0, 10) : "";
+      const timestamp = Date.parse(`${day}T00:00:00Z`);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || !Number.isFinite(timestamp) || new Date(timestamp).toISOString().slice(0, 10) !== day) {
+        throw new Error(`数据集 ${m.name}：时间字段 ${m.timeField} 必须包含有效 YYYY-MM-DD 日期`);
+      }
     }
   }
 

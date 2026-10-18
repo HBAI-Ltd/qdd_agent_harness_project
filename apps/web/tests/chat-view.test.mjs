@@ -169,6 +169,7 @@ async function mount(initialSession, sendResult = async () => true) {
         key: path, path, size: file.size, status: "done", ref: { id: path, path, size: file.size, mime: file.type || "application/octet-stream" },
       });
     },
+    async addFilesFrom(load) { this.addFiles(await load()); },
     removeAttachment(key) { attachments.value = attachments.value.filter((item) => item.key !== key); },
     removeFolder(folder) { attachments.value = attachments.value.filter((item) => !item.path.startsWith(folder + "/")); },
   };

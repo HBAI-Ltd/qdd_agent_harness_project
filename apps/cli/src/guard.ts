@@ -36,15 +36,18 @@ function hostAllowed(host: string, allowlist: string[]): boolean {
 /** 校验相对页面目录的路径，返回规范化后的路径。 */
 export function checkPath(rel: string): { path: string; violations: string[] } {
   const violations: string[] = [];
-  if (!rel || path.isAbsolute(rel) || rel.includes("\\") || rel.includes("\0")) {
+  if (!rel || path.isAbsolute(rel) || /[\\:\x00-\x1f]/.test(rel)) {
     return { path: rel, violations: ["路径必须是页面目录内的相对路径"] };
   }
   const normalized = path.posix.normalize(rel);
   if (normalized.startsWith("..") || normalized.split("/").some((seg) => seg.startsWith("."))) {
     violations.push("禁止写出页面目录或写入隐藏文件");
   }
-  if (normalized === DATA_DIR || normalized.startsWith(`${DATA_DIR}/`)) {
+  if (normalized.toLowerCase() === DATA_DIR || normalized.toLowerCase().startsWith(`${DATA_DIR}/`)) {
     violations.push("data/ 由 harness 根据数据源快照生成，请使用 snapshot_data，不得手写或篡改数据");
+  }
+  if (normalized.split("/").some((seg) => /[. ]$/.test(seg) || /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(seg))) {
+    violations.push("禁止 Windows 保留文件名或以空格、点结尾的路径");
   }
   if (!ALLOWED_EXT.has(path.posix.extname(normalized).toLowerCase())) {
     violations.push(`只允许静态文件 ${[...ALLOWED_EXT].join(" ")}（零后端）`);
@@ -73,35 +76,52 @@ export function checkFile(rel: string, content: string, cdnAllowlist: string[]):
 
 /** 接受明确的 HTTPS 视频源，或单独的 "*" 全视频源开关；不接受 URL 通配符或 CSP 指令。 */
 export function parseMediaOrigins(value: unknown): string[] {
-  if (!Array.isArray(value)) throw new Error("mediaOrigins 必须是 HTTPS origin 数组或 [\"*\"]");
+  if (!Array.isArray(value)) throw new Error('mediaOrigins 必须是 HTTPS origin 数组或 ["*"]');
   if (value.length === 1 && value[0] === "*") return ["*"];
-  return [...new Set(value.map((entry: unknown, index: number) => {
-    const invalid = () => new Error(`mediaOrigins 第 ${index + 1} 项必须是无路径、凭据或通配符的 HTTPS origin`);
-    if (typeof entry !== "string" || !/^https:\/\/[^\s/?#@\\;'"<>*%]+\/?$/i.test(entry)) throw invalid();
-    let url: URL;
-    try { url = new URL(entry); } catch { throw invalid(); }
-    if (url.protocol !== "https:" || !url.hostname || url.username || url.password || url.pathname !== "/" || url.search || url.hash) throw invalid();
-    return url.origin;
-  }))];
+  return [
+    ...new Set(
+      value.map((entry: unknown, index: number) => {
+        const invalid = () => new Error(`mediaOrigins 第 ${index + 1} 项必须是无路径、凭据或通配符的 HTTPS origin`);
+        if (typeof entry !== "string" || !/^https:\/\/[^\s/?#@\\;'"<>*%]+\/?$/i.test(entry)) throw invalid();
+        let url: URL;
+        try {
+          url = new URL(entry);
+        } catch {
+          throw invalid();
+        }
+        if (url.protocol !== "https:" || !url.hostname || url.username || url.password || url.pathname !== "/" || url.search || url.hash)
+          throw invalid();
+        return url.origin;
+      }),
+    ),
+  ];
 }
 
 /** 浏览器侧兜底：视频来源按显式配置放行，业务请求及表单仍受守卫限制。 */
-export function pageCsp(cdnAllowlist: string[], frameAncestors: string[] = [], mediaOrigins: string[] = []): string {
+export function pageCsp(
+  cdnAllowlist: string[],
+  frameAncestors: string[],
+  scope: { origin: string; slug: string },
+  mediaOrigins: string[] = [],
+): string {
   const cdn = cdnAllowlist.map((h) => `https://${h}`).join(" ");
+  const page = `${scope.origin}/pages/${scope.slug}/`;
+  const assets = `${scope.origin}/assets/`;
   const origins = parseMediaOrigins(mediaOrigins);
   const allMedia = origins.length === 1 && origins[0] === "*";
   const media = origins.join(" ");
   return [
     "default-src 'self'",
-    `script-src 'self' 'unsafe-inline'${media ? " 'wasm-unsafe-eval'" : ""} ${cdn}`.trim(),
-    `style-src 'self' 'unsafe-inline' ${cdn}`,
-    `font-src 'self' data: ${cdn}`,
-    "img-src 'self' data: blob:",
-    allMedia ? "connect-src 'self' http: https: ws: wss:" : `connect-src 'self' ${media}`.trim(),
+    `script-src ${page} ${assets} ${scope.origin}/sdk/ 'unsafe-inline' 'self' ${media ? " 'wasm-unsafe-eval'" : ""} ${cdn}`,
+    `style-src ${page} ${assets} 'self' 'unsafe-inline' ${cdn}`,
+    `font-src ${page} ${assets} 'self' data: ${cdn}`,
+    `img-src ${page} ${assets} data: blob:`,
+    allMedia ? `connect-src ${scope.origin}/api/ 'self' http: https: ws: wss:` : `connect-src ${scope.origin}/api/ 'self' ${media}`.trim(),
     allMedia ? "media-src 'self' http: https: blob: data:" : `media-src 'self' blob: ${media}`.trim(),
-    "worker-src 'self' blob:",
     "form-action 'none'",
-    "frame-src 'self'",
+    "frame-src 'none'",
+    "worker-src 'self' blob:",
+    "sandbox allow-scripts allow-downloads allow-modals",
     `frame-ancestors 'self' ${frameAncestors.join(" ")}`.trim(),
     "object-src 'none'",
     "base-uri 'none'",

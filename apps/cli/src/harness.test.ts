@@ -6,6 +6,7 @@ import path from "node:path";
 import { after, before, describe, test } from "node:test";
 import type { AttachmentRef, HarnessConfig, ModelCatalog, PageView, SessionDetail, SessionMeta } from "@qdd/shared";
 import { runWish } from "./agent/agent.js";
+import { runAsk } from "./agent/ask.js";
 import type { ChatFn, ChatMessage } from "./agent/llm.js";
 import { loadConfig, type LoadedConfig } from "./config.js";
 import { DataSources } from "./datasource/registry.js";
@@ -248,6 +249,16 @@ describe("gateway", () => {
 
     // 第一个网关只提供 /mcp（JSON 响应），供第二个网关作为远程 MCP 接入。
     selfSources = await DataSources.open(base);
+    // Production workspaces start empty; regression data belongs only to this fixture.
+    await selfSources.datasets.define({
+      name: "order_items", description: "Gateway regression fixture", kind: "fact", key: ["orderId", "sku"], timeField: "time",
+      fields: { orderId: "string", sku: "string", time: "string", date: "string", category: "string", channel: "string", revenue: "number", grossProfit: "number", qty: "number" },
+    });
+    await selfSources.datasets.append("order_items", Array.from({ length: 200 }, (_, index) => ({
+      orderId: `fixture-${index}`, sku: `SKU${String(index).padStart(3, "0")}`,
+      time: "2026-10-15 09:00", date: "2026-10-15", category: index % 2 ? "食品" : "饮料",
+      channel: index % 2 ? "外卖" : "门店", revenue: index % 2 ? 200 : 100, grossProfit: index % 2 ? 20 : 50, qty: 10,
+    })));
     selfGateway = await startGateway(base, selfSources, { token: TOKEN, chat: () => chat });
 
     process.env.SELF_TOKEN = TOKEN;
@@ -288,6 +299,13 @@ describe("gateway", () => {
       assert.equal((await fetch(gateway.url + p)).status, 401, p);
     }
     assert.equal((await fetch(`${gateway.url}/mcp`, { method: "POST", body: "{}" })).status, 401);
+  });
+
+  test("gateway health and unknown routes retain their status codes", async () => {
+    const health = await fetch(`${gateway.url}/health`);
+    assert.equal(health.status, 200);
+    assert.deepEqual(await health.json(), { status: "ok" });
+    assert.equal((await api("/api/not-a-route")).status, 404);
   });
 
   test("许愿会话：授权写入、守卫拦截、发布、续聊", async () => {
@@ -354,7 +372,10 @@ describe("gateway", () => {
     const cookie = enter.headers.get("set-cookie")!.split(";")[0]!;
     const html = await fetch(`${gateway.url}/pages/${page.slug}/`, { headers: { cookie } });
     assert.equal(html.status, 200);
-    assert.match(html.headers.get("content-security-policy") ?? "", /connect-src 'self'.*form-action 'none'/);
+    const policy = (html.headers.get("content-security-policy") ?? "").split("; ");
+    assert.ok(policy.includes(`connect-src ${gateway.url}/api/`));
+    assert.ok(policy.includes("form-action 'none'"));
+    assert.ok(policy.includes("frame-src 'none'"));
     const body = await html.text();
     assert.match(body, /window\.QDD_PAGE=.*<script src="\/sdk\/qdd\.js">/);
     const pageToken = /"token":"([^"]+)"/.exec(body)![1]!;
@@ -435,24 +456,60 @@ describe("gateway", () => {
         await upsertPage(base.paths, { ...current, version: current.version + 1 });
         return call("finish", { title: "t", summary: "s", tools: [], useAgent: false, gaps: [] });
       }
-      if (/发布冲突/.test(String(last.content))) {
-        // 3) 缺少 gaps 时拒绝发布
-        return call("finish", { title: "t", summary: "s", tools: [], useAgent: false });
-      }
-      assert.match(String(last.content), /缺少 gaps/);
-      return call("finish", {
-        title: "t", summary: "s", tools: [], useAgent: false,
-        gaps: [{ kind: "missing_data", item: "客流量", reason: "数据源没有客流数据", suggestion: "接入门店客流计数器" }],
-      });
+      assert.match(String(last.content), /发布冲突/);
+      return call("finish", { title: "t", summary: "s", tools: [], useAgent: false });
     };
     const before = (await readPages(base.paths)).find((p) => p.slug === page!.slug)!.version;
     const result = await runWish(base, sources, racing, { wish: "调整", slug: page!.slug, sessionId: first.id }, { onEvent: () => {}, authorize: async () => false });
     assert.equal(result.page?.version, before + 2);
-    assert.equal(result.page?.gaps[0]?.item, "客流量");
-    const view = ((await (await api("/api/pages")).json()) as PageView[]).find((p) => p.slug === page!.slug)!;
-    const enter = await fetch(gateway.url + view.url, { redirect: "manual" });
-    const served = await (await fetch(`${gateway.url}/pages/${view.slug}/`, { headers: { cookie: enter.headers.get("set-cookie")!.split(";")[0]! } })).text();
-    assert.match(served, /<body[^>]*><aside data-qdd-gaps[^>]*>.*\[缺数据\] 客流量<\/b>：数据源没有客流数据/);
+    assert.deepEqual(result.page?.gaps, []);
+  });
+
+  test("gaps 由 harness 生成：工具不要求、忽略模型输入、数字核验结果仍展示", async () => {
+    const hooks = { onEvent: () => {}, authorize: async () => false };
+    for (const args of [
+      { text: "已完成" },
+      { text: "已完成", gaps: [{ kind: "missing_data", item: "客流量", reason: "模型声明" }] },
+      { text: "已完成", gaps: "无效声明" },
+    ]) {
+      const chat: ChatFn = async (_messages, tools) => {
+        for (const name of ["reply", "finish"]) {
+          const schema = tools.find((t) => t.function.name === name)!.function.parameters;
+          assert.equal(Object.hasOwn(schema.properties as object, "gaps"), false);
+          assert.equal((schema.required as string[]).includes("gaps"), false);
+        }
+        return call("reply", args);
+      };
+      const result = await runWish(base, sources, chat, { wish: "打个招呼", sessionId: "gaps-reply" }, hooks);
+      assert.deepEqual(result.gaps, []);
+    }
+
+    for (const name of ["reply", "finish"]) {
+      let attempts = 0;
+      const text = "销售额 ¥987,654,321.00";
+      const chat: ChatFn = async (messages) => {
+        if (name === "finish" && messages.at(-1)!.role === "user") {
+          return call("write_file", { path: "index.html", content: "<html><head></head><body>核验提示</body></html>" });
+        }
+        attempts++;
+        // 旧会话即使仍提交 gaps，也不能覆盖 harness 的核验结果。
+        return call(name, name === "reply" ? { text } : {
+          title: "核验提示", summary: text, tools: [], useAgent: false,
+          gaps: [{ kind: "missing_data", item: "客流量", reason: "模型声明" }],
+        });
+      };
+      const result = await runWish(base, sources, chat, { wish: "检查结论", sessionId: `gaps-${name}` }, hooks);
+      assert.equal(attempts, 3);
+      assert.equal(result.gaps.length, 1);
+      assert.equal(result.gaps[0]?.kind, "estimate");
+      assert.equal(result.gaps[0]?.item, "结论中部分数字未能核验");
+      if (name === "reply") continue;
+      assert.deepEqual(result.page?.gaps, result.gaps);
+      const view = ((await (await api("/api/pages")).json()) as PageView[]).find((p) => p.slug === result.page!.slug)!;
+      const enter = await fetch(gateway.url + view.url, { redirect: "manual" });
+      const served = await (await fetch(`${gateway.url}/pages/${view.slug}/`, { headers: { cookie: enter.headers.get("set-cookie")!.split(";")[0]! } })).text();
+      assert.match(served, /<body[^>]*><aside data-qdd-gaps[^>]*>.*结论中部分数字未能核验/);
+    }
   });
 
   test("数据集增量刷新（远程 MCP + 编号映射，可重复执行）", async () => {
@@ -528,6 +585,77 @@ describe("gateway", () => {
     assert.match(outputs[0]!, /请先调用 clarify/);
     assert.match(outputs[1]!, /→ 就这样（推荐）/);
     assert.match(outputs[2]!, /已写入草稿/);
+  });
+
+  test("truncated write_file leaves the draft intact and recovers with smaller files", async () => {
+    const original = "<p>original</p>";
+    const truncated = call("write_file", { path: "index.html", content: "partial" });
+    truncated.finishReason = "length";
+    truncated.tool_calls!.push(...call("reply", { text: "must not finish", gaps: [] }).tool_calls!);
+    const invalid = call("write_file", {});
+    invalid.tool_calls![0]!.function.arguments = '{"path":"index.html","content":"' + "x".repeat(24436);
+    const steps = [
+      call("write_file", { path: "index.html", content: original }),
+      truncated,
+      call("read_file", { path: "index.html" }),
+      invalid,
+      call("write_file", { path: "style.css", content: "p { color: navy; }" }),
+      call("write_file", { path: "index.html", content: '<link rel="stylesheet" href="./style.css"><p>recovered</p>' }),
+      call("finish", { title: "Recovered", summary: "完成", tools: [], useAgent: false, gaps: [] }),
+    ];
+    const outputs: string[] = [];
+    const errors: string[] = [];
+    const scripted: ChatFn = async (messages) => {
+      const last = messages.at(-1)!;
+      if (last.role === "tool") outputs.push(last.content ?? "");
+      assert.ok(steps.length, "agent should finish within the scripted recovery");
+      return steps.shift()!;
+    };
+    const result = await runWish(base, sources, scripted, {
+      wish: "创建页面",
+      sessionId: "00000000-0000-0000-0000-000000000002",
+    }, {
+      authorize: async () => false,
+      onEvent: (event) => {
+        if (event.kind === "tool_call" && event.tool.status === "error") errors.push(event.tool.result ?? "");
+      },
+    });
+    assert.match(outputs[1]!, /finish_reason=length/);
+    assert.equal(outputs[2], original);
+    assert.match(outputs[3]!, /JSON.*工具未执行.*拆成较小文件/);
+    assert.equal(errors.length, 3, "all calls in a truncated response must be blocked");
+    assert.ok(result.page);
+    assert.match(await readFile(path.join(base.paths.pages, result.page.slug, "index.html"), "utf8"), /recovered/);
+    assert.equal(await readFile(path.join(base.paths.pages, result.page.slug, "style.css"), "utf8"), "p { color: navy; }");
+  });
+
+  test("runtime ask blocks truncated calls before executing a valid retry", async (t) => {
+    let executions = 0;
+    const tool = {
+      name: "test__stream_read",
+      description: "read-only stream test",
+      inputSchema: { type: "object" },
+      source: "test",
+      mutating: false,
+      preauthorized: false,
+      call: async () => { executions++; return { ok: true }; },
+    };
+    sources.tools.push(tool);
+    t.after(() => { sources.tools.splice(sources.tools.indexOf(tool), 1); });
+    const truncated = call(tool.name, {});
+    truncated.finishReason = "length";
+    const steps: ChatMessage[] = [truncated, call(tool.name, {}), { role: "assistant", content: "done" }];
+    let requests = 0;
+    const chat: ChatFn = async (messages) => {
+      if (++requests === 2) {
+        assert.equal(executions, 0);
+        assert.match(messages.at(-1)!.content!, /finish_reason=length/);
+      }
+      assert.ok(steps.length);
+      return steps.shift()!;
+    };
+    assert.equal(await runAsk(sources, chat, "check", undefined, () => {}), "done");
+    assert.equal(executions, 1);
   });
 
   test("回归：重复调用拦截、结论数字核验、页面工具以代码为准、失败保留对话", async () => {

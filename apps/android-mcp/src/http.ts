@@ -7,7 +7,7 @@ import type { IncomingMessage } from "node:http";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
-import { ANDROID_TOOLS, createMcpServer } from "./mcp.js";
+import { ANDROID_TOOLS, createMcpSession } from "./mcp.js";
 import type { AndroidTools } from "./mcp.js";
 import type { LiveScreenSource } from "./live.js";
 import type { InputState } from "./input.js";
@@ -62,13 +62,12 @@ export async function startHttpMcp(tools: AndroidTools, options: HttpMcpOptions 
   const port = options.port ?? 8790;
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error("HTTP port must be in 0..65535.");
   await assertPortAvailable(port);
-  type Session = { mcp: ReturnType<typeof createMcpServer>; transport: StreamableHTTPServerTransport;
-    calls: Map<string | number, AbortController> };
+  type Session = { mcp: ReturnType<typeof createMcpSession>["server"]; transport: StreamableHTTPServerTransport;
+    calls: Map<string | number, AbortController>; ownsInput(): boolean };
   const sessions = new Map<string, Session>();
   const active = new Set<Session>();
   let viewers = 0;
   let remoteOwner: string | undefined;
-  let inputOwner: string | undefined;
   let remoteTimer: NodeJS.Timeout | undefined;
   let remoteGeneration = 0;
   let remoteInputEpoch: number | undefined;
@@ -252,7 +251,9 @@ export async function startHttpMcp(tools: AndroidTools, options: HttpMcpOptions 
     }
     if (request.url === "/remote/lease") {
       const sessionId = request.headers["mcp-session-id"];
-      if (typeof sessionId !== "string" || !sessions.has(sessionId)) return respond(400, "Connect the operator first.");
+      if (typeof sessionId !== "string") return respond(400, "Connect the operator first.");
+      const session = sessions.get(sessionId);
+      if (!session) return respond(400, "Connect the operator first.");
       if (request.method === "DELETE") {
         if (remoteOwner && remoteOwner !== sessionId) return respond(409, "Another operator is controlling the phone.");
         const round = request.headers["x-remote-round"];
@@ -261,6 +262,9 @@ export async function startHttpMcp(tools: AndroidTools, options: HttpMcpOptions 
       }
       if (request.method !== "POST") return respond(405, "Use POST or DELETE.");
       if (!tools.input.state.armed) return respond(409, "Start control explicitly first.");
+      // Global armed state belongs to its MCP input owner. A second session
+      // must take control through ARM so both ownership layers advance together.
+      if (!session.ownsInput()) return respond(409, "Start control explicitly in this session first.");
       const inputEpoch = tools.input.controlEpoch;
       // MCP pause/re-arm also starts a new round, even without browser DELETE.
       if (remoteOwner && remoteInputEpoch !== inputEpoch) clearRemote();
@@ -270,7 +274,6 @@ export async function startHttpMcp(tools: AndroidTools, options: HttpMcpOptions 
       if (!remoteOwner) {
         remoteGeneration++;
         remoteOwner = sessionId; remoteInputEpoch = inputEpoch;
-        inputOwner = sessionId;
       }
       const generation = remoteGeneration;
       renewRemote();
@@ -414,11 +417,14 @@ export async function startHttpMcp(tools: AndroidTools, options: HttpMcpOptions 
     // Closing a read-only inspection must not stop a different user's remote
     // control. Only a dispatched input call can own input and its lost POST.
     const call = parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
-      ? parsed as { jsonrpc?: unknown; id?: unknown; method?: unknown; params?: { name?: unknown; arguments?: { action?: unknown } } } : undefined;
+      ? parsed as { jsonrpc?: unknown; id?: unknown; method?: unknown; params?: { name?: unknown; arguments?: { action?: unknown; phase?: unknown } } } : undefined;
     const mutatesInput = call?.jsonrpc === "2.0" && (typeof call.id === "string" || typeof call.id === "number")
       && call.method === "tools/call" && ANDROID_TOOLS.some((entry) =>
       entry.name === call.params?.name && !entry.annotations?.readOnlyHint)
-      && !(call.params?.name === "android_control" && call.params.arguments?.action === "wait");
+      && !(call.params?.name === "android_control" && call.params.arguments?.action === "wait")
+      // Submitting a measurement requires the existing probe owner. It must not
+      // stop a browser or claim input before its session-bound ticket is checked.
+      && !(call.params?.name === "android_pointer_calibration" && call.params.arguments?.phase === "finish");
     if (mutatesInput && session && typeof id === "string") {
       if (remoteOwner && remoteOwner !== id) {
         const previousBrowser = sessions.get(remoteOwner);
@@ -428,7 +434,6 @@ export async function startHttpMcp(tools: AndroidTools, options: HttpMcpOptions 
           finally { await previousBrowser?.mcp.close(); }
         } catch { return respond(503, "Could not release the previous remote controller. Reconnect the ESP32 and try again."); }
       }
-      inputOwner = id;
     }
     let current = session;
     let requestController: AbortController | undefined;
@@ -437,22 +442,21 @@ export async function startHttpMcp(tools: AndroidTools, options: HttpMcpOptions 
     try {
       if (!current) {
         const calls = new Map<string | number, AbortController>();
-        const mcp = createMcpServer(tools, (requestId) => calls.get(requestId)?.signal);
+        const { server: mcp, ownsInput } = createMcpSession(tools, (requestId) => calls.get(requestId)?.signal);
         const transport = new StreamableHTTPServerTransport({
           // SDK 1.32.1 retains completed JSON POST streams until session close.
           // Its default SSE replies clean them up; both clients support SSE.
           enableJsonResponse: false,
           sessionIdGenerator: randomUUID,
-          onsessioninitialized: (sessionId) => { sessions.set(sessionId, { mcp, transport, calls }); },
+          onsessioninitialized: (sessionId) => { sessions.set(sessionId, { mcp, transport, calls, ownsInput }); },
         });
-        current = { mcp, transport, calls };
+        current = { mcp, transport, calls, ownsInput };
         active.add(current);
         const owned = current;
         mcp.onclose = () => {
           const sessionId = transport.sessionId;
           if (sessionId && remoteOwner === sessionId) releaseRemote();
-          else if (sessionId && inputOwner === sessionId) pause();
-          if (sessionId && inputOwner === sessionId) inputOwner = undefined;
+          else if (owned.ownsInput()) pause();
           if (transport.sessionId) sessions.delete(transport.sessionId);
           calls.clear();
           active.delete(owned);
@@ -468,7 +472,7 @@ export async function startHttpMcp(tools: AndroidTools, options: HttpMcpOptions 
         const cancelLostResponse = () => {
           // Cancel this call through MCP's owned-round guards. An old POST
           // must not globally pause a newer ARM in the same SDK session.
-          if (!response.writableFinished && (!mutatesInput || inputOwner === id)) {
+          if (!response.writableFinished && (!mutatesInput || current?.ownsInput())) {
             controller.abort(new Error("MCP HTTP response closed before the tool completed."));
           }
         };

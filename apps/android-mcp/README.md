@@ -222,18 +222,20 @@ is not automatically connected to this standalone service's screenshots.
 | `android_devices`, `android_screenshot`, `android_hid_status` | Configured phone, JPEG image, bridge readiness |
 | `android_hid_arm`, `android_hid_pause`, `android_release` | Explicit arm, cancel queued input, release held reports |
 | `android_mouse_move`, `android_mouse_click`, `android_scroll` | Relative counts, current-position clicks, wheel |
+| `android_preview_tap` | Read-only target marker and enlarged crop before choosing a click position |
+| `android_pointer_calibration` | AI-assisted measurement and confirmation of pointer calibration |
 | `android_calibrate_pointer`, `android_pointer_home`, `android_tap`, `android_swipe` | Calibrated estimated coordinates |
 | `android_type`, `android_key`, `android_key_report` | US-layout ASCII, chords, raw keyboard reports |
 | `android_consumer_report`, `android_home`, `android_back` | Raw consumer usages and Home/Back |
 
-There are 20 tools. Start with `android_screenshot`, then call `android_control`
+There are 22 tools. Start with `android_screenshot`, then call `android_control`
 using that result's `frameId`. For example, `{ "action": "move", "frameId": "<latest-frameId>",
 "dx": 80, "dy": 0 }` moves the real mouse and returns a new image captured after the
 action completed. Continue with the returned `frameId`. It prepares input internally;
 move/click/scroll/key/type/home/back need no pointer calibration. `wait` observes after
 a delay without enabling input. A physical emergency lock always prevents input.
 
-`android_control` tap/swipe still require explicit measured calibration. Legacy individual
+`android_control` hover/tap/swipe still require explicit measured calibration. Legacy individual
 input tools retain `android_hid_arm` and a separate screenshot after acting. Human relative
 control and raw relative movement do not require coordinate calibration. If a resulting image
 times out, inspect `actionStarted`, `actionCompleted` and `observedAfterAction`; when the action
@@ -249,6 +251,114 @@ leaving the queue, before sending any reports; expired or superseded frames stop
 and pause input. A shared identity/geometry/rotation epoch
 invalidates every session's old frames after phone, dimensions or rotation changes,
 including 180-degree rotation. These changes stop input and clear calibration.
+
+### Preview a target before pressing
+
+Use `android_preview_tap` when a small control is hard to locate. Given this
+session's latest `frameId`, `x`, `y` and optional `coordinateSpace` (`pixels` by
+default, or `normalized1000`), it captures a fresh original phone image and
+returns two views: the full-size image with a conspicuous simulated target
+marker, then a 2× enlarged crop around that target. The underlying phone image
+is real; the marker is drawn on the returned image only. It never moves the real
+mouse, clicks, enables input or takes over another input owner, and needs no
+calibration. Expired frames, coordinates outside the image, and changed phone
+identity, dimensions or rotation are rejected.
+
+```json
+{ "frameId": "<latest-frameId>", "x": 540, "y": 1200, "coordinateSpace": "pixels" }
+```
+
+Use the original image's dimensions when choosing a point. A client may shrink
+the displayed image; coordinates read from that display must be converted to
+original pixels, or expressed in `normalized1000`. The enlarged crop has its own
+coordinate origin and scale. Its response metadata describes the target in
+original pixels and the crop-to-original conversion. Continue with the new
+`frameId` returned by the preview. A simulated marker confirms the chosen visual
+target; it does not prove that the physical mouse has reached that position.
+
+The response exposes `target: { x, y, coordinateSpace: "pixels" }`,
+`crop: { x, y, width, height, scale: 2 }`, and the marked point's `zoomTarget` in
+`zoomPixels`. Convert a point read from the enlarged crop back with
+`originalX = crop.x + zoomX / crop.scale` and the equivalent Y formula, then round
+to integer pixels. `normalized1000` accepts integers from 0 through 1000 on each
+axis. `simulatedTarget: true`, `realMouseMoved: false` and `realClickSent: false`
+make the preview-only result explicit. `sourceSha256`/`sourceMimeType` identify the
+unannotated source; `annotatedImageSha256` and `zoomImageSha256` identify the two
+rendered images. `tapArguments` supplies a ready-to-use `android_control` tap for
+the selected original-pixel target; use it only after checking the preview.
+
+For a safer physical click, use these separate steps:
+
+1. Preview the proposed point and adjust it if the marker misses the intended control.
+2. Call `android_control` with `action: "hover"`, the preview's `frameId` and
+   the point. Hover uses measured calibration to move the real mouse without
+   pressing any button, then returns a newer real phone image.
+3. Inspect the actual cursor in that image. If it is correctly placed, call
+   `android_control` with `action: "click"` and the hover result's `frameId`.
+   This presses at the current mouse position without repeating coordinate motion.
+   If it is off target, use a small relative `move`, inspect the returned image,
+   and click only after confirming the real cursor.
+
+```json
+{ "action": "hover", "frameId": "<preview-frameId>", "x": 540, "y": 1200, "coordinateSpace": "pixels" }
+```
+
+```json
+{ "action": "click", "frameId": "<hover-result-frameId>" }
+```
+
+Hover accepts the same pixel or `normalized1000` coordinates as tap and requires
+calibration. This check can reveal calibration or mouse-acceleration error before
+the button is pressed. The existing direct `tap` remains available; prefer the
+preview → hover → inspect → click flow for small or consequential targets.
+
+### Measure pointer calibration with the AI
+
+Prefer `android_pointer_calibration` for AI coordinate taps/swipes. The AI reads
+the circular cursor in original screenshots; the service calculates the ratios,
+so the user does not have to guess horizontal or vertical scales. This is a
+two-stage measurement, not automatic computer vision.
+
+1. **Measure a small movement.** Call the tool with `phase: "probe"` and this
+   session's latest screenshot `frameId`. It releases held input, prepares ARM,
+   makes a small warm-up movement to reveal the cursor, and uses fixed settling
+   waits around the measurement. The result contains two original images in
+   order: **before** the measured movement, then **after**, plus `probeId`, the
+   actual signed `dx`/`dy` counts and the latest after-image `frameId`.
+   `direction` is `up-left` (default), `up-right`, `down-left` or `down-right`;
+   choose a direction with room to move away from the screen edges. `counts`
+   is 16–127 per axis, default 96. The physical emergency stop remains authoritative.
+
+   ```json
+   { "phase": "probe", "frameId": "<latest-frameId>", "direction": "up-left", "counts": 96 }
+   ```
+
+2. **Read the cursor centers and save.** The AI reads `startX`/`startY` from the
+   returned **before** image and `endX`/`endY` from the **after** image, then calls
+   `phase: "finish"` with `probeId` and the latest frame from the same session.
+   Use original-image pixels, not reduced preview pixels or the initial screenshot
+   from before warm-up. The numbers below are illustrative; replace all four with
+   the centers actually visible in the returned images.
+
+   ```json
+   { "phase": "finish", "probeId": "<probeId>", "frameId": "<latest-after-frameId>", "startX": 800, "startY": 1600, "endX": 704, "endY": 1504 }
+   ```
+
+The service derives HID counts per screenshot pixel. It rejects reversed motion,
+less than 12 pixels of travel on either axis, and an endpoint clipped at a screen
+edge. Do not send other input or take over the mouse between `probe` and `finish`.
+A read-only screenshot or `android_control` `wait` may provide a newer frame;
+finish still requires the same phone, physical dimensions, rotation and unchanged
+input ownership. A probe belongs only to its originating MCP session.
+
+If a cursor is not visible, or the first after-image has not visibly caught up,
+observe again with `android_screenshot` or `wait`. Do not replay an already
+completed probe movement. If the probe has expired or was invalidated, do not
+reuse its measurements. Calibration remains an estimate under mouse acceleration;
+recalibrate after changing phones, rotation, pointer speed or mouse settings.
+The old `android_calibrate_pointer` manual setter remains compatible, but only
+saves supplied scales and does not perform this measurement. Relative move/click,
+keyboard and wheel actions still require no calibration.
 
 Scales mean HID counts per screenshot pixel; 200 counts moving 100 pixels means
 scale 2. Positions remain estimates. Pixel and `normalized1000` coordinates are

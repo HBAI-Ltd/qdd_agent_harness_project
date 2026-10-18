@@ -14,10 +14,12 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { readPngDimensions } from "./adb.js";
 import { createFixture, fixturePng } from "./fixtures/stdio-server.js";
 import { JPEG_FIXTURE } from "./fixtures/jpeg.js";
-import { AndroidTools, createMcpServer } from "./mcp.js";
+import { AndroidTools, createMcpServer, createMcpSession } from "./mcp.js";
+import type { AndroidToolsOptions } from "./mcp.js";
 import { startHttpMcp } from "./http.js";
 import { ScreenClient, ScreenError } from "./screen.js";
 import { LiveScreenSource } from "./live.js";
+import { PNG } from "pngjs";
 
 type ToolResponse = Awaited<ReturnType<Client["callTool"]>>;
 
@@ -46,6 +48,30 @@ async function connected(context: TestContext, fixture = createFixture()) {
   context.after(async () => { await client.close(); await server.close(); });
   return { ...fixture, client };
 }
+
+test("MCP session ownership follows admitted calls and cannot be claimed by missing arguments", async (context) => {
+  const fixture = createFixture();
+  const first = createMcpSession(fixture.tools), second = createMcpSession(fixture.tools);
+  const clients = [new Client({ name: "owner-a", version: "1" }), new Client({ name: "owner-b", version: "1" })];
+  for (const [index, session] of [first, second].entries()) {
+    const [caller, receiver] = InMemoryTransport.createLinkedPair();
+    await session.server.connect(receiver as unknown as Transport);
+    await clients[index]!.connect(caller as unknown as Transport);
+  }
+  context.after(async () => {
+    await Promise.allSettled(clients.map((client) => client.close()));
+    await Promise.allSettled([first.server.close(), second.server.close()]);
+  });
+  assert.equal(first.ownsInput(), false); assert.equal(second.ownsInput(), false);
+  jsonResult(await clients[0]!.callTool({ name: "android_hid_arm" }));
+  assert.equal(first.ownsInput(), true); assert.equal(second.ownsInput(), false);
+  errorResult(await clients[1]!.callTool({ name: "android_mouse_move", arguments: {} }), /Required/);
+  assert.equal(first.ownsInput(), true); assert.equal(second.ownsInput(), false);
+  jsonResult(await clients[1]!.callTool({ name: "android_hid_status" }));
+  assert.equal(first.ownsInput(), true); assert.equal(second.ownsInput(), false);
+  jsonResult(await clients[1]!.callTool({ name: "android_hid_arm" }));
+  assert.equal(first.ownsInput(), false); assert.equal(second.ownsInput(), true);
+});
 
 test("official SDK initializes, lists tools and gets a real PNG without opening HID", async (context) => {
   const fixture = await connected(context);
@@ -586,6 +612,386 @@ function controlFixture(actionFrameTimeoutMs = 100) {
   return { ...fixture, tools };
 }
 
+function calibrationFixture(actionFrameTimeoutMs = 100) {
+  const fixture = controlFixture(actionFrameTimeoutMs);
+  const tools = new AndroidTools(fixture.adb, fixture.input, {
+    now: () => fixture.clock.now, actionFrameTimeoutMs, calibrationSettleMs: 0,
+  });
+  return { ...fixture, tools };
+}
+
+type TargetRenderer = NonNullable<AndroidToolsOptions["targetPreviewRenderer"]>;
+const fakeTargetRenderer: TargetRenderer = async (bytes, _mime, width, height, x, y, signal) => {
+  signal?.throwIfAborted();
+  const cropWidth = Math.min(50, width), cropHeight = Math.min(70, height);
+  const crop = { x: Math.max(0, Math.min(width - cropWidth, x - Math.floor(cropWidth / 2))),
+    y: Math.max(0, Math.min(height - cropHeight, y - Math.floor(cropHeight / 2))),
+    width: cropWidth, height: cropHeight, scale: 2 };
+  const marked = PNG.sync.read(bytes); marked.data[(y * width + x) * 4] = 255;
+  return { png: PNG.sync.write(marked),
+    zoomPng: fixturePng(crop.width * 2, crop.height * 2), crop, simulatedTarget: true };
+};
+function targetPreviewFixture(targetPreviewRenderer: TargetRenderer = fakeTargetRenderer) {
+  const fixture = controlFixture();
+  return { ...fixture, tools: new AndroidTools(fixture.adb, fixture.input, {
+    now: () => fixture.clock.now, actionFrameTimeoutMs: 100, targetPreviewRenderer,
+  }) };
+}
+
+test("official SDK target preview returns labeled original and zoom images without ARM or calibration", async (context) => {
+  const fixture = await connected(context, targetPreviewFixture());
+  const spec = (await fixture.client.listTools()).tools.find(({ name }) => name === "android_preview_tap");
+  assert.equal(spec?.annotations?.readOnlyHint, true);
+  assert.equal(spec?.annotations?.destructiveHint, false);
+  assert.match(fixture.client.getInstructions() ?? "", /SIMULATED TARGET/);
+  const before = jsonResult(await fixture.client.callTool({ name: "android_screenshot" }));
+  const response = CallToolResultSchema.parse(await fixture.client.callTool({ name: "android_preview_tap", arguments: {
+    frameId: before["frameId"], x: 90, y: 180,
+  } }));
+  const metadata = jsonResult(response), images = response.content.filter((item) => item.type === "image");
+  assert.equal(images.length, 2);
+  assert.deepEqual(images.map(({ mimeType }) => mimeType), ["image/png", "image/png"]);
+  assert.deepEqual(readPngDimensions(Buffer.from(images[0]!.data, "base64")), { width: 100, height: 200 });
+  assert.deepEqual(readPngDimensions(Buffer.from(images[1]!.data, "base64")), { width: 100, height: 140 });
+  assert.notEqual(metadata["frameId"], before["frameId"]);
+  assert.notEqual(metadata["sourceFrameId"], before["sourceFrameId"]);
+  assert.equal(metadata["simulatedTarget"], true);
+  assert.equal(metadata["realMouseMoved"], false); assert.equal(metadata["realClickSent"], false);
+  assert.deepEqual(metadata["target"], { x: 90, y: 180, coordinateSpace: "pixels" });
+  assert.deepEqual(metadata["crop"], { x: 50, y: 130, width: 50, height: 70, scale: 2 });
+  assert.deepEqual(metadata["zoomTarget"], { x: 80, y: 100, coordinateSpace: "zoomPixels" });
+  assert.equal(metadata["sourceMimeType"], "image/png"); assert.equal(metadata["mimeType"], "image/png");
+  const digest = (data: Buffer) => createHash("sha256").update(data).digest("hex");
+  assert.equal(metadata["sourceSha256"], digest(fixture.adb.latestPng));
+  assert.equal(metadata["sha256"], metadata["sourceSha256"]);
+  assert.equal(metadata["annotatedImageSha256"], digest(Buffer.from(images[0]!.data, "base64")));
+  assert.notEqual(metadata["annotatedImageSha256"], metadata["sourceSha256"]);
+  assert.equal(metadata["zoomImageSha256"], digest(Buffer.from(images[1]!.data, "base64")));
+  assert.deepEqual(metadata["tapArguments"], { action: "tap", frameId: metadata["frameId"], x: 90, y: 180, coordinateSpace: "pixels" });
+  assert.deepEqual(response.structuredContent, metadata);
+  assert.equal(fixture.input.state.armed, false); assert.equal(fixture.input.state.calibrated, false);
+  assert.deepEqual(fixture.bridge.records, []);
+  errorResult(await fixture.client.callTool({ name: "android_preview_tap", arguments: { frameId: before["frameId"], x: 90, y: 180 } }), /superseded/);
+  errorResult(await fixture.client.callTool({ name: "android_control", arguments: metadata["tapArguments"] as Record<string, unknown> }), /explicit calibration/);
+  assert.deepEqual(fixture.bridge.records, []);
+});
+
+test("target preview and tap share normalized1000 pixel conversion including display edges", async (context) => {
+  for (const [x, y, expected] of [[0, 0, [0, 0]], [500, 500, [50, 100]], [1000, 1000, [99, 199]]] as const) {
+    await context.test(`${x},${y}`, async () => {
+      const fixture = targetPreviewFixture(), frame = jsonResult(await fixture.tools.call("android_screenshot"));
+      const result = jsonResult(await fixture.tools.call("android_preview_tap", { frameId: frame["frameId"], x, y, coordinateSpace: "normalized1000" }));
+      assert.deepEqual(result["target"], { x: expected[0], y: expected[1], coordinateSpace: "pixels" });
+      assert.deepEqual(result["tapArguments"], { action: "tap", frameId: result["frameId"], x: expected[0], y: expected[1], coordinateSpace: "pixels" });
+      assert.deepEqual(fixture.bridge.records, []);
+    });
+  }
+});
+
+test("target preview production renderer returns actual PNG overlays while retaining the real source frame", async () => {
+  const fixture = controlFixture(), frame = jsonResult(await fixture.tools.call("android_screenshot"));
+  const response = await fixture.tools.call("android_preview_tap", { frameId: frame["frameId"], x: 50, y: 100 });
+  const result = jsonResult(response), images = response.content.filter((item) => item.type === "image");
+  assert.equal(images.length, 2);
+  assert.deepEqual(readPngDimensions(Buffer.from(images[0]!.data, "base64")), { width: 100, height: 200 });
+  assert.notEqual(result["sourceSha256"], result["annotatedImageSha256"]);
+  assert.equal(result["sourceSha256"], createHash("sha256").update(fixture.adb.latestPng).digest("hex"));
+  assert.equal(result["simulatedTarget"], true); assert.equal(result["realClickSent"], false);
+  assert.deepEqual(fixture.bridge.records, []);
+  const next = jsonResult(await fixture.tools.call("android_control", { action: "wait", waitMs: 0, frameId: result["frameId"] }));
+  assert.equal(next["observedAfterAction"], true); assert.deepEqual(fixture.bridge.records, []);
+});
+
+test("target preview rejects missing, expired, malformed and out-of-bounds coordinates before capture or HID", async () => {
+  const fixture = targetPreviewFixture(), frame = jsonResult(await fixture.tools.call("android_screenshot"));
+  for (const args of [
+    { x: -1, y: 10 }, { x: 100, y: 10 }, { x: 1, y: 200 }, { x: 0.5, y: 10 },
+    { x: 10, y: 10, coordinateSpace: "zoomPixels" }, { x: 1001, y: 1, coordinateSpace: "normalized1000" },
+  ]) errorResult(await fixture.tools.call("android_preview_tap", { frameId: frame["frameId"], ...args }));
+  errorResult(await fixture.tools.call("android_preview_tap", { x: 1, y: 2 }), /Required/);
+  fixture.clock.now += 30_001;
+  errorResult(await fixture.tools.call("android_preview_tap", { frameId: frame["frameId"], x: 1, y: 2 }), /expired/);
+  assert.equal(fixture.adb.captures.length, 1); assert.deepEqual(fixture.bridge.records, []);
+});
+
+test("read-only target preview preserves another caller's input owner on success and rendering failure", async () => {
+  for (const failed of [false, true]) {
+    const fixture = targetPreviewFixture(failed ? async () => { throw new Error("Renderer rejected malformed image"); } : fakeTargetRenderer);
+    const observer = fixture.tools.fork(), frame = jsonResult(await observer.call("android_screenshot"));
+    jsonResult(await fixture.tools.call("android_hid_arm"));
+    jsonResult(await fixture.tools.call("android_key_report", { modifier: 2, keycode: 4 }));
+    const count = fixture.bridge.records.length;
+    const result = await observer.call("android_preview_tap", { frameId: frame["frameId"], x: 10, y: 20 });
+    if (failed) errorResult(result, /Renderer rejected/); else jsonResult(result);
+    assert.equal(fixture.tools.ownsInput, true); assert.equal(observer.ownsInput, false);
+    assert.equal(fixture.input.state.armed, true); assert.equal(fixture.bridge.records.length, count);
+    if (failed) jsonResult(await observer.call("android_calibrate_pointer", { frameId: frame["frameId"], scaleX: 1, scaleY: 1 }));
+  }
+});
+
+test("target preview cancellation cannot pause another owner or publish an unrendered frame", async () => {
+  let started!: () => void, release!: () => void;
+  const rendering = new Promise<void>((resolve) => { started = resolve; });
+  const wait = new Promise<void>((resolve) => { release = resolve; });
+  const fixture = targetPreviewFixture(async (...args) => { started(); await wait; return fakeTargetRenderer(...args); });
+  const observer = fixture.tools.fork(), frame = jsonResult(await observer.call("android_screenshot"));
+  jsonResult(await fixture.tools.call("android_hid_arm"));
+  const abort = new AbortController();
+  const pending = observer.call("android_preview_tap", { frameId: frame["frameId"], x: 10, y: 20 }, abort.signal);
+  await rendering;
+  const count = fixture.bridge.records.length;
+  abort.abort(new Error("Cancel target preview")); release();
+  errorResult(await pending, /Cancel target preview/);
+  assert.equal(fixture.tools.ownsInput, true); assert.equal(observer.ownsInput, false);
+  assert.equal(fixture.input.state.armed, true); assert.equal(fixture.bridge.records.length, count);
+  jsonResult(await observer.call("android_calibrate_pointer", { frameId: frame["frameId"], scaleX: 1, scaleY: 1 }));
+});
+
+test("target preview rendering cannot overwrite a newer caller screenshot", async () => {
+  let started!: () => void, release!: () => void;
+  const rendering = new Promise<void>((resolve) => { started = resolve; });
+  const wait = new Promise<void>((resolve) => { release = resolve; });
+  const fixture = targetPreviewFixture(async (...args) => { started(); await wait; return fakeTargetRenderer(...args); });
+  const frame = jsonResult(await fixture.tools.call("android_screenshot"));
+  const pending = fixture.tools.call("android_preview_tap", { frameId: frame["frameId"], x: 10, y: 20 });
+  await rendering;
+  const latest = jsonResult(await fixture.tools.call("android_screenshot")); release();
+  errorResult(await pending, /superseded/);
+  jsonResult(await fixture.tools.call("android_calibrate_pointer", { frameId: latest["frameId"], scaleX: 1, scaleY: 1 }));
+  assert.deepEqual(fixture.bridge.records, []);
+});
+
+test("target preview invalidates rotated or changed physical geometry while preserving ordinary preview failures", async () => {
+  const fixture = targetPreviewFixture(), frame = jsonResult(await fixture.tools.call("android_screenshot"));
+  jsonResult(await fixture.tools.call("android_calibrate_pointer", { frameId: frame["frameId"], scaleX: 1, scaleY: 1 }));
+  jsonResult(await fixture.tools.call("android_hid_arm"));
+  const capture = fixture.adb.capture.bind(fixture.adb);
+  fixture.adb.capture = async (serial) => ({ ...await capture(serial), rotation: 2 });
+  errorResult(await fixture.tools.call("android_preview_tap", { frameId: frame["frameId"], x: 10, y: 20 }), /superseded|geometry/);
+  assert.equal(fixture.input.state.calibrated, false); assert.equal(fixture.input.state.armed, false);
+  assert.deepEqual(fixture.bridge.records.slice(-2).map(({ op }) => op), ["RELEASE", "PAUSE"]);
+  assert.equal(fixture.bridge.records.some(({ op }) => op === "MOVE"), false);
+});
+
+test("target preview rejects a scaled image without implicitly opening or stopping input", async () => {
+  const fixture = targetPreviewFixture(), frame = jsonResult(await fixture.tools.call("android_screenshot"));
+  const capture = fixture.adb.capture.bind(fixture.adb);
+  fixture.adb.capture = async (serial) => ({ ...await capture(serial), previewProfile: "fast" as const });
+  errorResult(await fixture.tools.call("android_preview_tap", { frameId: frame["frameId"], x: 10, y: 20 }), /original-resolution/);
+  assert.deepEqual(fixture.bridge.records, []);
+});
+
+test("target preview accounts for rendering age and rejects stale output without stopping the owner", async () => {
+  const fixture = targetPreviewFixture(), observer = fixture.tools.fork();
+  const frame = jsonResult(await observer.call("android_screenshot"));
+  jsonResult(await fixture.tools.call("android_hid_arm"));
+  const capture = fixture.adb.capture.bind(fixture.adb);
+  fixture.adb.capture = async (serial) => ({ ...await capture(serial), frameAgeMs: 3001 });
+  const count = fixture.bridge.records.length;
+  errorResult(await observer.call("android_preview_tap", { frameId: frame["frameId"], x: 10, y: 20 }), /stale during rendering/);
+  assert.equal(fixture.input.state.armed, true); assert.equal(fixture.tools.ownsInput, true);
+  assert.equal(fixture.bridge.records.length, count);
+});
+
+async function calibrationProbe(fixture: ReturnType<typeof calibrationFixture>) {
+  const frame = jsonResult(await fixture.tools.call("android_screenshot"));
+  return jsonResult(await fixture.tools.call("android_pointer_calibration", { phase: "probe", frameId: frame["frameId"] }));
+}
+const finishCalibration = (probe: Record<string, unknown>, extra: Record<string, unknown> = {}) => ({
+  phase: "finish", probeId: probe["probeId"], frameId: probe["frameId"], startX: 72, startY: 140, endX: 24, endY: 108, ...extra,
+});
+
+test("pointer calibration returns ordered original images through the official SDK and finishes without more HID", async (context) => {
+  const fixture = await connected(context, calibrationFixture());
+  const frame = jsonResult(await fixture.client.callTool({ name: "android_screenshot" }));
+  const response = CallToolResultSchema.parse(await fixture.client.callTool({ name: "android_pointer_calibration", arguments: {
+    phase: "probe", frameId: frame["frameId"],
+  } }));
+  const probe = jsonResult(response), images = response.content.filter((item) => item.type === "image");
+  assert.equal(images.length, 2); assert.deepEqual(probe["imageOrder"], ["before", "after"]);
+  assert.notEqual((probe["before"] as Record<string, unknown>)["sourceFrameId"], probe["sourceFrameId"]);
+  assert.deepEqual(response.structuredContent, probe);
+  for (const image of images) {
+    assert.equal(image.mimeType, "image/png");
+    assert.deepEqual(readPngDimensions(Buffer.from(image.data, "base64")), { width: 100, height: 200 });
+  }
+  assert.deepEqual(fixture.bridge.records.map(({ op }) => op), ["RELEASE", "PING", "ARM", "MOVE", "MOVE"]);
+  assert.deepEqual(fixture.bridge.records.filter(({ op }) => op === "MOVE").map(({ args }) => args), [[1, 1, 0, 0], [-96, -96, 0, 0]]);
+  const beforeFinish = fixture.bridge.records.length;
+  const finished = jsonResult(await fixture.client.callTool({ name: "android_pointer_calibration", arguments: finishCalibration(probe) }));
+  assert.equal(finished["scaleX"], 2); assert.equal(finished["scaleY"], 3);
+  assert.equal(fixture.input.state.calibrated, true); assert.equal(fixture.input.state.pointer, null);
+  assert.equal(fixture.bridge.records.length, beforeFinish);
+  errorResult(await fixture.client.callTool({ name: "android_pointer_calibration", arguments: finishCalibration(probe) }), /pending calibration probe/);
+});
+
+test("pointer calibration validates frame, phase arguments and counts before opening HID", async () => {
+  const fixture = calibrationFixture();
+  const frame = jsonResult(await fixture.tools.call("android_screenshot"));
+  for (const args of [{ counts: 15 }, { counts: 128 }, { counts: 1.5 }, { direction: "left" }, { startX: 1 }]) {
+    errorResult(await fixture.tools.call("android_pointer_calibration", { phase: "probe", frameId: frame["frameId"], ...args }));
+  }
+  fixture.clock.now += 30001;
+  errorResult(await fixture.tools.call("android_pointer_calibration", { phase: "probe", frameId: frame["frameId"] }), /expired/);
+  errorResult(await fixture.tools.call("android_pointer_calibration", { phase: "probe", frameId: "missing" }));
+  assert.deepEqual(fixture.bridge.records, []);
+});
+
+test("pointer calibration cannot arm through physical stop or accept a scaled preview as its original image", async () => {
+  const locked = calibrationFixture(); locked.bridge.status.locked = true;
+  const frame = jsonResult(await locked.tools.call("android_screenshot"));
+  errorResult(await locked.tools.call("android_pointer_calibration", { phase: "probe", frameId: frame["frameId"] }), /locked/);
+  assert.ok(!locked.bridge.records.some(({ op }) => op === "MOVE"));
+  const fixture = calibrationFixture(), capture = fixture.adb.capture.bind(fixture.adb);
+  fixture.adb.capture = async (serial) => ({ ...await capture(serial), previewProfile: "fast" as const, deviceWidth: 200, deviceHeight: 400 });
+  const preview = jsonResult(await fixture.tools.call("android_screenshot"));
+  errorResult(await fixture.tools.call("android_pointer_calibration", { phase: "probe", frameId: preview["frameId"] }), /original-resolution/);
+  assert.deepEqual(fixture.bridge.records, []);
+});
+
+test("pointer calibration rejects bad observed displacement without replacing old scales or repeating movement", async () => {
+  const fixture = calibrationFixture(); fixture.input.setCalibration(1.25, 1.5);
+  const probe = await calibrationProbe(fixture), records = fixture.bridge.records.length;
+  for (const extra of [{ endX: -1 }, { endX: 0 }, { endX: 65 }, { endY: 135 }, { endX: 90 }, { endY: 160 }]) {
+    errorResult(await fixture.tools.call("android_pointer_calibration", finishCalibration(probe, extra)), /inside|small|reversed|edge/);
+    assert.equal(fixture.input.state.scaleX, 1.25); assert.equal(fixture.input.state.scaleY, 1.5);
+    assert.equal(fixture.bridge.records.length, records);
+  }
+  jsonResult(await fixture.tools.call("android_pointer_calibration", finishCalibration(probe)));
+  assert.equal(fixture.input.state.scaleX, 2);
+});
+
+test("pointer calibration permits only read-only screenshot and wait refreshes from its own session", async () => {
+  const fixture = calibrationFixture(), probe = await calibrationProbe(fixture);
+  const foreign = fixture.tools.fork(), foreignFrame = jsonResult(await foreign.call("android_screenshot"));
+  errorResult(await foreign.call("android_pointer_calibration", finishCalibration(probe, { frameId: foreignFrame["frameId"] })), /pending calibration probe/);
+  const refreshed = jsonResult(await fixture.tools.call("android_screenshot"));
+  const waited = jsonResult(await fixture.tools.call("android_control", { action: "wait", waitMs: 0, frameId: refreshed["frameId"] }));
+  const records = fixture.bridge.records.length;
+  jsonResult(await fixture.tools.call("android_pointer_calibration", finishCalibration(probe, { frameId: waited["frameId"] })));
+  assert.equal(fixture.bridge.records.length, records);
+});
+
+test("pointer calibration handles all diagonal directions and uses HID counts per pixel", async (context) => {
+  for (const direction of ["up-left", "up-right", "down-left", "down-right"]) await context.test(direction, async () => {
+    const fixture = calibrationFixture(), frame = jsonResult(await fixture.tools.call("android_screenshot"));
+    const probe = jsonResult(await fixture.tools.call("android_pointer_calibration", { phase: "probe", frameId: frame["frameId"], direction, counts: 48 }));
+    const finished = jsonResult(await fixture.tools.call("android_pointer_calibration", finishCalibration(probe, {
+      startX: 50, startY: 100, endX: direction.endsWith("left") ? 26 : 74, endY: direction.startsWith("up") ? 68 : 132,
+    })));
+    assert.equal(finished["scaleX"], 2); assert.equal(finished["scaleY"], 1.5);
+  });
+});
+
+test("pointer calibration expires and rejects intervening input, control rounds or geometry", async (context) => {
+  for (const change of ["expired", "move", "remote", "release", "rearm", "manual", "rotation", "phone", "owner"]) await context.test(change, async () => {
+    const fixture = calibrationFixture(), probe = await calibrationProbe(fixture);
+    if (change === "expired") fixture.clock.now += 30001;
+    if (change === "move") await fixture.input.move(1, 0);
+    if (change === "remote") await fixture.input.remoteReport({ kind: "mouse", dx: 1, dy: 0, wheel: 0, buttons: 0 });
+    if (change === "release") await fixture.input.releaseAll();
+    if (change === "rearm") await fixture.input.arm();
+    if (change === "manual") fixture.input.setCalibration(1.1, 1.2);
+    if (change === "rotation") fixture.input.setScreen({ width: 100, height: 200, rotation: 1 });
+    if (change === "phone") { fixture.adb.serial = "USB-TWO"; await fixture.tools.call("android_screenshot"); }
+    if (change === "owner") {
+      const foreign = fixture.tools.fork(); jsonResult(await foreign.call("android_hid_arm"));
+    }
+    const records = fixture.bridge.records.length;
+    errorResult(await fixture.tools.call("android_pointer_calibration", finishCalibration(probe)), /expired|changed|superseded/);
+    assert.equal(fixture.bridge.records.length, records);
+    if (change === "manual") assert.equal(fixture.input.state.scaleX, 1.1);
+  });
+});
+
+test("pointer calibration detects input inserted during its neutral preparation", async () => {
+  const fixture = calibrationFixture(), frame = jsonResult(await fixture.tools.call("android_screenshot"));
+  const arm = fixture.input.arm.bind(fixture.input); let inserted = false;
+  fixture.input.arm = async (...args) => {
+    const result = await arm(...args);
+    if (!inserted) { inserted = true; await fixture.input.remoteReport({ kind: "mouse", dx: 2, dy: 0, wheel: 0, buttons: 0 }); }
+    return result;
+  };
+  errorResult(await fixture.tools.call("android_pointer_calibration", { phase: "probe", frameId: frame["frameId"] }), /changed/);
+  assert.equal(fixture.bridge.records.filter(({ op }) => op === "MOVE").length, 1);
+});
+
+test("pointer calibration rejects a queued warmup if another input dispatches before it", async () => {
+  const fixture = calibrationFixture(), frame = jsonResult(await fixture.tools.call("android_screenshot"));
+  const move = fixture.input.move.bind(fixture.input); let inserted = false;
+  fixture.input.move = (...args) => {
+    if (!inserted) { inserted = true; void move(2, 0); }
+    return move(...args);
+  };
+  errorResult(await fixture.tools.call("android_pointer_calibration", { phase: "probe", frameId: frame["frameId"] }), /changed/);
+  assert.deepEqual(fixture.bridge.records.filter(({ op }) => op === "MOVE").map(({ args }) => args), [[2, 0, 0, 0]]);
+});
+
+test("pointer calibration never publishes a ticket when input changes during image acquisition", async () => {
+  const fixture = calibrationFixture(), frame = jsonResult(await fixture.tools.call("android_screenshot"));
+  const capture = fixture.adb.capture.bind(fixture.adb); let calls = 0;
+  fixture.adb.capture = async (serial) => {
+    const captured = await capture(serial);
+    if (++calls === 2) await fixture.input.remoteReport({ kind: "mouse", dx: 2, dy: 0, wheel: 0, buttons: 0 });
+    return captured;
+  };
+  const result = await fixture.tools.call("android_pointer_calibration", { phase: "probe", frameId: frame["frameId"] });
+  errorResult(result, /changed/);
+  assert.equal(result.content.some(({ type }) => type === "image"), false);
+  assert.ok(!fixture.bridge.records.some(({ op, args }) => op === "MOVE" && args[0] === -96));
+});
+
+test("cancelled calibration finish preserves its ticket and cannot clear another caller's input owner", async () => {
+  const fixture = calibrationFixture(), probe = await calibrationProbe(fixture);
+  const cancel = new AbortController(); cancel.abort(new Error("Cancel finish before commit"));
+  const records = fixture.bridge.records.length;
+  errorResult(await fixture.tools.call("android_pointer_calibration", finishCalibration(probe), cancel.signal), /cancelled/);
+  assert.equal(fixture.bridge.records.length, records); assert.equal(fixture.input.state.calibrated, false);
+  const foreign = fixture.tools.fork(); jsonResult(await foreign.call("android_hid_arm"));
+  const afterArm = fixture.bridge.records.length;
+  errorResult(await fixture.tools.call("android_pointer_calibration", finishCalibration(probe)), /changed/);
+  assert.equal(fixture.bridge.records.length, afterArm); assert.equal(fixture.input.state.armed, true);
+});
+
+test("pointer calibration cancellation and a stale result wait cannot stop a newer ARM", async () => {
+  const fixture = calibrationFixture(2000), frame = jsonResult(await fixture.tools.call("android_screenshot"));
+  const capture = fixture.adb.capture.bind(fixture.adb); let calls = 0, entered!: () => void;
+  const waiting = new Promise<void>((resolve) => { entered = resolve; });
+  fixture.adb.capture = async (serial) => {
+    if (++calls === 2) { entered(); return new Promise(() => {}); }
+    return capture(serial);
+  };
+  const cancel = new AbortController();
+  const probing = fixture.tools.call("android_pointer_calibration", { phase: "probe", frameId: frame["frameId"] }, cancel.signal);
+  await waiting; await fixture.input.arm(); const records = fixture.bridge.records.length;
+  cancel.abort(new Error("Cancel old probe"));
+  errorResult(await probing, /Cancel old probe/);
+  assert.equal(fixture.input.state.armed, true); assert.equal(fixture.bridge.records.length, records);
+});
+
+test("pointer calibration result timeout never replays the measured movement or replaces old scales", async () => {
+  const fixture = calibrationFixture(25); fixture.input.setCalibration(1.1, 1.2);
+  const frame = jsonResult(await fixture.tools.call("android_screenshot"));
+  const capture = fixture.adb.capture.bind(fixture.adb); let calls = 0;
+  fixture.adb.capture = async (serial) => ({ ...await capture(serial), sourceFrameId: ++calls < 3 ? `probe-${calls}` : "probe-2" });
+  const result = await fixture.tools.call("android_pointer_calibration", { phase: "probe", frameId: frame["frameId"] });
+  errorResult(result, /Movement may already have occurred/);
+  assert.deepEqual(fixture.bridge.records.filter(({ op, args }) => op === "MOVE" && args[0] === -96).map(({ args }) => args), [[-96, -96, 0, 0]]);
+  assert.equal(fixture.input.state.scaleX, 1.1); assert.equal(fixture.input.state.armed, false);
+});
+
+test("cancelling a calibration's own pending movement releases input without publishing a probe", async () => {
+  const fixture = calibrationFixture(), frame = jsonResult(await fixture.tools.call("android_screenshot"));
+  const blocked = fixture.bridge.blockNext("MOVE"), cancel = new AbortController();
+  const pending = fixture.tools.call("android_pointer_calibration", { phase: "probe", frameId: frame["frameId"] }, cancel.signal);
+  await blocked.started; cancel.abort(new Error("Cancel current calibration"));
+  const result = await pending; blocked.release();
+  errorResult(result, /Cancel current calibration|cancelled/);
+  assert.equal(result.content.some(({ type }) => type === "image"), false);
+  assert.equal(fixture.input.state.armed, false);
+  assert.equal(fixture.bridge.records.filter(({ op }) => op === "MOVE").length, 1);
+});
+
 test("preferred control prepares HID and returns the newer post-action image and structured metadata through HTTP SDK", async (context) => {
   const fixture = controlFixture();
   const listener = await startHttpMcp(fixture.tools, { port: 0 });
@@ -749,6 +1155,62 @@ test("control keeps calibrated coordinate guards and returns a reusable resultin
   assert.ok(fixture.bridge.records.some(({ op, args }) => op === "MOVE" && args[3] === 1));
   errorResult(await fixture.tools.call("android_control", { action: "tap", frameId: before["frameId"], x: 10, y: 20 }), /superseded/);
   jsonResult(await fixture.tools.call("android_control", { action: "click", frameId: after["frameId"] }));
+});
+
+test("control hover returns the real post-movement image without a press before a separate click", async () => {
+  const fixture = controlFixture(1000), before = jsonResult(await fixture.tools.call("android_screenshot"));
+  jsonResult(await fixture.tools.call("android_calibrate_pointer", { frameId: before["frameId"], scaleX: 1, scaleY: 1 }));
+  const response = await fixture.tools.call("android_control", {
+    action: "hover", frameId: before["frameId"], x: 500, y: 500, coordinateSpace: "normalized1000",
+  });
+  const after = jsonResult(response), moves = fixture.bridge.records.filter(({ op }) => op === "MOVE");
+  assert.equal(after["action"], "hover"); assert.equal(after["actionCompleted"], true);
+  assert.equal(after["observedAfterAction"], true);
+  assert.notEqual(after["sourceFrameId"], before["sourceFrameId"]);
+  assert.deepEqual(fixture.input.state.pointer, { x: 50, y: 100 });
+  assert.ok(moves.length > 0); assert.ok(moves.every(({ args }) => args[2] === 0 && args[3] === 0));
+  const image = response.content.find(({ type }) => type === "image");
+  assert.ok(image && image.type === "image");
+  assert.deepEqual(Buffer.from(image.data, "base64"), fixture.adb.latestPng);
+  jsonResult(await fixture.tools.call("android_control", { action: "click", frameId: after["frameId"] }));
+  assert.ok(fixture.bridge.records.some(({ op, args }) => op === "MOVE" && args[3] === 1));
+});
+
+test("control hover rejects missing calibration or out-of-bounds targets before enabling input", async () => {
+  const fixture = controlFixture(), frame = jsonResult(await fixture.tools.call("android_screenshot"));
+  errorResult(await fixture.tools.call("android_control", { action: "hover", frameId: frame["frameId"], x: 10, y: 20 }), /explicit calibration/);
+  errorResult(await fixture.tools.call("android_control", { action: "hover", frameId: frame["frameId"], x: 100, y: 20 }), /outside/);
+  assert.deepEqual(fixture.bridge.records, []);
+});
+
+test("queued hover rechecks the caller's frame before sending any movement", async () => {
+  const fixture = controlFixture(1000), frame = jsonResult(await fixture.tools.call("android_screenshot"));
+  jsonResult(await fixture.tools.call("android_calibrate_pointer", { frameId: frame["frameId"], scaleX: 1, scaleY: 1 }));
+  jsonResult(await fixture.tools.call("android_hid_arm"));
+  const blocked = fixture.bridge.blockNext("KEY"), key = fixture.input.key("enter");
+  await blocked.started;
+  const hover = fixture.tools.call("android_control", { action: "hover", frameId: frame["frameId"], x: 10, y: 20 });
+  await nextTurn();
+  const latest = jsonResult(await fixture.tools.call("android_screenshot"));
+  assert.notEqual(latest["frameId"], frame["frameId"]);
+  blocked.release(); await key;
+  errorResult(await hover, /superseded|cancelled/);
+  assert.equal(fixture.bridge.records.some(({ op }) => op === "MOVE"), false);
+});
+
+test("hover waiting for its initial frame cannot move or stop a newer ARM", async () => {
+  const fixture = controlFixture(1000), frame = jsonResult(await fixture.tools.call("android_screenshot"));
+  jsonResult(await fixture.tools.call("android_calibrate_pointer", { frameId: frame["frameId"], scaleX: 1, scaleY: 1 }));
+  const capture = fixture.adb.capture.bind(fixture.adb);
+  let reading!: () => void, release!: () => void;
+  const started = new Promise<void>((resolve) => { reading = resolve; });
+  const blocked = new Promise<void>((resolve) => { release = resolve; });
+  fixture.adb.capture = async (serial) => { reading(); await blocked; return capture(serial); };
+  const pending = fixture.tools.call("android_control", { action: "hover", x: 10, y: 20, frameId: frame["frameId"] });
+  await started; await fixture.input.arm();
+  const count = fixture.bridge.records.length; release();
+  errorResult(await pending, /control round/);
+  assert.equal(fixture.input.state.armed, true); assert.equal(fixture.bridge.records.length, count);
 });
 
 test("control serializes separate MCP sessions through each action's resulting observation", async () => {

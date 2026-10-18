@@ -164,6 +164,20 @@ static void guide_progress(lv_event_t *event) {
         shape.bg_opa = LV_OPA_COVER; shape.radius = 2; lv_area_t area = {14 + (int)i * 30, 33, 35 + (int)i * 30, 36}; lv_draw_rect(layer, &shape, &area);
     }
 }
+static void download_qr_create(lv_obj_t *screen, int y) {
+    s_qrcode = lv_qrcode_create(screen); lv_qrcode_set_size(s_qrcode, 128); lv_qrcode_set_quiet_zone(s_qrcode, true);
+    lv_qrcode_set_dark_color(s_qrcode, lv_color_hex(0)); lv_qrcode_set_light_color(s_qrcode, lv_color_hex(0xFFFFFF));
+    lv_obj_set_pos(s_qrcode, 48, y); lv_obj_add_flag(s_qrcode, LV_OBJ_FLAG_HIDDEN);
+    // The old screen and QR object have been deleted; identical URLs still
+    // need an initial update on this newly allocated canvas.
+    s_qr_url[0] = '\0';
+}
+static bool download_qr_update(const char *ip) {
+    char url[64]; snprintf(url, sizeof(url), "http://%s:3334/", ip);
+    if (strcmp(url, s_qr_url) == 0) return true;
+    if (lv_qrcode_update(s_qrcode, url, (uint32_t)strlen(url)) != LV_RESULT_OK) return false;
+    strcpy(s_qr_url, url); return true;
+}
 static void guide_create(void) {
     lv_obj_t *screen = new_screen(); s_kind = GUIDE; s_guide_step = 0; s_cached = false;
     lv_obj_add_event_cb(screen, guide_progress, LV_EVENT_DRAW_MAIN, NULL);
@@ -172,14 +186,12 @@ static void guide_create(void) {
     label(&s_title, screen, 14, 42, 196, "连接无线网络", &qdd_cjk_20, INK, true);
     label(&s_detail, screen, 14, 72, 196, "", &qdd_cjk_14, INK, true);
     s_card = card(screen, 12, 110, 200, 102, PANEL);
-    s_qrcode = lv_qrcode_create(screen); lv_qrcode_set_size(s_qrcode, 128); lv_qrcode_set_quiet_zone(s_qrcode, true);
-    lv_qrcode_set_dark_color(s_qrcode, lv_color_hex(0)); lv_qrcode_set_light_color(s_qrcode, lv_color_hex(0xFFFFFF));
-    lv_obj_set_pos(s_qrcode, 48, 94); lv_obj_add_flag(s_qrcode, LV_OBJ_FLAG_HIDDEN);
+    download_qr_create(screen, 94);
     label(&s_value, screen, 22, 131, 180, "", &qdd_cjk_14, INK, true);
     label(&s_hint, screen, 22, 171, 180, "", &qdd_cjk_14, MUTED, true);
     label(&s_next, screen, 14, 228, 196, "", &qdd_cjk_14, INK, true);
     label(&s_notice, screen, 14, 249, 196, "", &qdd_cjk_14, 0xFFAC8D, true);
-    s_qr_url[0] = '\0'; s_passkey = false; home_actions_create(screen, true);
+    s_passkey = false; home_actions_create(screen, true);
 }
 static void guide_refresh(const qdd_ui_view_t *view, qdd_ble_status_t ble, int charge) {
     if (s_kind != GUIDE) guide_create();
@@ -189,8 +201,7 @@ static void guide_refresh(const qdd_ui_view_t *view, qdd_ble_status_t ble, int c
     if (view->show_qr) {
         // Write only the final QR copy: setting generic text before overriding
         // it would invalidate an unchanged page on every presentation tick.
-        text(&s_detail, "扫码或浏览器打开地址下载"); char url[64]; snprintf(url, sizeof(url), "http://%s:3334/", s_wifi.ip);
-        if (strcmp(url, s_qr_url) != 0 && lv_qrcode_update(s_qrcode, url, (uint32_t)strlen(url)) == LV_RESULT_OK) strcpy(s_qr_url, url);
+        text(&s_detail, "扫码或浏览器打开地址下载"); (void)download_qr_update(s_wifi.ip);
         lv_obj_remove_flag(s_qrcode, LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(s_card, LV_OBJ_FLAG_HIDDEN);
         lv_obj_set_y(s_value.object, 225); snprintf(value, sizeof(value), "%s:3334", s_wifi.ip); text(&s_value, value);
         lv_obj_set_pos(s_next.object, 14, 249); lv_obj_set_width(s_next.object, 196);
@@ -343,11 +354,12 @@ static void guide_device_draw(lv_event_t *event) {
 static void setup_create(qdd_setup_page_t page) {
     lv_obj_t *screen = new_screen(); s_kind = SETUP; s_setup_page = page;
     memset(s_rows, 0, sizeof(s_rows)); s_keyboard = NULL;
+    if (page == QDD_SETUP_DOWNLOAD) card(screen, 12, 70, 200, 176, PANEL);
     label(&s_header, screen, 14, 14, 196, "设备设置", &qdd_cjk_20, INK, false);
     label(&s_detail, screen, 14, 47, 196, "", &qdd_cjk_14, MUTED, false);
     label(&s_value, screen, 14, 74, 196, "", &qdd_cjk_14, 0xF58C6C, false);
     for (unsigned i = 0; i < 5; i++) {
-        if ((page == QDD_SETUP_RESET && i > 1) || page == QDD_SETUP_PASSWORD || (i != 4 && (page == QDD_SETUP_HELP || page == QDD_SETUP_CONNECTING ||
+        if ((page == QDD_SETUP_RESET && i > 1) || page == QDD_SETUP_PASSWORD || (i != 4 && (page == QDD_SETUP_HELP || page == QDD_SETUP_DOWNLOAD || page == QDD_SETUP_CONNECTING ||
             ((page == QDD_SETUP_PAIR || page == QDD_SETUP_ERROR) && i > 0) ||
             (page == QDD_SETUP_ACTIONS && i > 3)))) continue;
         label(&s_rows[i], screen, 12, i == 4 ? 251 : 108 + (int)i * 35, 200, "", &qdd_cjk_14, INK, false);
@@ -362,6 +374,7 @@ static void setup_create(qdd_setup_page_t page) {
     label(&s_hint, screen, 14, 290, 196, "上下选择 · 确认进入", &qdd_cjk_14, MUTED, false);
     label(&s_notice, screen, 14, 265, 196, "", &qdd_cjk_14, 0xF58C6C, false);
     s_passkey = false; s_cached = false; memset(&s_keyboard_model, 0, sizeof(s_keyboard_model));
+    if (page == QDD_SETUP_DOWNLOAD) download_qr_create(screen, 74);
     if (page == QDD_SETUP_HELP) {
         lv_obj_add_event_cb(screen, guide_device_draw, LV_EVENT_DRAW_MAIN, NULL);
         fixed_label(screen, 58, 128, 54, "设备", &qdd_cjk_20, 0xF58C6C, true);
@@ -425,6 +438,21 @@ void qdd_ui_wifi(const qdd_setup_model_t *setup, qdd_wifi_view_t wifi) {
         }
     } else if (setup->page == QDD_SETUP_MENU) {
         text(&s_header, "设备设置"); text(&s_detail, "上下选择，确认进入"); text(&s_value, "");
+    } else if (setup->page == QDD_SETUP_DOWNLOAD) {
+        text(&s_header, "手机投屏下载"); text(&s_detail, "扫码或浏览器打开地址下载");
+        lv_obj_set_style_text_align(s_value.object, LV_TEXT_ALIGN_CENTER, 0);
+        if (wifi.connected && wifi.ip[0]) {
+            if (download_qr_update(wifi.ip)) lv_obj_remove_flag(s_qrcode, LV_OBJ_FLAG_HIDDEN);
+            else lv_obj_add_flag(s_qrcode, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_set_y(s_value.object, 207); snprintf(value, sizeof(value), "%s:3334", wifi.ip); text(&s_value, value);
+        } else {
+            lv_obj_add_flag(s_qrcode, LV_OBJ_FLAG_HIDDEN); s_qr_url[0] = '\0';
+            lv_obj_set_y(s_value.object, 131); text(&s_value, "请先连接无线网络");
+        }
+        lv_obj_set_y(s_notice.object, 229); text(&s_notice, "手机/电脑/ESP同一局域网");
+        text(&s_hint, "确认返回");
+        lv_obj_remove_flag(s_rows[4].object, LV_OBJ_FLAG_HIDDEN); text(&s_rows[4], "返回设置");
+        lv_obj_set_style_bg_color(s_rows[4].object, lv_color_hex(ACCENT), 0); return;
     } else if (setup->page == QDD_SETUP_RESET) {
         text(&s_header, "重置设备"); text(&s_detail, "清除已保存的设备数据");
         text(&s_value, "Wi-Fi、蓝牙配对、引导记录");
@@ -462,7 +490,7 @@ void qdd_ui_wifi(const qdd_setup_model_t *setup, qdd_wifi_view_t wifi) {
     const unsigned start = visible_index / QDD_SETUP_VISIBLE_ROWS * QDD_SETUP_VISIBLE_ROWS;
     for (unsigned i = 0; i < 4; i++) {
         const unsigned index = start + i; value[0] = '\0'; if (index >= regular) continue;
-        if (setup->page == QDD_SETUP_MENU) { static const char *items[] = {"无线网络", "手机蓝牙配对", "按键指南", "重置设备"}; strcpy(value, items[index]); }
+        if (setup->page == QDD_SETUP_MENU) { static const char *items[] = {"无线网络", "手机蓝牙配对", "按键指南", "重置设备", "手机投屏下载"}; strcpy(value, items[index]); }
         else if (setup->page == QDD_SETUP_ACTIONS) { static const char *items[] = {"连接网络", "继续输入", "删除一位", "清空密码"}; strcpy(value, items[index]); }
         else if (setup->page == QDD_SETUP_LIST) {
             if (index < wifi.count) {

@@ -1,9 +1,23 @@
 import { watch } from "node:fs";
-import { mkdir, readFile, stat } from "node:fs/promises";
+import { mkdir, readFile, realpath, stat } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { AnswerBody, AskBody, SelectModelBody, BrowserStreamEvent, CreateWishBody, GatewayEvent, HarnessConfig, JsonObject, Overview, PageView, RecordInput, SendMessageBody, ToolInfo } from "@qdd/shared";
+import type {
+  AnswerBody,
+  AskBody,
+  SelectModelBody,
+  BrowserStreamEvent,
+  CreateWishBody,
+  GatewayEvent,
+  HarnessConfig,
+  JsonObject,
+  Overview,
+  PageView,
+  RecordInput,
+  SendMessageBody,
+  ToolInfo,
+} from "@qdd/shared";
 import { runAsk } from "../agent/ask.js";
 import { MAX_ASK_BODY_BYTES, parseAskImages } from "../agent/ask-images.js";
 import { chatOptions } from "../agent/chat-options.js";
@@ -11,7 +25,16 @@ import type { ChatFn } from "../agent/llm.js";
 import { AttachmentError, MAX_ATTACHMENT_BYTES } from "../attachments.js";
 import { hasModel, modelCatalog, resolveModel, type LoadedConfig } from "../config.js";
 import type { DataSources } from "../datasource/registry.js";
-import { addRecords, defineRecord, listRecordSets, parseRecordDefinition, queryRecords, RECORD_PREFIX, updateRecord, voidRecord } from "../datasets/records.js";
+import {
+  addRecords,
+  defineRecord,
+  listRecordSets,
+  parseRecordDefinition,
+  queryRecords,
+  RECORD_PREFIX,
+  updateRecord,
+  voidRecord,
+} from "../datasets/records.js";
 import { refreshDatasets } from "../datasets/refresh.js";
 import { pageCsp } from "../guard.js";
 import { BadRequest, Conflict, NotFound, SessionHub } from "../sessions.js";
@@ -96,9 +119,7 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
   const broadcast = (event: GatewayEvent) => {
     for (const c of globalClients) c.write(`data: ${JSON.stringify(event)}\n\n`);
   };
-  hub.onMeta((session) => broadcast(session.origin?.kind === "schedule"
-    ? { type: "schedules_changed" }
-    : { type: "session_updated", session }));
+  hub.onMeta((session) => broadcast(session.origin?.kind === "schedule" ? { type: "schedules_changed" } : { type: "session_updated", session }));
   hub.onPending(() => broadcast({ type: "pending_changed" }));
   // 页面的 kind 由定时任务推导，任务变化时页面列表也需刷新
   scheduler.onChange(() => {
@@ -125,9 +146,7 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
       hub.pending(),
     ]);
     const count = (status: string) => sessions.filter((x) => x.status === status).length;
-    const next = schedules
-      .filter((x) => x.enabled && x.nextRunAt)
-      .sort((a, b) => a.nextRunAt!.localeCompare(b.nextRunAt!))[0];
+    const next = schedules.filter((x) => x.enabled && x.nextRunAt).sort((a, b) => a.nextRunAt!.localeCompare(b.nextRunAt!))[0];
     return {
       sessions: {
         total: sessions.length,
@@ -138,7 +157,11 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
       },
       pages: { total: pages.length, stale: pages.filter((x) => x.stale).length },
       skills: { total: skills.length },
-      schedules: { total: schedules.length, enabled: schedules.filter((x) => x.enabled).length, next: next ? { id: next.id, name: next.name, at: next.nextRunAt! } : null },
+      schedules: {
+        total: schedules.length,
+        enabled: schedules.filter((x) => x.enabled).length,
+        next: next ? { id: next.id, name: next.name, at: next.nextRunAt! } : null,
+      },
       connectors: { total: connectors.length, connected: connectors.filter((x) => x.status === "connected").length },
       pending,
     };
@@ -147,7 +170,20 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
   const server = createServer((req, res) => {
     route(req, res).catch((error: Error) => {
       const tagged = (error as { status?: unknown }).status;
-      const status = error instanceof HttpError ? error.status : typeof tagged === "number" ? tagged : error.name === "ZodError" ? 400 : error instanceof NotFound || error instanceof Missing ? 404 : error instanceof Conflict ? 409 : error instanceof BadRequest || error instanceof InvalidInput || error instanceof AttachmentError ? 400 : 500;
+      const status =
+        error instanceof HttpError
+          ? error.status
+          : typeof tagged === "number"
+            ? tagged
+            : error.name === "ZodError"
+              ? 400
+              : error instanceof NotFound || error instanceof Missing
+                ? 404
+                : error instanceof Conflict
+                  ? 409
+                  : error instanceof BadRequest || error instanceof InvalidInput || error instanceof AttachmentError
+                    ? 400
+                    : 500;
       if (res.headersSent) {
         res.end();
         return;
@@ -158,10 +194,27 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
 
   function cors(req: IncomingMessage, res: ServerResponse): void {
     const origin = req.headers.origin;
-    if (origin && config.gateway.corsOrigins.includes(origin)) {
+    const pathname = new URL(req.url ?? "/", "http://gateway").pathname;
+    const pageRuntime = /^\/api\/(?:tools\/[^/]+|ask|state\/[a-z0-9-]+|records\/[^/]+(?:\/[^/]+)?)$/.test(pathname);
+    const requestedHeaders = (req.headers["access-control-request-headers"] ?? "")
+      .toString()
+      .toLowerCase()
+      .split(",")
+      .map((header) => header.trim())
+      .filter(Boolean);
+    const pagePreflight =
+      req.method === "OPTIONS" &&
+      requestedHeaders.includes("x-qdd-page") &&
+      requestedHeaders.includes("x-qdd-page-token") &&
+      requestedHeaders.every((header) => ["content-type", "x-qdd-page", "x-qdd-page-token"].includes(header));
+    const sandboxedPage = origin === "null" && pageRuntime && (pagePreflight || (req.method !== "OPTIONS" && auth.pageOf(req) !== undefined));
+    if ((origin && origin !== "null" && config.gateway.corsOrigins.includes(origin)) || sandboxedPage) {
       res.setHeader("Access-Control-Allow-Origin", origin);
       res.setHeader("Vary", "Origin");
-      res.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type, X-QDD-Page, X-QDD-Page-Token, X-File-Name");
+      res.setHeader(
+        "Access-Control-Allow-Headers",
+        sandboxedPage ? "Content-Type, X-QDD-Page, X-QDD-Page-Token" : "Authorization, Content-Type, X-QDD-Page, X-QDD-Page-Token, X-File-Name",
+      );
       res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
       res.setHeader("Access-Control-Expose-Headers", "Mcp-Session-Id");
     }
@@ -206,7 +259,7 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
     // ---------------------------------------------------------------- 页面运行时 + 前端共用
     const tool = /^\/api\/tools\/([^/]+)$/.exec(p);
     if (tool && m === "POST") {
-      const name = decodeURIComponent(tool[1]!);
+      const name = decodeSegment(tool[1]!);
       const target = sources.get(name);
       if (!target) throw new HttpError(404, `未知数据工具 ${name}`);
       if (!auth.isAdmin(req, url)) {
@@ -217,15 +270,19 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
       }
       // 写入类工具只能经由 agent + 店长授权执行，不开放直接调用。
       if (target.mutating) throw new HttpError(403, `${name} 是写入类工具，只能在许愿会话中经授权执行`);
-      return json(res, 200, { result: await target.call(((await readJson(req)) ?? {}) as JsonObject) });
+      const args = await readJson(req);
+      if (args !== undefined && (!args || typeof args !== "object" || Array.isArray(args))) throw new HttpError(400, "工具参数必须是 JSON 对象");
+      return json(res, 200, { result: await target.call((args ?? {}) as JsonObject) });
     }
 
     if (p === "/api/ask" && m === "POST") {
+      let askSources = sources;
       if (!auth.isAdmin(req, url)) {
         const slug = auth.pageOf(req);
         const page = slug ? (await readPages(paths)).find((x) => x.slug === slug) : undefined;
         if (!page) throw new HttpError(401, "缺少或错误的页面 token");
         if (!page.useAgent) throw new HttpError(403, `页面 ${slug} 未声明使用 agent`);
+        askSources = sources.restricted(page.tools);
       }
       const body = (await readJson(req, MAX_ASK_BODY_BYTES)) as AskBody;
       if (typeof body?.question !== "string" || !body.question.trim()) throw new HttpError(400, "question 不能为空");
@@ -233,9 +290,9 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
       const chat = options.chat(resolveModel(config.llm));
       const stream = openSse(res);
       const controller = new AbortController();
-      res.once("close", () => controller.abort());
+      res.on("close", () => controller.abort());
       try {
-        const text = await runAsk(sources, chat, body.question, body.context, (name) => stream({ type: "tool", name }), controller.signal, images);
+        const text = await runAsk(askSources, chat, body.question, body.context, (name) => stream({ type: "tool", name }), controller.signal, images);
         stream({ type: "answer", text });
       } catch (error) {
         stream({ type: "error", message: (error as Error).message });
@@ -251,12 +308,15 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
       if (!(await readPages(paths)).some((x) => x.slug === slug)) throw new HttpError(404, `页面 ${slug} 不存在`);
       const file = path.join(paths.state, `${slug}.json`);
       if (m === "GET") {
-        const state = await readFile(file, "utf8").then((t) => JSON.parse(t) as unknown, () => ({}));
+        const state = await readFile(file, "utf8").then(
+          (t) => JSON.parse(t) as unknown,
+          () => ({}),
+        );
         return json(res, 200, { state });
       }
       if (m === "PUT") {
         const text = await readBody(req);
-        if (text.length > MAX_STATE) throw new HttpError(413, "页面状态不能超过 64KB");
+        if (Buffer.byteLength(text, "utf8") > MAX_STATE) throw new HttpError(413, "页面状态不能超过 64KB");
         let state: unknown;
         try {
           state = JSON.parse(text);
@@ -272,8 +332,8 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
     // 记录数据集：页面只能读写自己声明的记录；结构定义仅前端或 agent（经店长授权）
     const recordRoute = /^\/api\/records(?:\/([^/]+)(?:\/([^/]+))?)?$/.exec(p);
     if (recordRoute) {
-      const name = recordRoute[1] ? decodeURIComponent(recordRoute[1]) : undefined;
-      const id = recordRoute[2] ? decodeURIComponent(recordRoute[2]) : undefined;
+      const name = recordRoute[1] ? decodeSegment(recordRoute[1]) : undefined;
+      const id = recordRoute[2] ? decodeSegment(recordRoute[2]) : undefined;
       let actor = "@admin";
       if (!auth.isAdmin(req, url)) {
         const slug = auth.pageOf(req);
@@ -285,7 +345,18 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
       const store = sources.datasets;
       if (!name) {
         if (m === "GET") {
-          return json(res, 200, (await listRecordSets(store)).map((x) => ({ name: x.name.slice(RECORD_PREFIX.length), description: x.description, schema: x.record, rowCount: x.rowCount, watermark: x.watermark, updatedAt: x.updatedAt })));
+          return json(
+            res,
+            200,
+            (await listRecordSets(store)).map((x) => ({
+              name: x.name.slice(RECORD_PREFIX.length),
+              description: x.description,
+              schema: x.record,
+              rowCount: x.rowCount,
+              watermark: x.watermark,
+              updatedAt: x.updatedAt,
+            })),
+          );
         }
         if (m === "POST") {
           const manifest = await defineRecord(store, parseRecordDefinition(await readJson(req)));
@@ -294,7 +365,15 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
       } else if (!id) {
         if (m === "GET") {
           const limit = url.searchParams.get("limit");
-          return json(res, 200, await queryRecords(store, name, { from: url.searchParams.get("from") ?? undefined, to: url.searchParams.get("to") ?? undefined, limit: limit ? Number(limit) : undefined }));
+          return json(
+            res,
+            200,
+            await queryRecords(store, name, {
+              from: url.searchParams.get("from") ?? undefined,
+              to: url.searchParams.get("to") ?? undefined,
+              limit: limit ? Number(limit) : undefined,
+            }),
+          );
         }
         if (m === "POST") {
           const body = (await readJson(req)) as RecordInput | RecordInput[];
@@ -317,11 +396,17 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
     if (p === "/api/events" && m === "GET") {
       openSse(res);
       globalClients.add(res);
-      req.on("close", () => globalClients.delete(res));
+      res.on("close", () => globalClients.delete(res));
       return;
     }
     if (p === "/api/tools" && m === "GET") {
-      const list: ToolInfo[] = sources.tools.map(({ name, description, inputSchema, source, mutating }) => ({ name, description, inputSchema, source, mutating }));
+      const list: ToolInfo[] = sources.tools.map(({ name, description, inputSchema, source, mutating }) => ({
+        name,
+        description,
+        inputSchema,
+        source,
+        mutating,
+      }));
       return json(res, 200, list);
     }
     if (p === "/api/pages" && m === "GET") {
@@ -338,11 +423,15 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
         };
       });
       const rank = (x: PageView) => pinOrder.get(x.slug)?.index ?? Infinity;
-      return json(res, 200, pages.sort((a, b) => rank(a) - rank(b) || b.updatedAt.localeCompare(a.updatedAt)));
+      return json(
+        res,
+        200,
+        pages.sort((a, b) => rank(a) - rank(b) || b.updatedAt.localeCompare(a.updatedAt)),
+      );
     }
     const pin = /^\/api\/pages\/([^/]+)\/pin$/.exec(p);
     if (pin && (m === "PUT" || m === "DELETE")) {
-      const slug = decodeURIComponent(pin[1]!);
+      const slug = decodeSegment(pin[1]!);
       if (m === "PUT" && !(await readPages(paths)).some((x) => x.slug === slug)) throw new HttpError(404, "页面不存在");
       const pins = await (m === "PUT" ? pinPage(paths, slug) : unpinPage(paths, slug));
       broadcast({ type: "pages_changed" });
@@ -392,13 +481,17 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
       if (body.skillId !== undefined && typeof body.skillId !== "string") throw new HttpError(400, "skillId 必须是字符串");
       const model = checkModel(body.model);
       const attachments = await hub.attachments.resolve(body.attachments);
-      return json(res, 201, await hub.create(body.wish.trim(), {
-        slug: body.slug,
-        skillId: body.skillId,
-        attachments,
-        ...(model !== undefined ? { model } : {}),
-        ...(body.reasoningEffort !== undefined ? { reasoningEffort: body.reasoningEffort } : {}),
-      }));
+      return json(
+        res,
+        201,
+        await hub.create(body.wish.trim(), {
+          slug: body.slug,
+          skillId: body.skillId,
+          attachments,
+          ...(model !== undefined ? { model } : {}),
+          ...(body.reasoningEffort !== undefined ? { reasoningEffort: body.reasoningEffort } : {}),
+        }),
+      );
     }
 
     // ---------------------------------------------------------------- 工作台
@@ -415,7 +508,7 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
     }
     const skill = /^\/api\/skills\/([^/]+)$/.exec(p);
     if (skill) {
-      const id = decodeURIComponent(skill[1]!);
+      const id = decodeSegment(skill[1]!);
       if (m === "GET") return json(res, 200, await workbench.skills.get(id));
       if (m === "PUT") {
         const updated = await workbench.skills.update(id, parseSkillInput(await readJson(req)));
@@ -435,10 +528,15 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
       if (m === "GET") return json(res, 200, await scheduler.list());
       if (m === "POST") return json(res, 201, await scheduler.create(await readJson(req)));
     }
-    const schedule = /^\/api\/schedules\/([^/]+)(\/run)?$/.exec(p);
+    const schedule = /^\/api\/schedules\/([^/]+)(\/run|\/sessions)?$/.exec(p);
     if (schedule) {
-      const id = decodeURIComponent(schedule[1]!);
-      if (schedule[2]) {
+      const id = decodeSegment(schedule[1]!);
+      if (schedule[2] === "/sessions") {
+        if (m === "GET") {
+          await scheduler.get(id);
+          return json(res, 200, await hub.listScheduleSessions(id));
+        }
+      } else if (schedule[2] === "/run") {
         if (m === "POST") return json(res, 202, { sessionId: await scheduler.runNow(id) });
       } else {
         if (m === "GET") return json(res, 200, await scheduler.get(id));
@@ -455,7 +553,7 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
     if (browserRoute) {
       const browser = workbench.browser;
       if (!browser) throw new HttpError(404, "浏览器工具未启用");
-      const id = decodeURIComponent(browserRoute[1]!);
+      const id = decodeSegment(browserRoute[1]!);
       const sub = browserRoute[2];
       if (!sub && m === "GET") {
         const state = browser.state(id);
@@ -495,7 +593,7 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
           res.end();
           return;
         }
-        req.on("close", off);
+        res.on("close", off);
         return;
       }
       if (sub === "/input" && m === "POST") {
@@ -521,18 +619,22 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
       const [, provider, step] = camera;
       const body = step === "login-start" ? undefined : await readJson(req);
       const result =
-        provider === "haik" && step === "send-code" ? await cameras.haikSendCode(body)
-        : provider === "haik" && step === "login" ? await cameras.haikLogin(body)
-        : provider === "tysl" && step === "login-start" ? await cameras.tyslStart()
-        : provider === "tysl" && step === "login-complete" ? await cameras.tyslComplete(body)
-        : undefined;
+        provider === "haik" && step === "send-code"
+          ? await cameras.haikSendCode(body)
+          : provider === "haik" && step === "login"
+            ? await cameras.haikLogin(body)
+            : provider === "tysl" && step === "login-start"
+              ? await cameras.tyslStart()
+              : provider === "tysl" && step === "login-complete"
+                ? await cameras.tyslComplete(body)
+                : undefined;
       if (!result) throw new HttpError(404, "不支持的登录步骤");
       if (step === "login" || step === "login-complete") broadcast({ type: "connectors_changed" });
       return json(res, 200, result);
     }
     const connector = /^\/api\/connectors\/([^/]+)(\/verify|\/test)?$/.exec(p);
     if (connector) {
-      const id = decodeURIComponent(connector[1]!);
+      const id = decodeSegment(connector[1]!);
       const action = connector[2];
       if (action === "/verify" && m === "POST") {
         const view = await workbench.connectors.verify(id);
@@ -568,8 +670,10 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
     if (p === "/api/metrics" && m === "GET") return json(res, 200, await sources.metrics());
     if (p === "/api/datasets" && m === "GET") return json(res, 200, await sources.datasets.list());
     if (p === "/api/datasets/refresh" && m === "POST") {
-      const body = (await readJson(req)) as { datasets?: string[] } | undefined;
-      return json(res, 200, await refreshDatasets(sources, body?.datasets));
+      const body = (await readJson(req)) as { datasets?: unknown } | undefined;
+      if (body?.datasets !== undefined && (!Array.isArray(body.datasets) || body.datasets.some((name) => typeof name !== "string")))
+        throw new HttpError(400, "datasets 必须是字符串数组");
+      return json(res, 200, await refreshDatasets(sources, body?.datasets as string[] | undefined));
     }
 
     const session = /^\/api\/sessions\/([^/]+)(\/.*)?$/.exec(p);
@@ -584,7 +688,7 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
         const since = Math.max(0, Number(url.searchParams.get("since")) || 0);
         for (const e of detail.events.slice(since)) stream(e);
         const off = hub.subscribe(id, stream);
-        req.on("close", off);
+        res.on("close", off);
         return;
       }
       if (sub === "/messages" && m === "POST") {
@@ -592,11 +696,15 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
         if (typeof body?.text !== "string" || !body.text.trim()) throw new HttpError(400, "text 不能为空");
         const model = checkModel(body.model);
         const attachments = await hub.attachments.resolve(body.attachments);
-        return json(res, 202, await hub.send(id, body.text.trim(), {
-          attachments,
-          ...(model !== undefined ? { model } : {}),
-          ...(body.reasoningEffort !== undefined ? { reasoningEffort: body.reasoningEffort } : {}),
-        }));
+        return json(
+          res,
+          202,
+          await hub.send(id, body.text.trim(), {
+            attachments,
+            ...(model !== undefined ? { model } : {}),
+            ...(body.reasoningEffort !== undefined ? { reasoningEffort: body.reasoningEffort } : {}),
+          }),
+        );
       }
       if (sub === "/model" && m === "PUT") {
         const body = (await readJson(req)) as SelectModelBody | undefined;
@@ -633,24 +741,48 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
   }
 
   async function servePage(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
-    const [, , slug = "", ...rest] = url.pathname.split("/");
-    if (!SLUG_RE.test(slug)) throw new HttpError(404, "Not Found");
+    const [, , pageSegment = "", ...rest] = url.pathname.split("/");
+    const [slug = "", pathToken, ...extra] = pageSegment.split("~");
+    if (!SLUG_RE.test(slug) || extra.length) throw new HttpError(404, "Not Found");
     const expected = auth.pageToken(slug);
+    if (pathToken !== undefined && pathToken !== expected) throw new HttpError(401, "页面 token 错误");
     const query = url.searchParams.get("page_token");
+    res.setHeader("Referrer-Policy", "no-referrer");
     if (query !== null) {
       if (query !== expected) throw new HttpError(401, "页面 token 错误");
-      // 首次带 token 进入：写入路径级 cookie 后跳转到干净地址，后续子资源凭 cookie 访问。
+      // Opaque sandboxes omit SameSite cookies for scripts/modules. A credential
+      // in the page directory keeps every relative resource authenticated while
+      // retaining the existing directory depth and ../../assets references.
       res.setHeader("Set-Cookie", `${auth.pageCookieName(slug)}=${expected}; Path=/pages/${slug}/; HttpOnly; SameSite=Lax`);
       url.searchParams.delete("page_token");
+      url.pathname = `/pages/${slug}~${expected}/${rest.join("/")}`;
       res.writeHead(302, { Location: url.pathname + url.search }).end();
       return;
     }
-    if (auth.pageCookie(req, slug) !== expected && !auth.isAdmin(req, url)) throw new HttpError(401, "需要页面 token");
+    if (pathToken !== expected) {
+      if (auth.pageCookie(req, slug) !== expected && !auth.isAdmin(req, url)) throw new HttpError(401, "需要页面 token");
+      url.pathname = `/pages/${slug}~${expected}/${rest.join("/")}`;
+      res.writeHead(302, { Location: url.pathname + url.search }).end();
+      return;
+    }
+    if (pathToken === expected && req.headers.origin === "null") {
+      res.setHeader("Access-Control-Allow-Origin", "null");
+      res.setHeader("Vary", "Origin");
+    }
 
     const rel = rest.join("/") || "index.html";
-    const file = await resolveFile(path.join(paths.pages, slug), rel);
+    const file = await resolveFile(path.join(paths.pages, slug), rel, paths.pages);
     if (!file) throw new HttpError(404, "Not Found");
     const ext = path.extname(file).toLowerCase();
+    const host = req.headers.host;
+    if (!host || /[\s/@\\?#]/.test(host)) throw new HttpError(400, "Host 不合法");
+    let origin: string;
+    try {
+      origin = new URL(`http://${host}`).origin;
+    } catch {
+      throw new HttpError(400, "Host 不合法");
+    }
+    res.setHeader("Content-Security-Policy", pageCsp(config.cdnAllowlist, config.gateway.corsOrigins, { origin, slug: pageSegment }));
     if (ext !== ".html") return send(res, 200, MIME[ext] ?? "application/octet-stream", await readFile(file));
 
     const boot =
@@ -667,7 +799,7 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
   }
 
   async function serveFile(res: ServerResponse, root: string, rel: string): Promise<void> {
-    const file = await resolveFile(root, rel);
+    const file = await resolveFile(root, rel, paths.site);
     if (!file) throw new HttpError(404, "Not Found");
     send(res, 200, MIME[path.extname(file).toLowerCase()] ?? "application/octet-stream", await readFile(file));
   }
@@ -732,14 +864,18 @@ function pageHostOrigins(req: IncomingMessage, configured: string[]): string[] {
     try {
       const url = new URL(value);
       if (/^https?:$/.test(url.protocol) && url.origin === value) origins.add(url.origin);
-    } catch { /* 配置中的通配符、opaque 源与非 URL 不参与通信。 */ }
+    } catch {
+      /* 配置中的通配符、opaque 源与非 URL 不参与通信。 */
+    }
   }
   const requestHost = req.headers.host;
   if (requestHost && !/[\s/@\\?#]/.test(requestHost)) {
     try {
       const url = new URL(`http://${requestHost}`);
       if (url.host && !url.username && !url.password) origins.add(url.origin);
-    } catch { /* 无效 Host 不扩大通信范围。 */ }
+    } catch {
+      /* 无效 Host 不扩大通信范围。 */
+    }
   }
   return [...origins];
 }
@@ -748,14 +884,17 @@ function pageHostOrigins(req: IncomingMessage, configured: string[]): string[] {
 function gapBanner(page: { gaps: { kind: string; item: string; reason: string; suggestion?: string }[]; stale: string | null } | undefined): string {
   if (!page || (!page.gaps.length && !page.stale)) return "";
   const items = page.gaps
-    .map((g) => `<li><b>[${GAP_LABEL[g.kind] ?? g.kind}] ${escapeHtml(g.item)}</b>：${escapeHtml(g.reason)}${g.suggestion ? `（${escapeHtml(g.suggestion)}）` : ""}</li>`)
+    .map(
+      (g) =>
+        `<li><b>[${GAP_LABEL[g.kind] ?? g.kind}] ${escapeHtml(g.item)}</b>：${escapeHtml(g.reason)}${g.suggestion ? `（${escapeHtml(g.suggestion)}）` : ""}</li>`,
+    )
     .join("");
   const stale = page.stale ? `<li><b>[口径变更]</b> ${escapeHtml(page.stale)}</li>` : "";
   return `<aside data-qdd-gaps style="all:initial;display:block;font:13px/1.6 system-ui,sans-serif;background:#fff7e6;color:#613400;border-bottom:1px solid #ffd591;padding:8px 16px"><b style="font-weight:600">能力缺口说明</b><ul style="margin:4px 0 0;padding-left:20px">${stale}${items}</ul></aside>`;
 }
 
 /** 在 root 内解析相对路径，拒绝越界与隐藏文件。 */
-async function resolveFile(root: string, rel: string): Promise<string | undefined> {
+async function resolveFile(root: string, rel: string, trustedRoot: string): Promise<string | undefined> {
   let decoded: string;
   try {
     decoded = decodeURIComponent(rel);
@@ -764,13 +903,34 @@ async function resolveFile(root: string, rel: string): Promise<string | undefine
   }
   let file = path.join(root, path.normalize(decoded));
   if (!file.startsWith(root + path.sep) && file !== root) return undefined;
-  if (path.relative(root, file).split(path.sep).some((s) => s.startsWith("."))) return undefined;
+  if (
+    path
+      .relative(root, file)
+      .split(path.sep)
+      .some((s) => s.startsWith("."))
+  )
+    return undefined;
   try {
     if ((await stat(file)).isDirectory()) file = path.join(file, "index.html");
-    await stat(file);
-    return file;
+    const [realRoot, realFile, realTrustedRoot, info] = await Promise.all([realpath(root), realpath(file), realpath(trustedRoot), stat(file)]);
+    const expectedRoot = path.resolve(realTrustedRoot, path.relative(trustedRoot, root));
+    if (path.relative(expectedRoot, realRoot) !== "") return undefined;
+    const rootRelative = path.relative(realTrustedRoot, realRoot);
+    if (rootRelative === ".." || rootRelative.startsWith(`..${path.sep}`) || path.isAbsolute(rootRelative)) return undefined;
+    const relative = path.relative(realRoot, realFile);
+    if (!info.isFile() || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return undefined;
+    if (relative.split(path.sep).some((segment) => segment.startsWith("."))) return undefined;
+    return realFile;
   } catch {
     return undefined;
+  }
+}
+
+function decodeSegment(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    throw new HttpError(400, "URL 路径编码不合法");
   }
 }
 
@@ -782,20 +942,25 @@ function json(res: ServerResponse, status: number, body: unknown): void {
   send(res, status, "application/json; charset=utf-8", JSON.stringify(body));
 }
 
-function openSse(res: ServerResponse): (data: unknown) => void {
+function openSse(_res: ServerResponse): (data: unknown) => void {
   res.writeHead(200, { "Content-Type": "text/event-stream; charset=utf-8", Connection: "keep-alive" });
   res.write(": connected\n\n");
   const ping = setInterval(() => res.write(": ping\n\n"), 25_000);
-  res.once("close", () => clearInterval(ping));
-  return (data) => res.write(`data: ${JSON.stringify(data)}\n\n`);
+  req.on("close", () => clearInterval(ping));
+  return (data) => {
+    if (!res.writableEnded && !res.destroyed) res.write(`data: ${JSON.stringify(data)}\n\n`);
+  };
 }
 
 async function readBuffer(req: IncomingMessage, limit = MAX_BODY): Promise<Buffer> {
   const chunks: Buffer[] = [];
   let size = 0;
-  for await (const chunk of req) {
+  for await (const chunk of req.iterator({ destroyOnReturn: false })) {
     size += (chunk as Buffer).length;
-    if (size > limit) throw new HttpError(413, "请求体过大");
+    if (size > limit) {
+      req.resume();
+      throw new HttpError(413, "请求体过大");
+    }
     chunks.push(chunk as Buffer);
   }
   return Buffer.concat(chunks);

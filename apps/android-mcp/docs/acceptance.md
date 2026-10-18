@@ -12,6 +12,142 @@ Their original logs remain for traceability. That stop request applies to the ea
 The later new-controller LAN report authorizes the bounded transfer verification recorded in v26:
 its APK download and hash pass, with no APK source changes. This is not proof of phone installation.
 
+## v41 Target preview and physical hover — desktop updated, device scope PASS
+
+2026-10-18: Added read-only `android_preview_tap`. Latest `frameId`, coordinates and optional
+`coordinateSpace` produce a high-contrast simulated target on a fresh real original plus a 2× local
+crop, preserving the center. Metadata includes original `target`, `crop`, `zoomTarget`, distinct
+source/annotated SHA values and reusable `tapArguments`. It needs no calibration/ARM and sends no HID
+or ownership claim. Preview and execution share pixel/normalized1000 conversion. After rendering,
+the latest caller frame and phone/rotation epoch are checked; render time adds to source age and the
+existing 3000ms bound remains enforced.
+
+`android_control` adds `hover`: move the calibrated physical mouse without pressing a button and
+return a real resulting image, then `click` only after inspecting the cursor. A previously held mouse
+button is neutralized before positioning to avoid dragging along the path. Simulated target selection
+and physical cursor position are distinct checks.
+
+- Build: **PASS**, root typecheck/build. EXE build **3c8091bb77c3efd2c94d**, **95,678,464B**,
+  SHA-256 `c7ab0b2c329afab7a835e286adb1c322ce3676f37958383363d5e244285b4414`; verified v40 backup
+  in `build/windows/history/222be5b37c4e785e183b`. APK, v39 ESP firmware and device data unchanged.
+- Host tests: **537/537 PASS, zero skips**; EXE **17/17 PASS**. Coverage includes JPEG/PNG,
+  pixel-consistent original/zoom targets, corners/narrow images, preserved center, inflation bounds,
+  read-only/no-HID/no-takeover behavior, cancellation/newer-frame/geometry/age guards, neutralizing old
+  mouse holds and old input-round isolation. Pure-JS codecs run in an isolated worker: one active,
+  one queued job, 5s timeout/cancellation termination. Main-thread timers continue and cancelled waiters
+  cannot release slots early. The single EXE exercises its embedded worker with empty PATH in a separate
+  directory, without external Node files. Packaged fixtures are not real-device performance.
+  Evidence: `build/preclick-v41-{typecheck,build,host-tests,worker-tests,hover-input,exe-build,exe-tests}.log`.
+- Device tests: **PASS only for this pre-click workflow**. Official SDK discovers **22** tools; real
+  OnePlus 8 originals are **1080×2400**. Uncalibrated/unarmed preview of SAI at (140,280) returned full
+  image plus **320×320** zoom in **516ms**, crop=(60,200,160,160), zoomTarget=(160,160); input stayed
+  armed=false and the marker appeared inside the intended icon. Reused the same phone's v40 measured
+  scale **1/1**; `hover`, including initial homing, took **3363ms**, and the physical cursor appeared
+  inside that icon. After inspecting it, `click` took **270ms**. Its first post-image still showed the
+  launcher; a read-only `wait` then confirmed SAI opened, without replaying the click. Home/read-only
+  wait restored the launcher; final encrypted/bonded/ready, armed/locked=false, diagnostic exit **0**.
+  All runtime images came from the phone App over LAN, all input from ESP BLE. Evidence:
+  `build/preclick-v41-live.json`, `preclick-v41-image-*.{png,jpg}`; marker zoom: `preclick-v41-image-3.png`.
+- Final service PID **17268**, path/hash verified, **0.0.0.0:8790** listener; LAN/loopback health **200**,
+  unknown route **404** in `build/preclick-v41-final-service.json`. No commit, push or publication.
+
+Unverified: automatic control recognition, precision on other phones/acceleration settings, complete UI,
+high-rate LAN root cause and long-term resources. This implements inspect-before-click tools with a
+physical feedback loop, not automatic recognition of every control or full-product acceptance.
+Historical acceptance and approval boundaries remain preserved.
+
+## v40 Two-stage MCP pointer calibration — desktop updated, device scope PASS
+
+2026-10-18: Added `android_pointer_calibration`. `probe` releases input, arms, reveals the cursor,
+and returns fresh original BEFORE/AFTER images. `finish` computes HID counts per pixel from centers
+read by the AI, without another movement. The manual setter remains; relative movement, current-position
+clicks, keys and wheel input still need no calibration. Tickets check session, phone/rotation, control
+epoch, actual dispatch revision, expiration and single use. Read-only screenshots/waits may refresh
+observations; completed actions must not be blindly replayed after capture failure.
+
+Fractional-scale actions now retain estimated positions from actual integer HID reports, avoiding
+repeated homing. Host cost regression: 1080×2400, scale 1.25, taps (541,1201), (542,1202): the second
+tap drops from the old **40**-report path to **3** reports, scheduled waits **1800→150ms**. This excludes
+bridge/phone time and is not a real-device fractional-scale performance claim.
+
+- Build: **PASS**, root typecheck/build. Final EXE build **222be5b37c4e785e183b**, **94,448,128B**,
+  SHA-256 `1352d1c02a00d16bbf44e08360b2e1f8325eb55995f3419a37d2b0c6e5e26c14`.
+  Previous/intermediate verified artifacts retained in
+  `build/windows/history/{c2042f779676b1fb0546,fb0935471db537163b4f}`.
+- Host tests: **498/498 PASS, zero skips**; packaged EXE **16/16 PASS**. Coverage includes original
+  image ordering/four directions, zero finish input, session/age/geometry/intervening-input guards,
+  old-round cancellation, fractional drift and report cost. HTTP red/green regressions fixed invalid
+  finish interrupting a browser and rejected missing-argument calls borrowing global armed state for
+  a remote lease. Lease, session close and lost-response handling now share the actual MCP owner;
+  closing a rejected borrower preserves the real owner. Packaged cases use isolated loopback fixtures,
+  not real devices. Evidence: `build/calibration-v40-*-{red,green}.log`,
+  `calibration-v40-{typecheck,build,host-tests,exe-build,exe-tests}.log`.
+- Device tests: **PASS only for the final package's calibration/nearby-tap scope**. Initially ESP settings
+  returned `CONFIGURING`; no guard was bypassed. The user left settings with physical buttons. The final
+  package's official SDK discovered **21** tools; the real OnePlus 8 App supplied **1080×2400** LAN
+  originals and input used the COM6 board's BLE. `probe`: **1488ms**; visually read cursor centers
+  (543,1203)→(447,1107). `finish`: **3ms**, scaleX/scaleY **1/1**. Taps (541,1201), (542,1202) both
+  reported `actionCompleted/observedAfterAction=true`, **3878/444ms**, with the cursor visible near
+  requested centers. This short sample includes initial homing/capture, is not an old-version comparison,
+  and supplies no independent pixel-error measurement. Final BLE encrypted/bonded/ready, armed/locked=false;
+  diagnostic script exited normally with code 0. Evidence: `build/calibration-v40-final-live.json`,
+  `calibration-v40-final-image-*.jpg`.
+- Final service path/hash verified, PID **106560**, **0.0.0.0:8790** listener; LAN/loopback health **200**,
+  unknown route **404** in `build/calibration-v40-final-service.json`. APK and v39 ESP firmware unchanged.
+  Overnight automation deleted at the requested Shanghai 09:00 cutoff, preserving service/device data.
+  No commit, push or publication in this turn.
+
+Unverified: acceleration/error on other real devices or fractional scales, full physical UI, high-rate
+LAN failure root cause and long-term resource bounds. Calibration remains an estimate; this low-rate
+scope does not establish full-product acceptance. Historical v36 stress failure and automatic App-launch
+approval boundary remain recorded; denied launch actions were not retried/bypassed.
+
+## v39 Reopen the installation QR from settings — built and installed on COM6
+
+2026-10-18: Settings now contains **Phone projection download**. Its independent page shows the
+existing APK download QR, current LAN address and same-network/browser instructions. Confirming
+**Return to settings** retains the download selection. Offline, it shows a connection hint without
+opening Wi-Fi scanning. It does not change onboarding completion, Wi-Fi, bonds, stop state or NVS.
+
+- Build: **PASS**, complete firmware gate and archive verification. App **1,666,016B**, SHA-256
+  `fcb04a400855a4847f1ac0a0d54164002d0464672766ed78243596cd3983ebde`;
+  archive `apps/esp/build/firmware/f0bada5e21afe55b44399881505e1213c4b9fc47cacbf460ed4a5ae1a0bdeb4d`,
+  ELF SHA-256 `20bb40f39eb59dc717c47050ffe8d6e4d31c2c4429c65295503f43f48df2dc7e`.
+- Host tests: **PASS**. Model red/green, complete actual LVGL rendering, glyph/layout checks,
+  same-IP reentry, changed IP, offline QR hiding, return selection and existing exit/reset paths pass.
+  One hundred unchanged refreshes produce zero flushes; 120 page replacements retain stable pool
+  usage. Existing platform skips remain. Evidence: `apps/esp/build/settings-download-*.log`.
+- Device tests: **PASS for installation/startup/connection recovery only**. COM6 / MAC
+  **4c:11:ae:31:32:6c** and the actual partition table were freshly verified. Only `ota_0 @ 0x20000`
+  was written; its checksum passes and erase ends before `0x1b7000` exclusive. Bootloader, table,
+  otadata, NVS/bonds, PHY, assets and ota_1 remain intact. Six samples over 30 seconds pass, with
+  **192.168.101.75:3333**, encrypted/bonded/ready BLE, unarmed, no fault/OOM and COM6 closed.
+  Evidence: `apps/esp/build/new-com6-v39-{layout-read.log,flash-plan.json,flash.log,startup.json}`.
+- The unchanged desktop EXE build **c2042f779676b1fb0546** is restored as actual PID **91668**.
+  Official SDK: **20** tools, STATUS **5/5**, maximum **267ms**, seven POST responses all SSE;
+  LAN/loopback health **200**, unknown route **404**. Evidence: `apps/android-mcp/build/mcp-v39-final-status.json`.
+
+At **08:36 Shanghai**, the real OnePlus 8 projection App was observed running. No blocked App
+launch was retried or bypassed. Actual **1080x2400** images from UUID
+**1651863a-9f91-4d0c-b689-168a2c78fc62** confirmed Home navigation to the launcher, relative mouse
+movement and Tab focus changes. Nineteen official tool calls had no error; pause/automatic rearm
+and legacy-move rejection while paused pass. Evidence: `mcp-v39-live.json`, `mcp-v39-frame-*.jpg`
+and `mcp-v39-paused-rejection.json`. Browser picture-click entry, Esc exit and all four preview
+profiles work, including visible grayscale; observed video is approximately **13–16fps**.
+One real **ESP32 PING acknowledgement timed out** still occurred; disconnect stability is not fixed.
+
+The first ten-second small-motion WS diagnostic ended early at its `sentAt <= Date.now()` check,
+after **132** sends/**128** acknowledgements. Remaining input was stopped without replay. This is
+neither a completed pressure PASS nor proof that the assertion was a product disconnect. The
+original report is fixed as `ws-v39-real-smallmove-invalid-wall-clock.json`; diagnostic timing and
+offline checks were corrected but not rerun. Production code and safety deadlines are unchanged.
+Concurrent 35-second UART observation returned 35 allowlisted samples with no fault/OOM/Wi-Fi
+reconnection; header-only Npcap saved no payload and requested no elevation.
+
+Unverified: physical keys/display/scanning on the new download page, complete physical UI,
+the current firmware's high-rate LAN gate, sustained input stability and long-term memory bounds.
+Real frames and the listed minimal HID feedback are now verified; **full-product acceptance still fails**.
+
 ## v38 Idle-observer connection recovery — focused device checks PASS, full product not accepted
 
 2026-10-18: New device evidence closes the earlier stale-slot diagnosis: a source-bound new TCP

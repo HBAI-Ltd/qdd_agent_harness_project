@@ -62,7 +62,8 @@ export async function startHttpMcp(tools: AndroidTools, options: HttpMcpOptions 
   const port = options.port ?? 8790;
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error("HTTP port must be in 0..65535.");
   await assertPortAvailable(port);
-  type Session = { mcp: ReturnType<typeof createMcpServer>; transport: StreamableHTTPServerTransport };
+  type Session = { mcp: ReturnType<typeof createMcpServer>; transport: StreamableHTTPServerTransport;
+    calls: Map<string | number, AbortController> };
   const sessions = new Map<string, Session>();
   const active = new Set<Session>();
   let viewers = 0;
@@ -404,6 +405,7 @@ export async function startHttpMcp(tools: AndroidTools, options: HttpMcpOptions 
     if (request.method !== "POST") { response.setHeader("Allow", "POST, GET, DELETE"); return respond(405, "Unsupported MCP method."); }
     let parsed: unknown;
     try { parsed = await body(request); } catch (error) { return respond(400, (error as Error).message); }
+    if (Array.isArray(parsed)) return respond(400, "Send one MCP request per HTTP POST.");
     // An old browser's pause POST may finish its body after AI took control and
     // closed that session. Never dispatch its late cleanup against the new owner.
     if (id && sessions.get(id) !== session) return respond(404, "MCP session not found. Initialize again.");
@@ -427,22 +429,23 @@ export async function startHttpMcp(tools: AndroidTools, options: HttpMcpOptions 
         } catch { return respond(503, "Could not release the previous remote controller. Reconnect the ESP32 and try again."); }
       }
       inputOwner = id;
-      response.once("close", () => {
-        // A lost input POST must cancel active and queued reports even when the
-        // client's separate SSE channel continues to keep its session open.
-        if (!response.writableFinished && inputOwner === id) pause();
-      });
     }
     let current = session;
+    let requestController: AbortController | undefined;
+    const requestId = call?.jsonrpc === "2.0" && call.method === "tools/call"
+      && (typeof call.id === "string" || typeof call.id === "number") ? call.id : undefined;
     try {
       if (!current) {
-        const mcp = createMcpServer(tools);
+        const calls = new Map<string | number, AbortController>();
+        const mcp = createMcpServer(tools, (requestId) => calls.get(requestId)?.signal);
         const transport = new StreamableHTTPServerTransport({
-          enableJsonResponse: true,
+          // SDK 1.32.1 retains completed JSON POST streams until session close.
+          // Its default SSE replies clean them up; both clients support SSE.
+          enableJsonResponse: false,
           sessionIdGenerator: randomUUID,
-          onsessioninitialized: (sessionId) => { sessions.set(sessionId, { mcp, transport }); },
+          onsessioninitialized: (sessionId) => { sessions.set(sessionId, { mcp, transport, calls }); },
         });
-        current = { mcp, transport };
+        current = { mcp, transport, calls };
         active.add(current);
         const owned = current;
         mcp.onclose = () => {
@@ -451,10 +454,26 @@ export async function startHttpMcp(tools: AndroidTools, options: HttpMcpOptions 
           else if (sessionId && inputOwner === sessionId) pause();
           if (sessionId && inputOwner === sessionId) inputOwner = undefined;
           if (transport.sessionId) sessions.delete(transport.sessionId);
+          calls.clear();
           active.delete(owned);
         };
         // SDK 1.x's accessor types include undefined; its own Transport uses optional callbacks.
         await mcp.connect(transport as unknown as Transport);
+      }
+      if (requestId !== undefined) {
+        if (current.calls.has(requestId)) return respond(409, "This MCP request id is already active.");
+        requestController = new AbortController();
+        current.calls.set(requestId, requestController);
+        const controller = requestController;
+        const cancelLostResponse = () => {
+          // Cancel this call through MCP's owned-round guards. An old POST
+          // must not globally pause a newer ARM in the same SDK session.
+          if (!response.writableFinished && (!mutatesInput || inputOwner === id)) {
+            controller.abort(new Error("MCP HTTP response closed before the tool completed."));
+          }
+        };
+        response.once("close", cancelLostResponse);
+        if (response.destroyed) cancelLostResponse();
       }
       // Cancellation notifications must reach the same Server as their in-flight call.
       await current.transport.handleRequest(request, response, parsed);
@@ -463,6 +482,8 @@ export async function startHttpMcp(tools: AndroidTools, options: HttpMcpOptions 
       if (!response.headersSent) respond(500, error instanceof Error ? error.message : "MCP request failed.");
       else response.destroy();
       if (current) await current.mcp.close().catch(() => {});
+    } finally {
+      if (requestId !== undefined && current && requestController && current.calls.get(requestId) === requestController) current.calls.delete(requestId);
     }
   });
   const socketCurrent = (binding: RemoteSocketBinding) => sessions.has(binding.sessionId)

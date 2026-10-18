@@ -1,5 +1,5 @@
 import { setTimeout as delay } from "node:timers/promises";
-import { aborted } from "./serial.js";
+import { aborted, isHidCancellation } from "./serial.js";
 import { encodeCommand } from "./protocol.js";
 import type { SerialBridge } from "./serial.js";
 import type { HidOperation, HidStatus } from "./protocol.js";
@@ -98,6 +98,7 @@ export class InputController {
   // This remains an estimate; external mouse motion is not observable here.
   private pointer: { x: number; y: number } | undefined;
   private armed = false;
+  private pendingArms = 0;
   private buttons = 0;
   private tail: Promise<void> = Promise.resolve();
   private active: AbortController | undefined;
@@ -162,17 +163,27 @@ export class InputController {
     return this.state;
   }
 
-  status(signal?: AbortSignal): Promise<HidStatus & { input: InputState }> {
+  async status(signal?: AbortSignal): Promise<HidStatus & { input: InputState }> {
+    aborted(signal);
+    // The active control connection already reports status in each heartbeat
+    // and input ACK. Observers must not queue an exclusive wire query ahead of
+    // reports whose end-to-end socket deadlines are already running.
+    const current = this.armed && this.pendingArms === 0 ? this.bridge.controlStatus : undefined;
+    if (current) {
+      this.observeStatus(current);
+      return { ...current, input: this.state };
+    }
     return this.enqueue(async (abort) => {
       const status = await this.send("STATUS", [], abort);
       return { ...status, input: this.state };
-    }, signal);
+    }, signal, false, true);
   }
 
   arm(signal?: AbortSignal): Promise<HidStatus & { input: InputState }> {
     // Re-arming is an explicit new control round, without changing queued HID
     // cancellation semantics. Awaiting HTTP bodies must acquire a new lease.
     this.activationEpoch += 1;
+    this.pendingArms += 1;
     this.abortRemote(new Error("A new input control round started."));
     return this.enqueue(async (abort) => {
       await this.send("PING", [], abort);
@@ -182,7 +193,7 @@ export class InputController {
       }
       this.armed = true;
       return { ...status, input: this.state };
-    }, signal);
+    }, signal).finally(() => { this.pendingArms -= 1; });
   }
 
   /** Emergency stop bypasses older queued actions and aborts the current one before releasing. */
@@ -514,31 +525,42 @@ export class InputController {
     aborted(signal);
     const status = await this.request(op, args, signal);
     aborted(signal);
+    this.observeStatus(status);
+    return status;
+  }
+
+  private observeStatus(status: HidStatus): void {
     if (!status.connected || !status.encrypted || !status.bonded || status.locked || !status.armed) {
       if (this.armed) this.activationEpoch += 1;
       this.armed = false; this.pointer = undefined;
     }
-    return status;
   }
 
   private request(op: HidOperation, args: readonly number[] = [], signal?: AbortSignal): Promise<HidStatus> {
-    this.bridgeUsed = true;
+    if (op !== "STATUS") this.bridgeUsed = true;
     return this.bridge.request(op, args, signal);
   }
 
-  private enqueue<T>(action: (signal: AbortSignal) => Promise<T>, signal?: AbortSignal, cleanup = false): Promise<T> {
+  private enqueue<T>(action: (signal: AbortSignal) => Promise<T>, signal?: AbortSignal, cleanup = false, inspection = false): Promise<T> {
     const generation = this.generation;
     const reports = [...this.remoteReports];
     const task = this.tail.then(async () => {
       await Promise.allSettled(reports);
       aborted(signal);
-      if (!cleanup && generation !== this.generation) throw new Error("Queued input was cancelled by pause, release or screen geometry change.");
+      const independentInspection = inspection && !this.bridgeUsed;
+      if (!cleanup && !independentInspection && generation !== this.generation) throw new Error("Queued input was cancelled by pause, release or screen geometry change.");
       const controller = new AbortController();
-      this.active = controller;
+      // A never-control observer is unrelated to phone projection/geometry.
+      // External caller cancellation still reaches its own controller below.
+      if (!independentInspection) this.active = controller;
       const abort = () => controller.abort(signal?.reason);
       signal?.addEventListener("abort", abort, { once: true });
       try { return await action(controller.signal); }
       catch (error) {
+        // A cancelled read-only caller has no authority over another input
+        // owner. Internal safety aborts and genuine link failures still clean up.
+        if (inspection && isHidCancellation(error, signal) && isHidCancellation(error, controller.signal)) throw error;
+        if (inspection && !this.bridgeUsed) throw error;
         this.armed = false; this.pointer = undefined; this.buttons = 0;
         // RELEASE is allowed even when locked/unarmed. Failure relies on the board watchdog.
         try { await this.request("RELEASE"); } catch { /* disconnected */ }

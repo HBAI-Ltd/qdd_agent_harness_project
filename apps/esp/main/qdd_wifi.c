@@ -14,6 +14,7 @@
 #include "sdkconfig.h"
 #include <errno.h>
 #include <fcntl.h>
+#include <inttypes.h>
 #include <limits.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -43,6 +44,7 @@ static atomic_bool s_accept_ip;
 #define CONNECT_TIMEOUT_MS 12000u
 static uint64_t s_scan_deadline;
 static int s_listener = -1, s_client = -1;
+static uint64_t s_client_activity_ms;
 
 // Diagnostic callbacks only count numeric facts; no logs, packet reads or allocation.
 static atomic_uint s_diag_connects, s_diag_disconnects, s_diag_beacons;
@@ -54,6 +56,17 @@ static atomic_int s_diag_heap_hook_error = ESP_ERR_INVALID_STATE;
 static bool s_diag_heap_hook_installed;
 static atomic_flag s_diag_busy = ATOMIC_FLAG_INIT;
 static wifi_ap_record_t s_diag_ap;
+// The control worker owns these cumulative socket facts. They never retain
+// command bytes, queue acknowledgements or change the transport's fail-close rules.
+static struct {
+    uint32_t rx_bytes, tx_bytes, tx_ok, tx_fail, rx_ms, tx_ms;
+    int last_errno;
+    unsigned close_reason;
+} s_diag_tcp;
+enum {
+    TCP_CLOSE_EXTERNAL = 1, TCP_CLOSE_NETWORK, TCP_CLOSE_EOF,
+    TCP_CLOSE_RECV, TCP_CLOSE_SEND
+};
 
 static uint32_t diagnostic_now(void) {
     return (uint32_t)((uint64_t)esp_timer_get_time() / 1000u);
@@ -112,7 +125,8 @@ size_t qdd_wifi_diagnostics(char *out, size_t capacity) {
     const int length = snprintf(out, limit,
         "{\"ap\":%d,\"rssi\":[%d,%d],\"ch\":[%d,%u],\"ps\":[%d,%d],\"up\":%u,\"ipErr\":%d,"
         "\"ev\":[%u,%u,%u,%u,%d,%d],\"heap\":[%u,%u,%u],\"oom\":[%u,%u,%u],"
-        "\"tx\":[%d,%u,%u,%d],\"memHook\":%d}",
+        "\"tx\":[%d,%u,%u,%d],\"memHook\":%d,"
+        "\"tcp\":[%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%d,%d,%d,%u]}",
         ap_error, rssi_error, rssi, channel_error, (unsigned)channel,
         power_error, power_error == ESP_OK ? (int)power : -1, (unsigned)up, ip_error,
         atomic_load(&s_diag_connects), disconnects, beacons, atomic_load(&s_diag_reason),
@@ -123,7 +137,11 @@ size_t qdd_wifi_diagnostics(char *out, size_t capacity) {
         atomic_load(&s_diag_alloc_size), atomic_load(&s_diag_alloc_caps),
         atomic_load(&s_diag_tx_hook_error), tx_ok, tx_fail,
         diagnostic_age(now, atomic_load(&s_diag_tx_ms), tx_ok != 0 || tx_fail != 0),
-        atomic_load(&s_diag_heap_hook_error));
+        atomic_load(&s_diag_heap_hook_error), s_tcp_epoch,
+        s_diag_tcp.rx_bytes, s_diag_tcp.tx_bytes, s_diag_tcp.tx_ok, s_diag_tcp.tx_fail,
+        diagnostic_age(now, s_diag_tcp.rx_ms, s_diag_tcp.rx_bytes != 0),
+        diagnostic_age(now, s_diag_tcp.tx_ms, s_diag_tcp.tx_ok != 0 || s_diag_tcp.tx_fail != 0),
+        s_diag_tcp.last_errno, s_diag_tcp.close_reason);
     atomic_flag_clear(&s_diag_busy);
     if (length <= 0 || (size_t)length >= limit) { out[0] = 0; return 0; }
     return (size_t)length;
@@ -153,16 +171,20 @@ bool qdd_wifi_ap(uint8_t index, uint32_t scan_revision, qdd_wifi_ap_t *ap) {
     return current;
 }
 
-void qdd_wifi_close_client(void) {
+static void close_client(unsigned reason) {
     if (s_client >= 0) {
+        s_diag_tcp.close_reason = reason;
         close(s_client);
         s_client = -1;
+        s_client_activity_ms = 0;
         s_tcp_epoch++;
     }
 }
 
+void qdd_wifi_close_client(void) { close_client(TCP_CLOSE_EXTERNAL); }
+
 static void close_listener(void) {
-    qdd_wifi_close_client();
+    close_client(TCP_CLOSE_NETWORK);
     if (s_listener >= 0) { close(s_listener); s_listener = -1; }
 }
 
@@ -487,7 +509,7 @@ static void start_listener(uint32_t address) {
     s_listener = socket_fd;
 }
 
-void qdd_wifi_poll(uint64_t now_ms) {
+void qdd_wifi_poll(uint64_t now_ms, bool tcp_control_owned) {
     if (!s_started) return;
     const uint32_t epoch = atomic_load(&s_network_epoch);
     uint32_t address = atomic_load(&s_address);
@@ -572,12 +594,18 @@ void qdd_wifi_poll(uint64_t now_ms) {
         socklen_t size = sizeof(peer);
         const int accepted = accept(s_listener, (struct sockaddr *)&peer, &size);
         if (accepted >= 0) {
-            if (s_client >= 0 || !qdd_private_ipv4(ntohl(peer.sin_addr.s_addr)) ||
+            if (!qdd_private_ipv4(ntohl(peer.sin_addr.s_addr)) ||
                 fcntl(accepted, F_SETFL, O_NONBLOCK) < 0) close(accepted);
+            else if (s_client >= 0 && (tcp_control_owned || now_ms < s_client_activity_ms ||
+                now_ms - s_client_activity_ms <= QDD_HEARTBEAT_MS)) close(accepted);
             else {
+                // Only a validated new peer can retire a silent, owner-free observer.
+                // Active control keeps its existing fail-close watchdog and cannot be stolen.
+                if (s_client >= 0) close_client(TCP_CLOSE_EXTERNAL);
                 const int one = 1;
                 (void)setsockopt(accepted, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
                 s_client = accepted;
+                s_client_activity_ms = now_ms;
                 s_tcp_epoch++;
                 (void)esp_wifi_set_ps(WIFI_PS_NONE);
             }
@@ -594,16 +622,36 @@ bool qdd_wifi_tcp_live(void) {
 uint32_t qdd_wifi_tcp_epoch(void) { return s_tcp_epoch; }
 
 int qdd_wifi_read(uint8_t *bytes, size_t size) {
-    if (!qdd_wifi_tcp_live()) { qdd_wifi_close_client(); return 0; }
+    if (!qdd_wifi_tcp_live()) { close_client(TCP_CLOSE_NETWORK); return 0; }
     const int count = recv(s_client, bytes, size, MSG_DONTWAIT);
-    if (count > 0) return count;
-    if (count == 0 || (errno != EAGAIN && errno != EWOULDBLOCK)) qdd_wifi_close_client();
+    if (count > 0) {
+        const uint64_t now_ms = (uint64_t)esp_timer_get_time() / 1000u;
+        s_client_activity_ms = now_ms;
+        s_diag_tcp.rx_bytes += (uint32_t)count;
+        s_diag_tcp.rx_ms = (uint32_t)now_ms;
+        return count;
+    }
+    if (count == 0) close_client(TCP_CLOSE_EOF);
+    else if (errno != EAGAIN && errno != EWOULDBLOCK) {
+        s_diag_tcp.last_errno = errno;
+        close_client(TCP_CLOSE_RECV);
+    }
     return 0;
 }
 
 bool qdd_wifi_write(const char *bytes, size_t size) {
-    if (qdd_wifi_tcp_live() && send(s_client, bytes, size, MSG_DONTWAIT) == (ssize_t)size) return true;
+    if (!qdd_wifi_tcp_live()) { close_client(TCP_CLOSE_NETWORK); return false; }
+    const ssize_t sent = send(s_client, bytes, size, MSG_DONTWAIT);
+    const int error = sent < 0 ? errno : 0;
+    s_diag_tcp.tx_ms = diagnostic_now();
+    if (sent > 0) s_diag_tcp.tx_bytes += (uint32_t)sent;
+    if (sent == (ssize_t)size) {
+        s_diag_tcp.tx_ok++;
+        return true;
+    }
+    s_diag_tcp.tx_fail++;
+    s_diag_tcp.last_errno = error;
     // Never queue an input acknowledgement indefinitely or retry a HID command.
-    qdd_wifi_close_client();
+    close_client(TCP_CLOSE_SEND);
     return false;
 }

@@ -1,4 +1,6 @@
 import { isIP } from "node:net";
+import { LanHttpClient } from "./lan-http.js";
+import type { LanHttpOptions } from "./lan-http.js";
 
 /** Registration only advances the connection guide; it never opens an input lease. */
 export function boardSetupOrigin(value: string): string {
@@ -15,10 +17,10 @@ export function boardSetupOrigin(value: string): string {
 }
 
 export function startBoardRegistration(setupUrl: string, port: number,
-  options: { fetch?: typeof globalThis.fetch; intervalMs?: number; timeoutMs?: number } = {}): { close(): Promise<void> } {
+  options: LanHttpOptions & { intervalMs?: number; timeoutMs?: number } = {}): { close(): Promise<void> } {
   const endpoint = new URL("/api/pc", boardSetupOrigin(setupUrl));
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("电脑服务端口无效。");
-  const fetcher = options.fetch ?? globalThis.fetch;
+  const http = new LanHttpClient(endpoint.origin, options);
   let closed = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let active: AbortController | undefined;
@@ -28,7 +30,7 @@ export function startBoardRegistration(setupUrl: string, port: number,
     const timeout = setTimeout(() => active?.abort(), options.timeoutMs ?? 1200);
     timeout.unref();
     try {
-      const response = await fetcher(endpoint, { method: "POST", redirect: "error", signal: active.signal,
+      const response = await http.fetch(endpoint, { method: "POST", redirect: "error", signal: active.signal,
         headers: { "Content-Type": "application/json" }, body: JSON.stringify({ port }) });
       // No registration response is required; cancel it instead of accumulating an unbounded body.
       await response.body?.cancel();
@@ -39,5 +41,5 @@ export function startBoardRegistration(setupUrl: string, port: number,
     }
   };
   pending = register();
-  return { async close() { closed = true; clearTimeout(timer); active?.abort(); await pending; } };
+  return { async close() { closed = true; clearTimeout(timer); active?.abort(); await pending; await http.close(); } };
 }

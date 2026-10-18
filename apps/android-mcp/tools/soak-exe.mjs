@@ -15,6 +15,14 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { JPEG_FIXTURE } from "../dist/fixtures/jpeg.js";
 
 // Everything this soak controls is a loopback fixture. It never opens COM5.
+// Optional long resource window; retain the same bounded fault/recovery phases.
+const args = process.argv.slice(2);
+assert.ok(args.length === 0 || (args.length === 2 && args[0] === "--duration-seconds" && /^\d+$/u.test(args[1])),
+  "Usage: node tools/soak-exe.mjs [--duration-seconds 120..7200]");
+const durationSeconds = args.length ? Number(args[1]) : 120;
+assert.ok(Number.isSafeInteger(durationSeconds) && durationSeconds >= 120 && durationSeconds <= 7200,
+  "Soak duration must be an integer from 120 to 7200 seconds.");
+const durationMs = durationSeconds * 1000;
 const appRoot = fileURLToPath(new URL("../", import.meta.url));
 const output = join(appRoot, "build", "windows");
 const manifest = JSON.parse(await readFile(join(output, "manifest.json"), "utf8"));
@@ -34,6 +42,9 @@ parts.push(JPEG_FIXTURE.subarray(2));
 const jpeg = Buffer.concat(parts); assert.equal(jpeg.length, 150 * 1024);
 const streams = new Set(), sockets = new Set(), clients = [], lanes = [];
 const reports = [], latencies = [], checkpoints = [];
+const memorySamples = [];
+let memoryTimer, memorySampling, resourceError, result, processStartedAt;
+let observer, observerQueries = 0;
 let sourceId = 0, snapshotId = 0, previewProfile = "standard", armed = false, faultNextMove = false, faultObserved = false, child, stderr = "", reader;
 let frames = 0, bytes = 0, lastFrameAt = 0, maxFrameGapMs = 0, screenError;
 let lastPreviewProfile;
@@ -108,6 +119,30 @@ async function waitFor(check, message, timeout = 5000) {
   throw new Error(message);
 }
 let port, origin, baseClient;
+async function sampleMemory(phase) {
+  assert.ok(Number.isSafeInteger(child?.pid) && child.pid > 0);
+  // Query this fixture child only. Never enumerate command lines or environment.
+  const command = `$sampled = Get-Process -Id ${child.pid} -ErrorAction Stop; [pscustomobject]@{pid=$sampled.Id;privateBytes=[int64]$sampled.PrivateMemorySize64;workingSetBytes=[int64]$sampled.WorkingSet64;cpuSeconds=$sampled.CPU} | ConvertTo-Json -Compress`;
+  const sample = await new Promise((done, reject) => {
+    const helper = spawn("C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
+      { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "", error = "";
+    helper.stdout.on("data", (chunk) => { stdout += chunk; });
+    helper.stderr.on("data", (chunk) => { error += chunk; });
+    const timeout = setTimeout(() => { helper.kill(); reject(new Error("Fixture memory sample timed out.")); }, 5000);
+    helper.once("error", (cause) => { clearTimeout(timeout); reject(cause); });
+    helper.once("exit", (code) => {
+      clearTimeout(timeout);
+      if (code !== 0) { reject(new Error(`Fixture memory sample failed: ${error}`)); return; }
+      try { done(JSON.parse(stdout)); } catch (cause) { reject(cause); }
+    });
+  });
+  assert.equal(sample.pid, child.pid);
+  assert.ok(Number.isSafeInteger(sample.privateBytes) && sample.privateBytes > 0);
+  assert.ok(Number.isSafeInteger(sample.workingSetBytes) && sample.workingSetBytes > 0);
+  const measured = { phase, elapsedMs: Math.round(performance.now() - processStartedAt), ...sample };
+  memorySamples.push(measured); return measured;
+}
 async function health() {
   try { return await (await fetch(`${origin}/health`, { signal: AbortSignal.timeout(400) })).json(); } catch { return undefined; }
 }
@@ -165,9 +200,17 @@ try {
   const phonePort = await listen(phone), espPort = await listen(esp); port = await unusedPort(); origin = `http://127.0.0.1:${port}`;
   const config = { ANDROID_SCREEN_URL: `http://127.0.0.1:${phonePort}`, ANDROID_DEVICE_ID: deviceId, ESP_HOST: "127.0.0.1", ESP_TCP_PORT: String(espPort), ESP_PORT: "COM5", ANDROID_MCP_PORT: String(port) };
   const configPath = join(temporary, "fixture.json"); await writeFile(configPath, JSON.stringify(config));
+  processStartedAt = performance.now();
   child = spawn(executable, ["--no-browser", "--config", configPath], { cwd: directory, env: { ...process.env, PATH: "", Path: "", NODE_PATH: "", LOCALAPPDATA: join(temporary, "cache") }, windowsHide: true, stdio: "pipe" });
   child.stderr.on("data", (bytes) => { stderr += bytes; }); child.stdout.resume();
   await waitFor(async () => (await health())?.desktopBuildId === manifest.buildId, `EXE did not start: ${stderr}`);
+  await sampleMemory("startup");
+  memoryTimer = setInterval(() => {
+    if (memorySampling) return;
+    memorySampling = sampleMemory("interval").then((memory) => {
+      console.log(JSON.stringify({ progress: true, buildId: manifest.buildId, durationSeconds, frames, acknowledgedReports: latencies.length, observerQueries, memory }));
+    }).catch((error) => { resourceError = error; }).finally(() => { memorySampling = undefined; });
+  }, 30000);
   const video = await fetch(`${origin}/screen/stream`); assert.equal(video.status, 200); reader = video.body.getReader();
   const consume = (async () => {
     let buffered = Buffer.alloc(0);
@@ -209,10 +252,26 @@ try {
     assert.equal(armed, true); assert.equal(inputOperations(), ownerOperations, "Preview quality cannot claim or pause the realtime input owner.");
   }
   checkpoints.push({ phase: "four preview profiles preserve the active owner and original MCP captures", frames, snapshots: snapshotId });
+  observer = new Client({ name: "exe-soak-observer", version: "1" }); clients.push(observer);
+  await observer.connect(new StreamableHTTPClientTransport(new URL(`${origin}/mcp`)));
   const started = performance.now(), elapsed = () => performance.now() - started;
-  const activeUntil = async (deadline) => { while (elapsed() < deadline) { if (screenError) throw screenError; await burst(lane); await delay(80); } };
+  let nextObservation = 0;
+  const activeUntil = async (deadline) => {
+    while (elapsed() < deadline) {
+      if (screenError || resourceError) throw screenError || resourceError;
+      await burst(lane);
+      if (elapsed() >= nextObservation) {
+        const statusRequests = reports.filter(({ op }) => op === "STATUS").length;
+        assert.equal(toolResult(await observer.callTool({ name: "android_hid_status" })).input.armed, true);
+        assert.equal(reports.filter(({ op }) => op === "STATUS").length, statusRequests,
+          "A recent active ACK must satisfy the independent observer without a wire STATUS barrier.");
+        observerQueries += 1; nextObservation = elapsed() + 1000;
+      }
+      await delay(80);
+    }
+  };
   await activeUntil(45000); checkpoints.push({ phase: "45s video + four-report bursts", frames, reports: reports.length });
-  while (elapsed() < 60000) { if (screenError) throw screenError; await delay(100); }
+  while (elapsed() < 60000) { if (screenError || resourceError) throw screenError || resourceError; await delay(100); }
   assert.ok((await baseClient.listTools()).tools.length >= 20);
   assert.equal(toolResult(await baseClient.callTool({ name: "android_hid_status" })).input.armed, true);
   checkpoints.push({ phase: "15s idle: MCP session and WebSocket lease remain live", frames });
@@ -226,31 +285,45 @@ try {
   await lane.close(); lane = await openLane(); await burst(lane);
   assert.equal(reports.filter((item) => item.op === "MOVE" && item.args[0] === 117).length, 1);
   checkpoints.push({ phase: "TCP drops before ACK: failed movement never replayed, fresh connection recovered", frames });
-  await activeUntil(120000);
-  if (screenError) throw screenError;
-  assert.ok(frames >= 2500, `Too few continuous large frames: ${frames}`);
-  assert.ok(latencies.length >= 4000, `Too few realtime acknowledged reports: ${latencies.length}`);
+  await activeUntil(durationMs);
+  if (screenError || resourceError) throw screenError || resourceError;
+  assert.ok(frames >= 2500 * durationSeconds / 120, `Too few continuous large frames: ${frames}`);
+  assert.ok(latencies.length >= 4000 * (durationSeconds - 15) / 105, `Too few realtime acknowledged reports: ${latencies.length}`);
   assert.equal(reports.filter((item) => item.op === "MOVE" && item.args[0] === 117).length, 1);
   assert.equal(toolResult(await baseClient.callTool({ name: "android_hid_status" })).input.armed, true);
+  clearInterval(memoryTimer); await memorySampling; await sampleMemory("end");
+  const measuredDuration = elapsed();
   await lane.close(); aborted = true; await reader.cancel(); await consume;
   latencies.sort((a, b) => a - b);
-  const result = { status: "pass", buildId: manifest.buildId, sha256: manifest.sha256, durationMs: Math.round(elapsed()),
-    jpegBytes: jpeg.length, sourceTargetFps: 30, emittedSourceFrames: sourceId, requestedOriginalSnapshots: snapshotId, receivedFrames: frames, receivedImageBytes: bytes, receivedFps: frames / (elapsed() / 1000), maxFrameGapMs,
+  const warmupIndex = Math.max(0, memorySamples.findIndex((sample) => sample.elapsedMs >= 60000));
+  const warmup = memorySamples[warmupIndex], ending = memorySamples.at(-1);
+  result = { status: "pass", buildId: manifest.buildId, sha256: manifest.sha256, requestedDurationSeconds: durationSeconds, durationMs: Math.round(measuredDuration),
+    jpegBytes: jpeg.length, sourceTargetFps: 30, emittedSourceFrames: sourceId, requestedOriginalSnapshots: snapshotId, receivedFrames: frames, receivedImageBytes: bytes, receivedFps: frames / (measuredDuration / 1000), maxFrameGapMs,
     acknowledgedReports: latencies.length, fixtureAckMs: { median: latencies[Math.floor(latencies.length / 2)], p95: latencies[Math.floor(latencies.length * 0.95)], max: latencies.at(-1) },
+    observerQueries, memory: { sampleIntervalMs: 30000, warmupSampleIndex: warmupIndex, privateDeltaAfterWarmupBytes: ending.privateBytes - warmup.privateBytes,
+      workingSetDeltaAfterWarmupBytes: ending.workingSetBytes - warmup.workingSetBytes, samples: memorySamples },
     checkpoints, realDeviceInput: false, timestamp: new Date().toISOString() };
-  await writeFile(join(output, "exe-soak.json"), `${JSON.stringify(result, null, 2)}\n`); console.log(JSON.stringify(result));
 } catch (error) {
-  await writeFile(join(output, "exe-soak-failure.json"), `${JSON.stringify({ error: error.message, frames, reports: reports.length, checkpoints, stderr, realDeviceInput: false }, null, 2)}\n`); throw error;
+  await writeFile(join(output, "exe-soak-failure.json"), `${JSON.stringify({ error: error.message, durationSeconds, frames, reports: reports.length, observerQueries, memorySamples, checkpoints, stderr, realDeviceInput: false }, null, 2)}\n`); throw error;
 } finally {
+  clearInterval(memoryTimer); await memorySampling;
   aborted = true; await reader?.cancel().catch(() => {});
   await Promise.allSettled(lanes.map((lane) => lane.close()));
   await Promise.allSettled(clients.map((client) => client.close()));
   if ((await health())?.desktopBuildId === manifest.buildId) await fetch(`${origin}/desktop/quit`, { method: "POST" }).catch(() => {});
   if (child && child.exitCode === null) await Promise.race([once(child, "exit"), delay(3000)]);
-  if (child?.exitCode === null) { child.kill(); await once(child, "exit"); }
+  let forcedTermination = false;
+  if (child?.exitCode === null) { forcedTermination = true; child.kill(); await once(child, "exit"); }
   for (const stream of streams) stream.destroy(); for (const socket of sockets) socket.destroy();
   await Promise.all([new Promise((done) => phone.close(done)), new Promise((done) => esp.close(done))]);
   const target = resolve(temporary), allowed = `${resolve(output)}${sep}`;
   if (!target.toLowerCase().startsWith(allowed.toLowerCase()) || !basename(target).startsWith("soak-")) throw new Error("Refusing to clean a non-fixture directory.");
   await rm(target, { recursive: true, force: true });
+  if (result) {
+    result.cleanup = { childExited: child?.exitCode !== null, exitCode: child?.exitCode, forcedTermination, fixtureDirectoryRemoved: true,
+      remainingPhoneStreams: streams.size, remainingEspSockets: sockets.size, phoneServerListening: phone.listening, espServerListening: esp.listening };
+    assert.equal(result.cleanup.childExited, true); assert.equal(forcedTermination, false);
+    assert.equal(streams.size, 0); assert.equal(sockets.size, 0);
+    await writeFile(join(output, "exe-soak.json"), `${JSON.stringify(result, null, 2)}\n`); console.log(JSON.stringify(result));
+  }
 }

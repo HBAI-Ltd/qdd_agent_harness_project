@@ -74,7 +74,7 @@ export class FixtureBridge implements SerialBridge {
       this.blocked = undefined;
       blocked.started();
       await new Promise<void>((resolveWait, rejectWait) => {
-        const abort = () => { cleanup(); rejectWait(new Error("Fixture HID report cancelled.")); };
+        const abort = () => { cleanup(); rejectWait(new Error("HID operation cancelled.", { cause: signal?.reason })); };
         const cleanup = () => signal?.removeEventListener("abort", abort);
         signal?.addEventListener("abort", abort, { once: true });
         blocked.wait.then(() => { cleanup(); resolveWait(); }, (error: unknown) => { cleanup(); rejectWait(error); });

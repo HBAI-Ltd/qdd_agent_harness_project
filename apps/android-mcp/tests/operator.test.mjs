@@ -62,6 +62,7 @@ function fixture(runtimeVersion = serverRuntimeVersion, options = {}) {
         }
       },
       getBoundingClientRect() { layoutReads++; return bounds; },
+      scrollIntoView(options) { this.scrollOptions = options; },
       addEventListener(type, callback) { add(this.listeners, type, callback); },
       requestPointerLock() {
         lockRequests++; requests.push({ url: "pointer-lock" });
@@ -327,6 +328,7 @@ test("one picture click enters remote control without forwarding the entering cl
   assert.equal(app.remoteActive, true);
   app.input("mousemove", { clientX: 135, clientY: 300, movementX: 10, movementY: -5 }); await app.pump();
   assert.equal(app.element("phone-screen").focusOptions.preventScroll, true);
+  assert.equal(app.element("screen-stage").scrollOptions?.block, "center", "Entry must bring the whole picture into view before capturing input.");
   app.input("mousedown", { clientX: 202.5, clientY: 450, buttons: 1 });
   app.input("mouseup", { clientX: 202.5, clientY: 450, buttons: 0 }); await app.pump();
   assert.deepEqual(app.reports.map(({ dx, dy, buttons }) => [dx, dy, buttons]), [[40, -20, 0], [0, 0, 1], [0, 0, 0]]);
@@ -336,6 +338,34 @@ test("one picture click enters remote control without forwarding the entering cl
   assert.equal(app.calls.filter(({ name }) => name === "android_screenshot").length, 1);
   assert.equal(app.requests.filter(({ url, method }) => url === "/remote/lease" && method === "POST").length, 1);
   await app.close();
+});
+
+test("a focused live picture accepts Enter or Space without sending the activation key to the phone", async () => {
+  for (const code of ["Enter", "Space"]) {
+    const app = fixture(); await flush(); app.frame(); await flush();
+    app.element("phone-screen").focus({ preventScroll: true });
+    app.input("keydown", { code, repeat: false }); await flush();
+    assert.equal(app.remoteActive, true, `${code} must use the same remote entry as a picture click`);
+    assert.equal(app.lockRequests, 1);
+    app.input("keydown", { code, repeat: true });
+    app.input("keyup", { code }); await app.pump();
+    assert.equal(app.calls.filter(({ name }) => name === "android_key_report").length, 0,
+      "The key used to enter remote control must remain on the computer.");
+    app.input("keydown", { code, repeat: false }); app.input("keyup", { code }); await app.pump();
+    assert.deepEqual(app.calls.filter(({ name }) => name === "android_key_report").map(({ args }) => args.keycode),
+      [code === "Enter" ? 0x28 : 0x2c, 0]);
+    app.escape(); await flush(); assert.equal(app.remoteActive, false); await app.close();
+  }
+});
+
+test("keyboard remote entry requires focused fresh picture and does not steal toolbar keys", async () => {
+  const app = fixture(); await flush();
+  app.element("phone-screen").focus(); app.input("keydown", { code: "Enter", repeat: false }); await flush();
+  assert.equal(app.calls.filter(({ name }) => name === "android_hid_arm").length, 0);
+  app.frame(); await flush(); app.element("typing-input").focus();
+  app.input("keydown", { code: "Space", repeat: false }); await flush();
+  assert.equal(app.calls.filter(({ name }) => name === "android_hid_arm").length, 0);
+  assert.equal(app.remoteActive, false); await app.close();
 });
 
 test("a LAN page displays the advertised access address and derives its realtime socket from that origin", async () => {

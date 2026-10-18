@@ -28,7 +28,8 @@ const children = [], clients = [], ownedPorts = new Set(), streams = new Set(), 
 const records = new Map();
 const additionalServers = new Set();
 const deviceId = "11111111-1111-4111-8111-111111111111";
-let sourceSequence = 0, snapshotRequests = 0, previewProfile = "standard", armed = false, bleReady = true;
+let sourceSequence = 0, snapshotRequests = 0, previewProfile = "standard", armed = false, bleReady = true, heldKey = 0;
+let holdNextStatus = false, delayedStatus;
 const reports = [];
 const profiles = ["turbo", "fast", "standard", "original"];
 const previewImages = Object.fromEntries(profiles.map((profile) => {
@@ -96,8 +97,13 @@ const esp = createTcpServer((socket) => {
       const [, id, op, args] = match;
       reports.push({ op, args: args.trim().split(" ").filter(Boolean).map(Number) });
       if (op === "ARM") armed = true; if (op === "PAUSE") armed = false;
-      socket.write(`QDDHID/1 ${id} OK ${JSON.stringify({ v: 1, connected: true, encrypted: true, bonded: true,
-        ready: bleReady, locked: false, armed, name: "EXE fixture BLE" })}\n`);
+      if (op === "KEY") heldKey = Number(args.trim().split(" ")[1]);
+      if (op === "RELEASE") heldKey = 0;
+      const status = { v: 1, connected: true, encrypted: true, bonded: true,
+        ready: bleReady, locked: false, armed, name: "EXE fixture BLE" };
+      const reply = (overrides = {}) => socket.write(`QDDHID/1 ${id} OK ${JSON.stringify({ ...status, ...overrides })}\n`);
+      if (op === "STATUS" && holdNextStatus) { holdNextStatus = false; delayedStatus = reply; continue; }
+      reply();
     }
   });
 });
@@ -170,6 +176,38 @@ try {
   clients.push(client);
   await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`)));
   assert.ok((await client.listTools()).tools.some((tool) => tool.name === "android_control"));
+  const coldObserver = new Client({ name: "exe-cold-readonly-observer", version: "1" }); clients.push(coldObserver);
+  let cancellationDelivered = false;
+  await coldObserver.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`), {
+    fetch: async (url, init) => {
+      const notification = typeof init?.body === "string" && JSON.parse(init.body).method === "notifications/cancelled";
+      const response = await fetch(url, init);
+      if (notification) { assert.equal(response.status, 202); cancellationDelivered = true; }
+      return response;
+    },
+  }));
+  // Another physical controller may hold input while this service only observes.
+  // The fake hardware models that owner without allowing the EXE to claim it.
+  armed = true; heldKey = 4;
+  const coldStart = reports.length, statusAbort = new AbortController();
+  holdNextStatus = true; delayedStatus = undefined;
+  const cancelledStatus = coldObserver.callTool({ name: "android_hid_status" }, undefined, { signal: statusAbort.signal });
+  void cancelledStatus.catch(() => {});
+  await waitFor(() => Boolean(delayedStatus), "Cold observer STATUS did not reach the fake ESP.");
+  statusAbort.abort(new Error("Cancel only the read-only observer."));
+  await assert.rejects(cancelledStatus, /Cancel only the read-only observer/);
+  await waitFor(() => cancellationDelivered, "Official SDK cancellation notification did not reach the packaged server.");
+  const coldStatus = metadata(await client.callTool({ name: "android_hid_status" })).value;
+  assert.equal(coldStatus.armed, true); assert.equal(coldStatus.input.armed, false);
+  delayedStatus({ armed: false }); delayedStatus = undefined;
+  const currentStatus = metadata(await client.callTool({ name: "android_hid_status" })).value;
+  assert.equal(currentStatus.armed, true); assert.equal(currentStatus.input.armed, false);
+  assert.equal(armed, true); assert.equal(heldKey, 4);
+  assert.ok(reports.slice(coldStart).every(({ op }) => op === "STATUS"),
+    "Cancelling a cold observer and receiving its stale ACK must not claim, arm or release another controller.");
+  await coldObserver.close();
+  armed = false; heldKey = 0;
+  results.push({ name: "official SDK cancels a real pending cold STATUS, ignores its late ACK and preserves another controller without PING or cleanup", pass: true });
   const before = metadata(await client.callTool({ name: "android_screenshot" }));
   const image = before.parsed.content.find((entry) => entry.type === "image");
   assert.deepEqual(Buffer.from(image.data, "base64"), JPEG_FIXTURE);
@@ -239,6 +277,25 @@ try {
   } finally { clearTimeout(profileDeadline); previewAbort.abort(); await previewReader.cancel().catch(() => {}); previewReader.releaseLock(); }
   assert.equal(armed, true, "Closing a preview viewer must not release the active owner.");
   results.push({ name: "packaged four-profile preview persists settings without claiming input; every MCP screenshot captures a fresh original JPEG", pass: true });
+  const observer = new Client({ name: "exe-readonly-observer", version: "1" }); clients.push(observer);
+  await observer.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`)));
+  metadata(await client.callTool({ name: "android_hid_arm" }));
+  metadata(await client.callTool({ name: "android_key_report", arguments: { modifier: 0, keycode: 4 } }));
+  assert.equal(heldKey, 4);
+  const ownerStart = reports.length;
+  const preserved = metadata(await observer.callTool({ name: "android_hid_status" })).value;
+  assert.equal(preserved.armed, true); assert.equal(preserved.input.armed, true);
+  assert.equal(armed, true); assert.equal(heldKey, 4);
+  assert.equal(reports.slice(ownerStart).some(({ op }) => ["STATUS", "RELEASE", "PAUSE"].includes(op)), false,
+    "An active owner's recent heartbeat state must not inject an exclusive STATUS or release its held key.");
+  const continued = metadata(await client.callTool({ name: "android_key_report", arguments: { modifier: 0, keycode: 5 } })).value;
+  assert.equal(continued.armed, true); assert.equal(heldKey, 5);
+  assert.equal(reports.slice(ownerStart).some(({ op }) => ["RELEASE", "PAUSE"].includes(op)), false,
+    "A cached observer read must not retire or pause the owner's input round.");
+  metadata(await client.callTool({ name: "android_key_report", arguments: { modifier: 0, keycode: 0 } }));
+  assert.equal(heldKey, 0);
+  await observer.close();
+  results.push({ name: "two official SDK clients: active STATUS reads recent heartbeat state without a wire barrier and preserves held key plus next input", pass: true });
   await client.close();
   const streamCount = streams.size;
   const duplicate = start(["--no-browser", "--config", configPath]);

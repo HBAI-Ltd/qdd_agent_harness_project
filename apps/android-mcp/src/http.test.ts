@@ -6,6 +6,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { test } from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import { readPngDimensions } from "./adb.js";
@@ -154,6 +155,39 @@ test("real private-LAN HTTP, CORS preflight and official MCP SDK access share th
     assert.equal(await responseStatus(`${base}health`, { method: "GET", headers }), 403);
   }
   assert.deepEqual(fixture.bridge.records, []); assert.deepEqual(fixture.adb.captures, []);
+});
+
+test("completed MCP HTTP requests release SDK streams while the session stays connected", async (context) => {
+  const fixture = createFixture();
+  const listener = await startHttpMcp(fixture.tools, { port: 0 });
+  const client = new Client({ name: "http-resource-lifecycle", version: "1" });
+  const original = StreamableHTTPServerTransport.prototype.handleRequest;
+  let observed: StreamableHTTPServerTransport | undefined;
+  StreamableHTTPServerTransport.prototype.handleRequest = function (...args) {
+    observed = this;
+    return original.apply(this, args);
+  };
+  context.after(async () => {
+    StreamableHTTPServerTransport.prototype.handleRequest = original;
+    await client.close();
+    await listener.close();
+  });
+  await client.connect(new StreamableHTTPClientTransport(new URL(listener.url)) as unknown as Transport);
+  for (let index = 0; index < 100; index++) assert.ok((await client.listTools()).tools.length > 0);
+  assert.ok(observed);
+  // Only this resource regression inspects the pinned SDK's private maps. The
+  // session's optional standalone GET may remain; completed POSTs may not.
+  const state = (observed as unknown as { _webStandardTransport: {
+    _streamMapping: Map<string, unknown>; _requestToStreamMapping: Map<string | number, string>;
+    _requestResponseMap: Map<string | number, unknown>; _standaloneSseStreamId: string;
+  } })._webStandardTransport;
+  assert.ok(state._streamMapping.size <= 1, `Completed POST streams retained: ${state._streamMapping.size}`);
+  assert.ok([...state._streamMapping.keys()].every((id) => id === state._standaloneSseStreamId), "Only the standalone GET stream may remain.");
+  assert.equal(state._requestToStreamMapping.size, 0);
+  assert.equal(state._requestResponseMap.size, 0);
+  context.diagnostic(`Completed POST streams: 0; standalone GET streams: ${state._streamMapping.size}; request/response maps: 0.`);
+  assert.deepEqual(fixture.bridge.records, []);
+  assert.deepEqual(fixture.adb.captures, []);
 });
 
 test("HTTP health, unknown route, method and malformed/oversized body handling", async (context) => {
@@ -771,7 +805,7 @@ test("an aborted raw tools POST stops active and queued HID while SDK SSE stays 
       "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
     body: JSON.stringify({ jsonrpc: "2.0", id: "raw-aborted-action", method: "tools/call",
       params: { name: "android_type", arguments: { text: "abcdef" } } }), signal: abort.signal,
-  });
+  }).then((response) => response.arrayBuffer());
   const rejected = assert.rejects(active, { name: "AbortError" });
   await blocked.started;
   let entered!: () => void;
@@ -1097,6 +1131,83 @@ test("closing an older MCP input session cannot stop its newer input owner", asy
   await waitUntil(() => !fixture.input.state.armed, "Closing the actual input owner must still stop input.");
 });
 
+test("batched MCP input cannot bypass per-request ownership and cancellation guards", async (context) => {
+  const fixture = createFixture();
+  const listener = await startHttpMcp(fixture.tools, { port: 0 });
+  const client = new Client({ name: "batch-input-contract", version: "1" });
+  const transport = new StreamableHTTPClientTransport(new URL(listener.url));
+  context.after(async () => { await client.close(); await listener.close(); });
+  await client.connect(transport as unknown as Transport);
+  const response = await fetch(listener.url, { method: "POST", headers: {
+    "Mcp-Session-Id": transport.sessionId!, "Content-Type": "application/json", Accept: "application/json, text/event-stream",
+  }, body: JSON.stringify([
+    { jsonrpc: "2.0", id: "batch-arm", method: "tools/call", params: { name: "android_hid_arm" } },
+    { jsonrpc: "2.0", id: "batch-key", method: "tools/call", params: { name: "android_key_report", arguments: { modifier: 0, keycode: 4 } } },
+  ]) });
+  await response.arrayBuffer();
+  assert.equal(response.status, 400, "Every accepted input call must pass one HTTP ownership/cancellation scope.");
+  assert.deepEqual(fixture.bridge.records, []);
+  assert.equal(fixture.input.state.armed, false);
+  assert.ok((await client.listTools()).tools.length > 0);
+});
+
+test("a duplicate active tool id cannot overwrite the original HTTP cancellation scope", async (context) => {
+  const fixture = createFixture();
+  const listener = await startHttpMcp(fixture.tools, { port: 0 });
+  const client = new Client({ name: "duplicate-request-scope", version: "1" });
+  const transport = new StreamableHTTPClientTransport(new URL(listener.url));
+  context.after(async () => { await client.close(); await listener.close(); });
+  await client.connect(transport as unknown as Transport);
+  jsonResult(await client.callTool({ name: "android_hid_arm" }));
+  const blocked = fixture.bridge.blockNext("KEY");
+  context.after(() => blocked.release());
+  const abort = new AbortController();
+  const headers = { "Mcp-Session-Id": transport.sessionId!, "Content-Type": "application/json", Accept: "application/json, text/event-stream" };
+  const old = fetch(listener.url, { method: "POST", headers, body: JSON.stringify({ jsonrpc: "2.0", id: "duplicate",
+    method: "tools/call", params: { name: "android_key_report", arguments: { modifier: 0, keycode: 4 } } }), signal: abort.signal })
+    .then((response) => response.arrayBuffer());
+  const rejected = assert.rejects(old, { name: "AbortError" });
+  await blocked.started;
+  const duplicate = await fetch(listener.url, { method: "POST", headers, body: JSON.stringify({ jsonrpc: "2.0", id: "duplicate",
+    method: "tools/call", params: { name: "android_hid_arm" } }) });
+  await duplicate.arrayBuffer();
+  assert.equal(duplicate.status, 409);
+  abort.abort(); await rejected;
+  await waitUntil(() => !fixture.input.state.armed, "The original request must retain cancellation authority.");
+  assert.equal(fixture.bridge.records.filter(({ op }) => op === "ARM").length, 1);
+});
+
+test("an old input POST closing cannot cancel a newer ARM reserved by the same MCP session", async (context) => {
+  const fixture = createFixture();
+  const listener = await startHttpMcp(fixture.tools, { port: 0 });
+  const client = new Client({ name: "same-session-arm-after-lost-post", version: "1" });
+  const transport = new StreamableHTTPClientTransport(new URL(listener.url));
+  context.after(async () => { await client.close(); await listener.close(); });
+  await client.connect(transport as unknown as Transport);
+  jsonResult(await client.callTool({ name: "android_hid_arm" }));
+  const blocked = fixture.bridge.blockNext("KEY");
+  context.after(() => blocked.release());
+  const abort = new AbortController();
+  const old = fetch(listener.url, { method: "POST", headers: {
+    "Mcp-Session-Id": transport.sessionId!, "Content-Type": "application/json", Accept: "application/json, text/event-stream",
+  }, body: JSON.stringify({ jsonrpc: "2.0", id: "old-held-key", method: "tools/call",
+    params: { name: "android_key_report", arguments: { modifier: 0, keycode: 4 } } }), signal: abort.signal })
+    .then((response) => response.arrayBuffer());
+  const rejected = assert.rejects(old, { name: "AbortError" });
+  await blocked.started;
+  let entered!: () => void;
+  const reserved = new Promise<void>((resolve) => { entered = resolve; });
+  const arm = fixture.input.arm.bind(fixture.input);
+  fixture.input.arm = (...args) => { const task = arm(...args); entered(); return task; };
+  const newer = client.callTool({ name: "android_hid_arm" });
+  await reserved;
+  abort.abort(); await rejected;
+  jsonResult(await newer);
+  assert.equal(fixture.input.state.armed, true);
+  jsonResult(await client.callTool({ name: "android_key_report", arguments: { modifier: 0, keycode: 5 } }));
+  assert.deepEqual(fixture.bridge.records.filter(({ op }) => op === "KEY").map(({ args }) => args), [[0, 4], [0, 5]]);
+});
+
 test("aborting a read-only tools POST cannot pause another MCP input owner", async (context) => {
   const fixture = createFixture();
   const listener = await startHttpMcp(fixture.tools, { port: 0 });
@@ -1114,7 +1225,7 @@ test("aborting a read-only tools POST cannot pause another MCP input owner", asy
   const pending = fetch(listener.url, { method: "POST", headers: {
     "Mcp-Session-Id": inspectorTransport.sessionId!, "Content-Type": "application/json", Accept: "application/json, text/event-stream",
   }, body: JSON.stringify({ jsonrpc: "2.0", id: "read-only-post", method: "tools/call", params: { name: "android_hid_status" } }),
-    signal: abort.signal });
+    signal: abort.signal }).then((response) => response.arrayBuffer());
   const rejected = assert.rejects(pending, { name: "AbortError" });
   await blocked.started;
   const before = fixture.bridge.records.length;

@@ -72,12 +72,16 @@ static const char *notice(const char *feedback) {
     return "操作未完成，请重试";
 }
 
-qdd_ui_view_t qdd_ui_model(const qdd_hid_state_t *state, bool usb_connected,
+static bool controller_online(const qdd_hid_state_t *state, bool transport_live, uint64_t now_ms) {
+    return transport_live && state->heartbeat_seen && now_ms >= state->last_ping_ms &&
+        now_ms - state->last_ping_ms <= QDD_HEARTBEAT_MS;
+}
+
+static qdd_ui_view_t status_model(const qdd_hid_state_t *state, bool computer_online,
                           bool pairing_open, bool passkey_visible, uint32_t passkey,
                           uint64_t now_ms, const char *feedback, uint64_t feedback_ms) {
     qdd_ui_view_t view = {0};
-    view.computer_online = usb_connected && state->heartbeat_seen &&
-        now_ms >= state->last_ping_ms && now_ms - state->last_ping_ms <= QDD_HEARTBEAT_MS;
+    view.computer_online = computer_online;
     view.phone_secure = state->connected && state->encrypted && state->authenticated && state->bonded;
     view.computer = view.computer_online ? "电脑已连接" : "电脑未连接";
     view.phone = view.phone_secure ? "手机已连接" :
@@ -120,15 +124,37 @@ qdd_ui_view_t qdd_ui_model(const qdd_hid_state_t *state, bool usb_connected,
     return view;
 }
 
+qdd_ui_view_t qdd_ui_model(const qdd_hid_state_t *state, bool usb_connected,
+                          bool pairing_open, bool passkey_visible, uint32_t passkey,
+                          uint64_t now_ms, const char *feedback, uint64_t feedback_ms) {
+    return status_model(state, controller_online(state, usb_connected, now_ms),
+        pairing_open, passkey_visible, passkey, now_ms, feedback, feedback_ms);
+}
+
+static void projection_view(qdd_ui_view_t *view, bool phone_fresh) {
+    view->stage = QDD_UI_COMPUTER;
+    view->wait_projection = true;
+    view->title = phone_fresh ? "分享手机画面" : "打开手机投屏";
+    view->detail = phone_fresh ? "手机App点开始投屏" : "返回App恢复连接";
+    view->next = phone_fresh ? "同意共享后启动电脑" : "连接后点开始投屏";
+}
+
 qdd_ui_view_t qdd_ui_onboarding_model(const qdd_hid_state_t *state, bool computer_live,
                           bool pairing_open, bool passkey_visible, uint32_t passkey,
                           uint64_t now_ms, const char *feedback, uint64_t feedback_ms,
                           const qdd_ui_onboarding_t *onboarding) {
-    qdd_ui_view_t view = qdd_ui_model(state, computer_live, pairing_open, passkey_visible,
-                                    passkey, now_ms, feedback, feedback_ms);
+    // The console registers before it claims HID control. Show that real,
+    // bounded registration without modifying the control lease or HID state.
+    qdd_ui_view_t view = status_model(state,
+        onboarding->pc_fresh || controller_online(state, computer_live, now_ms),
+        pairing_open, passkey_visible, passkey, now_ms, feedback, feedback_ms);
     if (state->locked) return view;
     if (onboarding->completed) {
         view.onboarding_step = 6;
+        if (view.stage == QDD_UI_ENABLED && onboarding->phone_seen && !onboarding->skip_app &&
+            (!onboarding->phone_fresh || !onboarding->projecting)) {
+            projection_view(&view, onboarding->phone_fresh);
+        }
         return view; // Real link/lease state remains visible on the normal page.
     }
     // A working earlier installation remains usable without repeating setup.
@@ -157,12 +183,8 @@ qdd_ui_view_t qdd_ui_onboarding_model(const qdd_hid_state_t *state, bool compute
         view.detail = view.phone_secure ? "手机正在准备键盘鼠标" : "在手机蓝牙中选择";
         view.next = view.phone_secure ? "请稍候" : pairing_open ? "按手机提示完成配对" : "设置中选择手机蓝牙配对";
     } else if ((!onboarding->phone_fresh || !onboarding->projecting) && !onboarding->skip_app) {
-        view.stage = QDD_UI_COMPUTER;
+        projection_view(&view, onboarding->phone_fresh);
         view.onboarding_step = 5;
-        view.wait_projection = true;
-        view.title = onboarding->phone_fresh ? "分享手机画面" : "打开手机投屏";
-        view.detail = onboarding->phone_fresh ? "手机App点开始投屏" : "返回App恢复连接";
-        view.next = onboarding->phone_fresh ? "同意共享后启动电脑" : "连接后点开始投屏";
     } else if (!view.computer_online) {
         view.stage = QDD_UI_COMPUTER;
         view.onboarding_step = 5;

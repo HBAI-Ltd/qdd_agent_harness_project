@@ -19,13 +19,19 @@ void qdd_wifi_allow_reconnect(bool enabled);
 esp_err_t qdd_wifi_save(const qdd_wifi_credentials_t *credentials);
 esp_err_t qdd_wifi_clear(void);
 esp_err_t qdd_wifi_retry(void);
-void qdd_wifi_poll(uint64_t now_ms);
+// Control worker only. A valid new peer may replace a silent observer, never a TCP owner.
+void qdd_wifi_poll(uint64_t now_ms, bool tcp_control_owned);
 qdd_wifi_view_t qdd_wifi_view(void);
 // Control worker only; ASCII JSON without credentials, no newline. Returns 0
 // with an empty output on insufficient capacity/busy. Arrays: rssi/ch/ps=[err,value],
 // ev=[connected,disconnected,beaconTimeout,lastReason,disconnectAge,beaconAge],
 // heap=[free,minFree,largest], oom=[count,lastSize,lastCaps],
-// tx=[hookErr,ok,fail,lastAge]. Ages are milliseconds; -1 means unavailable.
+// tx=[hookErr,ok,fail,lastAge],
+// tcp=[epoch,rxBytes,txBytes,fullWrites,failedWrites,rxAge,txAge,lastErrno,lastClose].
+// TCP counts are cumulative; fullWrites means accepted by the socket, not delivered.
+// lastClose: 0=none,1=external/safety,2=network,3=EOF,4=recv error,5=send failure.
+// Successful I/O/accept preserves the last socket failure and close reason.
+// Ages are milliseconds; -1 means unavailable. No payload or credentials.
 size_t qdd_wifi_diagnostics(char *out, size_t capacity);
 // Keep task/HTTP snapshots small; copy only a requested scan entry under lock.
 bool qdd_wifi_ap(uint8_t index, uint32_t scan_revision, qdd_wifi_ap_t *ap);

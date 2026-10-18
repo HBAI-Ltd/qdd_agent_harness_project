@@ -63,3 +63,18 @@ CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=8
 CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=8
 CONFIG_ESP_WIFI_AMPDU_RX_ENABLED=n
 CONFIG_ESP_WIFI_AMPDU_TX_ENABLED=n
+# C3 shares SRAM between IRAM code and the internal heap. Keep Wi-Fi's speed
+# optimizations in flash: the board carries HID and a small installation APK,
+# while phone video goes directly to the PC. IDF's per-option savings estimates
+# are not additive; matching v27 ELF reclaimed 19,456 bytes of shared SRAM.
+# Verify the actual ELF/heap margin for each delivered build.
+CONFIG_ESP_WIFI_IRAM_OPT=n
+CONFIG_ESP_WIFI_RX_IRAM_OPT=n
+# Initial TCP retransmission must have a recovery opportunity before the PC's
+# unchanged 1200ms ACK deadline and the board's unchanged 1500ms watchdog.
+# This is the global initial RTO; normal RTT estimation/backoff remain enabled.
+CONFIG_LWIP_TCP_RTO_TIME=1000
+# Finer RTT ticks avoid the 500ms estimator rounding floor returning to 1500ms
+# after a single cross-tick sample. Applies to all TCP, including HTTP: fast/slow
+# callbacks become 8/4 per second instead of 4/2, with normal adaptive backoff.
+CONFIG_LWIP_TCP_TMR_INTERVAL=125

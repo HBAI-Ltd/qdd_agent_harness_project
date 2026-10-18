@@ -8,7 +8,486 @@
 download investigation and speculative changes stop. This record follows that actual-use feedback.
 Earlier PC curl/Node and ADB-launched phone curl probes timed out or truncated; those results only
 describe the specific probes and do not establish a failure in the user's browser/App download flow.
-Their original logs remain for traceability. No further download changes or tests will follow from these probes.
+Their original logs remain for traceability. That stop request applies to the earlier speculative incident.
+The later new-controller LAN report authorizes the bounded transfer verification recorded in v26:
+its APK download and hash pass, with no APK source changes. This is not proof of phone installation.
+
+## v38 Idle-observer connection recovery — focused device checks PASS, full product not accepted
+
+2026-10-18: New device evidence closes the earlier stale-slot diagnosis: a source-bound new TCP
+connection completes its handshake and sends STATUS, then receives FIN/RST without a reply, while
+the board's TCP epoch/RX/TX counters remain unchanged. A held, silent observer was rejecting new
+connections. The reason that older socket first became silent remains unknown; this does not
+identify a radio root cause. Evidence: `apps/android-mcp/build/heartbeat-status-loss-tcp.json`,
+`heartbeat-status-loss-capture/npcap-v30-tcp-headers.json`, and
+`apps/esp/build/heartbeat-status-loss-uart-before-tcp.json`.
+
+The five-file firmware change allows a validated private peer with successful nonblocking setup
+to replace an existing observer only when TCP does **not** own control and its per-client
+accept/successful-RX activity is strictly older than the existing **1500ms** limit. TCP owners,
+fresh observers, invalid candidates and regressed clocks remain protected. Idle alone does not
+close a connection. New epochs still clear the old partial command stream before reading the
+replacement. No deadline, radio parameter, input replay or NVS policy changed. Root and independent
+reviews found no blocking issue.
+
+| Check | Result and boundary |
+| --- | --- |
+| Red/green and complete firmware gates | **PASS** after a reproduced failing replacement assertion. Socket-mock regressions and **13/13** transport/wiring contracts pass; complete static, firmware, merged-image and archive verification pass. Existing static platform skips remain; this is not a zero-skip ESP claim. Evidence: `apps/esp/build/tcp-observer-v38-{red,green,contract,full-gate}.log` |
+| Exact App-only installation | COM6 / MAC **4c:11:ae:31:32:6c** and the actual partition table were freshly read and verified. Existing `ota_0` is **0x20000 / 0x2f0000**; only the **1,665,424B** App was written at **0x20000**, ending the erase range before **0x1b7000** exclusive. Written-data hash verification passes. Bootloader, partition table, OTA metadata, NVS/bonds, PHY, assets and `ota_1` are preserved; no full-chip erase or merged image at zero. Evidence: `apps/esp/build/new-com6-v38-{layout-read.log,partition-table.bin,flash-plan.json,flash.log}` |
+| Startup and preserved pairing | **PASS**, **30.015s** read-only observation. At observation **1.047s**, Wi-Fi is configured/connected at **192.168.101.75:3333**; BLE is disconnected at **3.047s**, then encrypted/bonded/ready at **15.047s** and **25.062s**, unarmed/unlocked, without new pairing. These are sample offsets from observation start, not exact boot recovery times. Wi-Fi events stay `[1,0,0,0,-1,-1]`, fault/OOM **0**, reported minimum free internal heap **43,552B**. COM6 closes afterward; no raw serial saved. Evidence: `apps/esp/build/new-com6-v38-startup.json` |
+| Real neutral TCP recovery scenarios | **PASS**: observer idle beyond 1500ms is replaced; a fresh observer rejects a contender and still answers STATUS; a neutral PING owner remains responsive while rejecting a contender. **11** successful replies, maximum **394ms**, original **1200ms ACK** deadline. Only STATUS/PING, no ARM/nonzero HID; all sockets close in `finally`. Evidence: `apps/android-mcp/build/tcp-observer-v38-device.json` |
+| Restored actual EXE / official SDK | The verified old service PID **74036** exited gracefully after POST quit **204** to isolate device tests. The unchanged v37 EXE is restored as verified PID **90416**, listening on **0.0.0.0:8790**; LAN/loopback health **200**, unknown route **404**. Official SDK lists **20** tools; all **seven** POST responses are SSE, STATUS **5/5**, maximum **177ms**, every state BLE-ready and unarmed/unlocked. Evidence: `apps/android-mcp/build/mcp-v38-final-status.json`. Existing PC **454/454 + 15/15** gates were not needlessly repeated |
+
+Current firmware archive/full-image SHA-256:
+`cb35c2df6d5996efd1c2f4bc7a4f0f1c7dd1ce7cb805b1131e92fb59830fdd74`;
+App **1,665,424B**, SHA-256 `a608f6b783602779e3c18c175b43f66e6aad3e8774d07513d0d312d9701de734`;
+ELF SHA-256 `430b2e1d096a2dbf409d4abe90eb77258d2cb1876568d16c8e15bdb44b4a7961`.
+The actual retained partition-table SHA-256 is
+`bd386c960f8b827e812dd238af37d469c319d7e9ecc2d7501d00296c46804a4f`.
+No boot ELF-hash line was captured: the flashed identity is tied to the verified artifact and
+successful write checksum, not a claimed matching runtime log hash.
+
+EXE remains build **c2042f779676b1fb0546**, SHA-256
+`b0ec182895000c740e4f3472a4db848b36c539ffd677ad0ea239cb6fe30cd701`; APK is unchanged.
+The App-launch approval boundary remains unchanged; no retry or alternative launch interface was
+used. Build: **PASS**. Host tests: **PASS**. Device tests: **PASS for the listed connection-recovery
+checks only**. Full-product acceptance has not passed. Unverified: the current firmware's direct
+20ms/1200ms high-rate gate, long-term memory bounds, real MediaProjection/LAN frames, nonzero HID
+action feedback and the complete phone-control loop. The v36 high-rate failure remains open;
+these neutral/low-rate passes do not establish that it is resolved.
+
+## v37 Completed MCP request resource cleanup — regressions and fifteen-minute fixture PASS
+
+2026-10-18: A confirmed SDK **1.32.1** resource-lifecycle defect was reproduced using the production
+HTTP server and official SDK client: with `enableJsonResponse: true`, completed JSON POST requests
+remain in `_streamMapping` until session closure. Initialization plus **100** `listTools` requests
+leaves **102** stream entries, including one standalone GET. Evidence:
+`apps/android-mcp/build/mcp-stream-retention-red.log`. This test performs no screenshots or HID input.
+
+The server now uses `enableJsonResponse: false`, the SDK's standard POST SSE response path.
+The existing console already supports SSE. Production code does not inspect SDK private maps,
+and no dependency upgrade was made. The resource regression alone inspects those maps: completed
+POST entries return to zero, at most one standalone GET remains, and request-to-stream/response
+maps are empty. The final targeted run explicitly observes **0** POST streams and **1** standalone
+GET, checking that the remaining entry really is the GET:
+`apps/android-mcp/build/mcp-stream-retention-resource-final.log`.
+Four raw cancellation tests now consume `response.arrayBuffer()` as part of the
+request lifecycle, retaining cancellation and newer-ARM isolation checks.
+
+| Check | Result and boundary |
+| --- | --- |
+| Software validation | **PASS**: resource regression and HTTP/browser **122/122**; typecheck/build; complete host **454/454**, zero skips; packaged EXE **15/15**. Evidence: `apps/android-mcp/build/mcp-stream-retention-{green,typecheck,build,host-tests,exe-build,exe-tests}.log` |
+| Actual packaged service / official SDK | **PASS**: verified executable path and PID **74036**, listening on **0.0.0.0:8790**; LAN/loopback health **200**, unknown route **404**. All **seven** POST responses are `text/event-stream`; **20** tools, STATUS **5/5**, maximum **178ms**. Every STATUS remains connected/encrypted/bonded/ready, unarmed/unlocked, with no real input. Evidence: `apps/android-mcp/build/mcp-v37-final-status.json` |
+| Older two-hour resource run | **Completed — functional/cleanup PASS**, **7,200,277ms**, build **ba710a04fbdc29d19fd2**, using the older JSON-response implementation. Child PID **65376** exited **0** without forced termination; streams/sockets are zero, fixture servers closed and temporary directory removed. Memory growth remains an observation boundary, detailed in v35. Fixed evidence: `apps/android-mcp/build/windows/exe-soak-2h.json`. This is not validation of the v37 package or real LAN/BLE |
+| New-package fifteen-minute fixture observation | **Completed — functional/cleanup PASS**, **900,386ms**, build **c2042f779676b1fb0546**: **27,021** frames / **30.0104480674fps**, **4,150,425,600B** image data, maximum frame gap **57.5429ms**; **37,864** fixture ACKs, median **0.5052ms**, p95 **1.0944ms**, maximum **22.3903ms**; **860** observer queries and **seven** original snapshots. Child PID **88900** exited **0**, no forced termination, temporary directory removed, streams/sockets **0**, fixture servers no longer listening, `realDeviceInput=false`. Fixed evidence: `apps/android-mcp/build/windows/exe-soak-v37-15m.json`; log: `exe-soak-v37-15m.log`. This is loopback fixture validation, not real LAN/BLE acceptance |
+
+The v37 fixture run covers four preview profiles without claiming the input owner, original MCP
+captures, 45s of active four-report bursts, 15s idle, WebSocket close/release followed by recovery
+in a new session, and TCP loss before ACK without replaying input. The report completed at
+**2026-10-17T18:41:19.930Z**, SHA-256
+`d4caa0868880fdff428307bd450de770fde681b2b0d4e67cc4536c22daa4185f`.
+
+Its **32** memory samples show private bytes / working set of **82,538,496 / 105,852,928B** at the
+**61,035ms** warm-up sample and **149,725,184 / 157,163,520B** at **901,473ms**, increases of
+**67,186,688 / 51,310,592B**. The endpoints are also the sampled peaks. This finite observation
+still shows growth; it establishes neither a leak, absence of a leak nor a long-term resource
+bound. Differences from the older fifteen-minute/two-hour runs cannot all be attributed to the
+SDK fix. The separate deterministic stream-mapping red/green regression remains the evidence
+for that specific defect and cleanup.
+
+Current EXE: `apps/android-mcp/build/windows/设备操作台.exe`, buildId **c2042f779676b1fb0546**,
+**94,434,816B**, SHA-256 `b0ec182895000c740e4f3472a4db848b36c539ffd677ad0ea239cb6fe30cd701`.
+The previous actual service's PID **84880**, executable path and hash were checked before graceful
+POST `/desktop/quit` returned **204**. Its verified EXE and manifest are retained under
+`apps/android-mcp/build/windows/history/ba710a04fbdc29d19fd2`.
+
+The retained-stream defect is established; the entire earlier Private Bytes/working-set growth
+cannot be attributed to it from these observations. APK and ESP artifacts are unchanged. The
+phone App remains stopped, its LAN source returns `ECONNREFUSED`, and the earlier blocked-launch
+boundary in v36 is unchanged. The direct LAN high-rate failure is not shown to be resolved by this
+HTTP resource fix. Build: **PASS**. Host tests: **PASS**. Device tests: **FAIL** overall,
+with the short read-only packaged MCP and fifteen-minute fixture checks passing. Unverified:
+long-term resource behavior,
+real LAN frames/MediaProjection, nonzero HID and the
+complete phone-control feedback loop.
+
+## v36 OnePlus authorization and pairing — read-only BLE/MCP checks PASS, end-to-end still unverified
+
+2026-10-18: The user's new explicit ADB-test authorization enabled further preparation. The
+OnePlus 8 is unlocked and on the computer's Wi-Fi; credentials are not recorded here.
+Opening/configuring the projection App with ADB was again rejected with `blocked by policy`.
+No UI or deep-link alternative was used to launch it. The independent action opening Android's
+Bluetooth settings was allowed. A slow first preparation missed the approximately 30s security
+challenge; this preparation error is not classified as a firmware defect. After correcting scan
+refresh, digit-key entry and `menu_save` confirmation, **QDD-Passport-326E** paired successfully;
+the old **QDD-Passport-A1BA** bond was retained. Evidence: `apps/esp/build/oneplus-pairing-result.json`.
+
+The new board was restarted **twice** in this round: the earlier startup comparison and a new
+post-pairing persistence check. Its MAC was checked with read-only `chip_id`, followed by
+`hard_reset`. No firmware was flashed, changed or erased, and NVS was retained. The verified v35
+artifacts remain in use. ADB is limited to preparation/diagnosis; LAN App capture and ESP HID remain
+the runtime architecture. No ARM or nonzero HID input was sent.
+
+| New check | Result and boundary |
+| --- | --- |
+| Bonded BLE UART observation | **PASS**, **60.032s**, **60/60** STATUS replies encrypted/bonded/ready and connected; unarmed/unlocked. Seven Wi-Fi diagnostics stay `up=1`, event counters unchanged, TCP epoch **1**, OOM/fault/error **0**, lowest sampled available internal heap **36,472B**. BLE link epoch is not exposed by this protocol. COM6 closed afterward; no raw serial or passkey field saved. Evidence: `apps/esp/build/oneplus-bonded-stability.json` |
+| Real EXE / official SDK observation | **PASS**: **20** tools, STATUS **5/5**, every payload connected/encrypted/bonded/ready, maximum **277ms**. Evidence: `apps/android-mcp/build/mcp-oneplus-bonded-status.json` |
+| Real EXE / official SDK queued STATUS load | **PASS** for this API scenario: **221/221**, all ready, approximately **25s**, maximum call latency **2,187ms** including queueing. Maximum four in-flight calls and 20ms target scheduling yield only about **8.8 calls/s** in practice. Evidence: `apps/android-mcp/build/mcp-oneplus-status-stress.json`. This is not a pass of the direct TCP 20ms/four-in-flight/**1200ms ACK** gate and does not establish that high latency is fixed |
+| Phone-originated network comparison | Phone→PC **15/15**, min/average/max **6.020/22.827/43.425ms**; phone→ESP **14/15**, **12.096/80.992/356.436ms**. PC and phone use the same 5GHz AP; ESP remains on channel **6**. Evidence: `apps/android-mcp/build/oneplus-network-crosscheck.json`. This does not uniquely isolate an AP, PC or ESP cause |
+| Bond persistence / automatic reconnection after restart | **PASS** in the **30s** observation: BLE is disconnected at the **3.16s** sample; Wi-Fi is up on channel **6**, RSSI **−62dBm**, at **6.19s**. By the **25.12s** sample, BLE is connected/encrypted/bonded/ready with `pairingOpen/passkeyVisible=false`, without a new PIN. The sampling does not establish a more precise BLE recovery time. No fault/OOM. Evidence: `apps/esp/build/oneplus-bonded-reboot-startup.json`. The existing EXE, without restart, then completes **5/5** official SDK STATUS calls, maximum **582ms**: `apps/android-mcp/build/mcp-oneplus-reboot-recovery.json` |
+| Direct TCP gate with BLE bonded | **FAIL**, unchanged 20ms target / four in-flight / **1200ms ACK**: **18.207s**, **245** sent / **244 eventual** replies; STATUS 100241 times out at **16,994ms**, age **1,211ms**, maximum eventual RTT **1,969ms**. Evidence: `apps/android-mcp/build/tcp-status-stress-oneplus-bonded.json`. Concurrent **40s / 71** UART samples have no fault/error/OOM, minimum available internal heap **36,708B**, Wi-Fi up throughout and unchanged event counters. Evidence: `apps/esp/build/oneplus-bonded-direct-status-diagnostics.json`. Final errno **104** / close reason **4** is a receive error following PC test closure, not proof that firmware initiated a disconnection or a particular direction caused the initial timeout |
+| Restored actual EXE / final official SDK | The owned PID **56384** path/build was checked before graceful POST quit (**204**) isolated the direct TCP test. The same packaged EXE is restored as verified PID **84880**, listening on **0.0.0.0:8790**. Final SDK **20** tools / STATUS **5/5**, maximum **280ms**; all five payloads remain connected/encrypted/bonded/ready, unarmed/unlocked. Evidence: `apps/android-mcp/build/mcp-oneplus-final-status.json` |
+
+The MCP load's reported UTC wall window is **16:32:50.822–16:33:16.343**, with **25,480ms** measured
+after initialization; UART runs **16:32:55.264–16:33:55.326**. The load starts about **4.4s before**
+UART sampling, so only its final approximately **21s** overlap, not the complete 25s. Relative
+`sentMs` uses a separate performance-clock origin; these bounds are not fabricated exact packet
+deadlines. The preceding five-call SDK check is also outside the UART window.
+
+Build: **PASS**; Host tests: **PASS**, reusing the unchanged v35 artifacts and **453/453 + 15/15**
+results without rebuilding/repeating them. Device tests: **FAIL** overall: the latest read-only
+BLE/MCP and bond-persistence checks pass, but this round's direct high-rate LAN gate fails again
+with BLE bonded. The projection App still has no process. Unverified: real MediaProjection and
+LAN frames, BLE input/action feedback,
+all physical UI flows and complete end-to-end control. The older two-hour resource observation
+has completed with functional/cleanup PASS; its growth boundary is recorded in v35 and does not
+establish v37 or physical-device performance.
+
+## v35 Overnight adversarial iteration — software gates PASS, real LAN stress still FAIL
+
+2026-10-18: This iteration checks the desktop service/EXE, phone APK and controller firmware.
+The following artifacts supersede the earlier sections' current-build identities; those sections
+remain historical evidence. Device acceptance is **FAIL** because real LAN stress still fails;
+the passing checks below do not establish a completed remote-control product.
+
+Confirmed software defects were fixed in these areas:
+
+- Desktop: concurrent configuration/restart claims, stale cancellation against a newer ARM,
+  batched/duplicate request IDs, invalidating serial readiness during writes, and reconnecting
+  during shutdown. Console requests now have bounded waiting, saves cannot overlap, and short
+  viewports and keyboard activation are covered.
+- APK: stopping revokes capture immediately while cleanup blocks a new grant; session generations
+  isolate old callbacks and resource completion. Optional notification denial, Activity recreation
+  and recovery of the original service-start wait are covered by lifecycle/consent host regressions.
+- ESP: a fresh read-only computer registration is reflected without pretending it grants control;
+  a completed guide reports lost phone projection truthfully without returning to the QR step.
+  SSIDs use actual available label width, unchanged QR pages avoid redundant refreshes, and the
+  download page uses dark cards. These presentation fixes do not change radio or safety parameters.
+
+| Check | Result and boundary |
+| --- | --- |
+| PC build and host gates | **PASS**: typecheck/build; **453/453** host tests, zero skips; packaged EXE **15/15** scenarios, `realDeviceInput=false`. Evidence: `apps/android-mcp/build/overnight-{typecheck,build,host-tests,exe-tests}.log` |
+| Packaged two-minute fixture soak | **PASS**, 120,085ms: **3,613** frames / **30.0869fps**, **4,540** fixture ACKs; median **0.6185ms**, p95 **1.3781ms**, maximum **16.0813ms**. Covers streaming, idle/reconnect, connection loss before ACK without input replay, and preview profiles with original captures. These are localhost fixtures, not phone/BLE performance. Evidence: `apps/android-mcp/build/windows/exe-soak-2m.json` |
+| Packaged fifteen-minute fixture soak | **PASS**, **900,250ms**: **27,021** frames / **30.01499fps**, **38,000** fixture ACKs; median **0.5942ms**, p95 **1.5007ms**, maximum **108.3172ms**; **862** observer queries. Child exit **0**, no forced termination, zero remaining phone streams/ESP sockets, both fixture servers closed and temporary directory removed. This is loopback fixture validation, not phone/BLE performance. Fixed evidence: `apps/android-mcp/build/windows/exe-soak-15m.json` |
+| Two-hour resource observation | **Completed — functional/cleanup PASS**, **7,200,277ms**: **216,018** frames / **30.0013456957fps**, **33,180,364,800B** image data, maximum frame gap **58.8444ms**; **306,556** fixture ACKs, median **0.4793ms**, p95 **0.9954ms**, maximum **27.6363ms**; **6,950** observer queries. Child exit **0**, no forced termination, streams/sockets **0**, fixture servers closed and temporary directory removed. This is the older **ba710a04fbdc29d19fd2** JSON-response build, not v37 or real LAN/BLE validation. Fixed evidence: `apps/android-mcp/build/windows/exe-soak-2h.json`; log: `exe-soak-2h.log` |
+| Actual EXE service | Verified PID **56384** and executable path, listening on **0.0.0.0:8790**; LAN and loopback `/health` return **200** with the expected build, unknown routes **404**. The actual browser shows “操作台已连接” and “QDD-Passport-326E”, with clear missing-projection/unpaired-phone prompts; no real phone image is present |
+| Official MCP against the actual board | **PASS** for observation: **20** tools listed, STATUS **5/5**, maximum **872ms**, no input. Evidence: `apps/android-mcp/build/mcp-overnight-final-status.json`. This is not a high-rate or active-control pass |
+| Packaged MCP request framing | **PASS**: a batch `tools/list` POST returns **400** with `Send one MCP request per HTTP POST.`; the same official SDK session then lists **20** tools successfully, without input. Evidence: `apps/android-mcp/build/mcp-overnight-wire.json` |
+| Offline-phone MCP behavior | Expected failure returned in **2,576ms**, `isError=true`, **zero images**; service health remains **200**. Evidence: `apps/android-mcp/build/mcp-overnight-phone-offline.json`. Error handling passes; phone screenshot capture does not |
+| APK build/install | Build, signature and complete host checks **PASS**, including lifecycle **9** and consent **16** checks. Installed base APK was pulled and its SHA-256 matches the current build. Evidence: `apps/android-screen/build/overnight-apk-{build,tests}.log`, `build/manifest.json`, `build/overnight-installed-hash.json` |
+| ESP build/render gates | Complete firmware gate and archive verification **PASS**. Host rendering covers actual fonts/layout, onboarding skips, pairing feedback, scan feedback and stable refreshes; unchanged QR refreshes produce **zero** flushes. The 24KiB LVGL pool has **6,816B** free, largest block **6,432B**, peak use **17,112B**. ESP static tooling retains its documented platform skips; the zero-skip count above applies to PC tests. Evidence: `apps/esp/build/overnight-final-gate.log`, `adversarial-esp-static-final.log`, `adversarial-ui-final.log` |
+| ESP installation/startup | Only the App was flashed to COM6, MAC **4c:11:ae:31:32:6c**, existing `ota_0` at **0x20000**, with written-data hash verification. NVS, bonds, partition table, bootloader, OTA metadata, PHY and assets were preserved. The **30s** startup observation has no fault/OOM, but records disconnect **reason 8** followed by reconnection; it is not a disconnect-free pass. Evidence: `apps/esp/build/new-com6-overnight-{flash-plan.json,flash.log,startup.json}` |
+| USB neutral stress | **PASS**, same 20ms target / four in-flight / 1200ms deadline, **25s**, **800/800** replies, maximum **32ms**. The earlier v30 comparison is **798/798**, also maximum **32ms**. Neither run sends real device input. Evidence: `apps/esp/build/usb-neutral-stress-overnight.json` |
+| Board download page/API | HTTP **200**, dark-card page, embedded APK **53,730B** with matching current SHA-256. Evidence: `apps/android-mcp/build/board-overnight-http.json`. This PC-side check is not proof of phone download or installation |
+
+The fifteen-minute soak includes **32** process-memory samples. At the **63,141ms** warm-up sample,
+private bytes / working set are **99,082,240 / 123,211,776B**; at the end they are
+**189,009,920 / 162,271,232B**, increases of **89,927,680 / 39,059,456B**. Private bytes fall to
+**105,164,800B** near **873s** before reaching a new peak near **903s**. This observation does not
+establish a leak or a stable memory bound. The fixed fifteen-minute report SHA-256 is
+`ab564cf3664a8061150d5fbe18a8b7941e28d0c25b379fdfffe071c39cd6d267`.
+
+The subsequent two-hour run completed at report timestamp **2026-10-17T18:19:45.980Z**, retaining
+**241** memory samples. At the **61,083ms** warm-up sample, private bytes / working set are
+**78,479,360 / 102,002,688B**; at **7,201,402ms**, they are **298,536,960 / 203,026,432B**,
+increases of **220,057,600 / 101,023,744B**. The endpoints are also the sampled peaks, with
+intermediate falls. Functional delivery and cleanup pass, but this growth does not establish a
+long-term bound or stable resource use; it cannot all be attributed to the later-confirmed SDK
+stream-retention defect. The fixed two-hour report SHA-256 is
+`5e1fb9bca2ad2db178cb511b1fa3e6e5bbe433b80777860a8dd3e0f50e887172`.
+
+Current EXE: `apps/android-mcp/build/windows/设备操作台.exe`, buildId
+`ba710a04fbdc29d19fd2`, **94,434,816B**, SHA-256
+`de46ef950dc349f1550f6798f77f3a41c7ec48e7a731c05c2dcf0d030cb8d8ec`.
+Current APK: `apps/android-screen/build/qdd-android-screen-debug.apk`, **53,730B**, SHA-256
+`857e803d51f2bba359b85ee3b4898274040c1aff436f9e6fba3ee7f643294940`.
+Current firmware archive/full-image SHA-256:
+`4d6e8d68f2c50ec7669d48d057bbdf8919db7740a6e28c39eabe9624233c3220`;
+App **1,665,280B**, SHA-256 `d281ec238dd13c8e59dcd74d188014759a75203f0a6e3bf6fed6cf2de6ee0027`;
+ELF SHA-256 `852803b7b82c58bfde5fcaa0d75f977e1f685c7e702a80f3977944c7c53fc9a9`.
+The archive's merged factory image was **not** written over the board's existing OTA layout.
+
+Real LAN stress remains **FAIL** under the unchanged **20ms** target interval, maximum **four**
+in-flight requests and **1200ms** ACK deadline:
+
+- PING: **13.751s** total, **261** commands (260 PING plus one cleanup RELEASE), **259** PING
+  replies. PING 100256 exceeds its deadline at **12,541ms**, age **1,226ms**; maximum eventual
+  RTT is **1,468ms**, peer END at **13,051ms**. Evidence:
+  `apps/android-mcp/build/tcp-neutral-stress-overnight.json` and
+  `npcap-overnight-stress-tcp-headers.json`; UART
+  `apps/esp/build/tcp-overnight-stress-diagnostics.json` has **70** samples / **40s**, no fault/OOM,
+  lowest sampled available internal heap **36,912B**.
+- This failure differs from v34's initial receive gap: by approximately **11,598ms**, UART counts
+  show **5,439B = 259 × 21** received and **38,332B = 259 × 148** accepted by socket writes,
+  including replies 100256–100258 before their PC deadline. ESP TCP ACKs also cover those commands.
+  Their replies first appear at the PC at **12,679 / 12,847 / 12,852ms**. Thus the first timeout
+  includes delayed reply delivery after successful application writes. PING 100259 then has a
+  separate inbound gap, with retransmissions and no advancing ESP ACK. The eventual TCP close is
+  external/safety reason **1**, consistent with the owner watchdog; Wi-Fi event counters do not
+  change during this window. Socket writes do not establish radio delivery or a unique root cause.
+- STATUS-only plus low-rate ICMP: **6.689s**, **130** commands and **130 eventual** replies, still
+  **FAIL** because STATUS 100126 waits **1,215ms** and times out at **6,378ms**; maximum eventual
+  RTT **1,473ms**. ICMP has **23/25** successful replies, RTT **15–437ms**, and two status **11010**
+  timeouts; the first overlaps the STATUS gap. This shows delay affects a non-control protocol too,
+  but does not uniquely locate the AP, PC or ESP cause. Its lower rate is not an equivalent control
+  stress pass. Evidence: `apps/android-mcp/build/tcp-status-stress-overnight-icmp.json`,
+  `icmp-overnight-probe.json`, `npcap-overnight-status-icmp-tcp-headers.json`; concurrent UART
+  `apps/esp/build/tcp-overnight-status-icmp-diagnostics.json`: **71** samples / **40s**, no fault/OOM,
+  lowest sampled available internal heap **37,100B**; packet capture **45s**.
+
+After APK installation, `pidof` still finds no phone App process. The renewed ADB launch attempt
+under the latest explicit user authorization was again rejected with `blocked by policy`; no
+alternate interface was used to bypass it. No new MediaProjection session was validated.
+Control ACK **1200ms**, WebSocket **1500ms**, PING **300ms** and board watchdog **1500ms** remain
+unchanged. There was no input replay, full erase or Git publication.
+
+Build: **PASS**. Host tests: **PASS**. Device tests: **FAIL** — installed artifacts, USB neutral
+stress, HTTP and short read-only MCP pass, but high-rate real LAN stress fails. Unverified: resumed phone
+projection, real BLE pairing, nonzero input, all on-device UI flows, complete end-to-end control.
+Software and fixture success cannot substitute for these checks or establish a stable finished
+product; the completed two-hour run's memory-growth boundary remains as recorded above.
+
+## v34 Remote-input queue fix — software checks PASS, high-rate LAN transport still FAIL
+
+2026-10-17: The red regression `apps/android-mcp/build/remote-status-barrier-red.log` confirms a
+PC-side deadline problem: an exclusive STATUS takes approximately **908ms**, then a legal MOVE
+ACK takes **914ms**; their combined queue wait exceeds the existing **1500ms** WebSocket report
+deadline even though each ACK is inside its own limit. Active STATUS inspection now uses a recent,
+acknowledged state from the current control connection without inserting a wire barrier ahead of
+input. The snapshot is valid only while the connection is ready/open, has no transport fault,
+belongs to the current control revision, preserves reply sequence order, and has monotonic age no
+greater than the original ACK deadline. A reserved/pending ARM suppresses the old snapshot before
+its preparatory PING; stale or unavailable snapshots use the ordinary STATUS path. Evidence also
+includes `remote-status-arm-reservation-red.log` and `remote-status-final-focused-tests.log`.
+
+The WebSocket deadline remains **1500ms**, control ACK **1200ms**, PING interval **300ms** and board
+watchdog **1500ms**. No input replay, relaxed deadline or firmware change was introduced. The board
+still runs the restored **v30 / RX4** App recorded below.
+
+| Current check | Result and boundary |
+| --- | --- |
+| PC validation | **PASS**: typecheck/build; **439/439** host tests with zero skips; **15/15** EXE scenarios, `realDeviceInput=false`. Evidence: `apps/android-mcp/build/queue-v34-{typecheck,build,host-tests,exe-tests}.log` and `build/windows/exe-smoke.json` |
+| Final EXE / official MCP | BuildId **ce2ac5b7b7b36f690738**, verified PID **74108**, listening on **0.0.0.0:8790**; `/health` matches this build/PID and an unknown route returns **404**. The official SDK lists **20** tools and completes **5/5** real `android_hid_status` calls, maximum **366ms**. Evidence: `apps/android-mcp/build/mcp-v34-final-status.json`. This short, read-only check does not validate phone input |
+| STATUS-only hardware stress | **FAIL** without PING or ownership: target interval **20ms**, maximum **four** in-flight requests, unchanged **1200ms** deadline. Sent **12**, received **8**; STATUS 100008 times out at **2,152ms**, age **1,212ms**; total **3,356ms**. Evidence: `apps/android-mcp/build/tcp-status-stress-v34.json` |
+| Same-window diagnostics | Npcap 30s and UART 40s / **70** samples; OOM **0**, `faults=[]`, lowest sampled available internal heap **39,104B**. Evidence: `apps/android-mcp/build/npcap-v34-status-stress-tcp-headers.json` and `apps/esp/build/tcp-v34-status-stress-diagnostics.json` |
+
+The last observed ESP reply, STATUS 100007 at approximately **1116ms**, acknowledges TCP sequence
+`2330855664` with a positive **5576B** window. Later STATUS bytes are retransmitted without further
+ESP packets in this capture; the PC sends FIN at approximately **3357ms**. This reproduces a receive
+gap without a PING lease, so lease expiry cannot be the sole explanation for the earlier failures.
+It still does not identify a unique radio, driver or network root cause.
+
+The UART window subsequently records a real beacon-timeout event: its first sample is at **19,984ms**
+(event age 148ms), followed by Wi-Fi disconnect **reason 200** at sample **22,781ms** (`up=0`) and
+automatic reconnection at **26,250ms**, channel **6**, RSSI **−63dBm**; the prior channel was **11**
+with approximately **−76/−74dBm**. These later events occur after the initial STATUS failure and
+must not be backdated into its unique cause. The final TCP close reason **2 / NETWORK** belongs
+to this later network invalidation, unlike the external/safety close recorded in v31/v32.
+There is no evidence of an application-requested disconnect. Existing all-channel/by-signal
+association settings were retained; no further buffer, RTO, watchdog or network-selection changes
+were made.
+
+Current EXE: `apps/android-mcp/build/windows/设备操作台.exe`, **94,431,232B**,
+SHA-256 `7c6827a15e9e24e4df2608bc4b41e1339a056a9edf673fd51fe9783f4a321ebf`.
+Final read-only ADB `pidof cn.qdd.screenbridge` returns exit 1 with no process. Phone projection
+still requires physical App opening and system authorization. The earlier ADB
+launch/configuration attempt was rejected with `blocked by policy` and was not retried through
+another interface; the v33 phone diagnosis below remains the current boundary.
+
+Build: **PASS**. Host tests: **PASS**. Device tests: **PARTIAL — final read-only MCP PASS,
+high-rate STATUS-only transport FAIL**. Unverified: resumed projection, real BLE pairing, nonzero
+input and complete end-to-end control. Fixture-based queue regression success does not replace
+those physical checks or establish a stable remote-control product.
+
+## v31–v33 Adversarial checks — read-only MCP PASS, active-control transport still FAIL
+
+2026-10-17: A confirmed ownership bug is fixed: cancelling another caller's pending read-only
+STATUS no longer sends RELEASE/PAUSE or interrupts the owner's held key. Late replies from the
+cancelled request cannot change that control round. The focused regression and the packaged
+two-client official SDK scenario cover cancellation followed by another owner input.
+
+A bridge that has never attempted control now opens STATUS observation without PING, ownership,
+heartbeat or input cleanup. Its default observation deadline is bounded at 3000ms; explicitly
+configured shorter deadlines remain honored. The first control attempt closes the observation
+socket and performs the normal handshake on a fresh socket. Control ACK remains 1200ms, the
+board watchdog remains 1500ms, and input is never replayed. Never-control inspection is independent
+of phone projection loss/geometry changes; this does not authorize control without a usable screen.
+
+| Current check | Result and boundary |
+| --- | --- |
+| PC checks | **PASS**: typecheck/build; full host suite **429/429**, zero skips; packaged EXE **14/14** scenarios with `realDeviceInput=false`. Logs: `apps/android-mcp/build/observation-v33-{typecheck,build,host-tests,exe-tests}.log` |
+| Real official MCP observation | **PASS**: `android_hid_status` **60/60**, maximum 1,182ms, approximately 74s run, while the phone projection App was stopped. Request-start to last-result span is 72,533ms. Evidence: `apps/android-mcp/build/mcp-v33-observation-status.json`. This covers read-only controller connectivity, not active input |
+| Concurrent UART/header observation | 90s UART: **158** samples, OOM **0**, `faults=[]`, lowest sampled free internal heap **27,000B**, one TCP epoch and **60** full socket writes. Evidence: `apps/esp/build/tcp-v33-diagnostics.json`, `apps/android-mcp/build/npcap-v33-tcp-headers.json`. Full writes mean socket acceptance, not independent proof of radio delivery |
+| v31 RX4 neutral stress | **FAIL**: 20ms target interval, maximum four in-flight PINGs, 1200ms deadline; sent **23**, received **18**. PING 100018 exceeds its deadline at **3,582ms**; peer END follows at 4,133ms. Evidence: `apps/android-mcp/build/tcp-neutral-stress-v31.json` and the matching `npcap-v31-stress-tcp-headers.json` / `apps/esp/build/tcp-v31-stress-diagnostics.json` |
+| v32 RX6 experiment | **FAIL** under the same configured stress: sent **69**, received **64**; PING 100064 exceeds its deadline at **6,262ms**, age 1,211ms; peer END at 6,824ms. OOM **0**. Evidence: `apps/android-mcp/build/tcp-neutral-stress-v32.json` and matching v32 stress header/UART files. Two failed windows do not establish a failure-rate improvement; RX6 is rejected and reverted |
+| Current desktop service | EXE listens on **0.0.0.0:8790**; `/health` returns `status=ok`, unknown route returns 404. Final checked PID **10512**, buildId **67726d3e76d3841d47dc** |
+
+The RX6 candidate passed the complete firmware gate and archive verification, and only its App
+was flashed into COM6's existing `ota_0` at `0x20000`, preserving NVS and the other recorded regions.
+After its failed device test, the two experimental source hunks were reverted exactly and the
+already verified **v30 App was restored**, with written-data hash verification. Restore startup:
+30s, OOM 0, `faults=[]`. Evidence: `apps/esp/build/rx-v32-build.log`, `new-com6-v32-flash.log`,
+`restore-v30-after-rx-v32.log`, and `restored-v30-startup.json`.
+The restored source blobs are `b2a409b760906a9bdbda4e8e807fb6904a8daefe` for `sdkconfig.defaults`
+and `2f228ff5f27c2ada6051056029ef9c33d2019d80` for the transport contract. The v32 archive is retained
+only for traceability: full `15be676d9b191b2a2eb43c4c5c8d622dd50a2b5a44aaf0a1f00692c3c2f65576`,
+App `f7971729e7d98eb450a3e5f07ea0fd931f5f5eb4c6e8f380a4b214a53f084ca5`,
+ELF `8019c322ddd43c2312e9810930e8fd87bfca03456c0bb3ea61e0c9425fb37eab`.
+The current on-device v30 identities remain those recorded below.
+
+OnePlus ADB `dcf4e720` is available again. Read-only checks confirm its installed APK still has
+SHA-256 `7cff0c5e1f3d00fdb645d1dad64a08cd9b692c7bdbb2eef203c136db06931812` and Wi-Fi address
+`192.168.101.46`. However, Android records the App stopped at **23:08:13.816 Asia/Shanghai** with
+reason **13 / OTHER KILLS BY SYSTEM**, subreason **2040**; an application crash is not established.
+No App process or MediaProjection grant was present, `/health` was refused, and the MCP screenshot
+attempt returned an error with no image. Evidence: `apps/android-mcp/build/phone-v33-readonly-diagnostic.json`
+and `mcp-v33-phone-readonly.json`. The ADB open/configure attempt was automatically rejected with
+`blocked by policy`; no alternate interface was attempted. Physical App opening and projection
+authorization remain pending user action. No USB/ADB business input or screenshot fallback was used.
+
+Current EXE: `apps/android-mcp/build/windows/设备操作台.exe`, **94,430,208B**,
+SHA-256 `226963e6d5cc64e7ec394797591a67be4bdad4a1d84209e631c97c155117afaf`.
+
+Build: **PASS**. Host tests: **PASS**. Device tests: **PARTIAL — read-only MCP connection PASS;
+high-rate neutral transport stress FAIL**. Unverified: resumed phone projection, real BLE pairing,
+nonzero input and complete end-to-end control. The successful observation window does not supersede
+the stress failures or establish a finished, stable remote-control product.
+
+## v30 TCP timer granularity — flashed, continuous MCP queries still FAIL
+
+2026-10-17: This firmware change only sets global TCP timer granularity to 125ms.
+Initial RTO remains 1000ms, the PC ACK deadline 1200ms and the controller watchdog 1500ms.
+The setting also affects HTTP and other TCP connections, with a global timer-processing tradeoff;
+it does not guarantee less loss or lower latency for every connection. The complete firmware gate,
+archive verification and COM6 `ota_0` App-only flashing **PASS**: 1,660,224 bytes at `0x20000`,
+written-data verified, preserving NVS, the original partition table and the other previously recorded
+regions. Evidence: `apps/esp/build/tcp-v30-build.log`, `new-com6-v30-flash-plan.json` and its flash log.
+
+- Startup observation: 30s, 10 read-only replies, OOM 0 and `faults=[]`. One Wi-Fi disconnect with reason 8 occurred during initial DHCP retry; that event alone does not establish an RF fault. Evidence: `apps/esp/build/new-com6-v30-startup.json`.
+- Official MCP: the first two samples succeed; sample 2 returns `ESP32 STATUS acknowledgement timed out` after 4,507ms, **FAIL**. Evidence: `apps/android-mcp/build/mcp-v30-new-board-status.json`.
+- Read-only diagnostics: 90s, 158 samples, maximum UART request 78ms, OOM 0, socket failed writes 0 and `faults=[]`. Lowest sampled available internal heap is 26,196 bytes; the SDK's since-boot low-water mark is 19,552 bytes. Final event counts still contain only the initial disconnect, with no additional disconnect. Evidence: `apps/esp/build/tcp-v30-diagnostics.json`. Responsive UART and memory headroom do not replace LAN/MCP acceptance.
+- Source-bound APK download: PASS, HTTP 200, 49,634 bytes in 2,187ms, unchanged SHA-256 `7cff0c5e1f3d00fdb645d1dad64a08cd9b692c7bdbb2eef203c136db06931812`. Evidence: `apps/android-mcp/build/new-board-v30-download.json`.
+- Read-only live-screen observation: STANDARD-profile SSE delivers 287 frames and 21,110,826 bytes over 20s, with zero unavailable events. This passes the observed screen window, not the control link. The current EXE runs on port 8790.
+- Bounded TURBO comparison: switching from STANDARD to TURBO succeeds; official-MCP sample 0 succeeds, but sample 1 reaches a PING ACK timeout after 3,305ms, still **FAIL**. The finally block successfully restores STANDARD. Evidence: `apps/android-mcp/build/profile-v30-turbo-ab.json` and `mcp-v30-turbo-status.json`. Lower preview quality does not make this continuous-query run pass, weakening a quality-reduction-only explanation. This limited comparison does not uniquely rule out load dependence or identify every disconnect cause. No BLE pairing or nonzero input was run.
+- Device tests: **PARTIAL, continuous MCP queries FAIL**. Real BLE pairing, nonzero input and final end-to-end control remain **NOT RUN**; stability or a completed product is not claimed.
+
+Firmware archive/full SHA-256: `3c87ab62d614ae68c09bd10d9444e2e77c9808a1cca3cc96857b98194428b9dc`.
+App SHA-256: `088b47c4aa89769926bd506c65862a577bcf89e4edc0b7d9b19c6950f76adfd9` (1,660,224 bytes).
+ELF SHA-256: `66a12d4643e7a728bb78254e58e53feb67d8daaa3f1c8ecdf30d7206117bbc23`.
+
+## v29 PC cold-handshake heartbeats and header observation — offline PASS, device failures remain
+
+The PC `serial.ts` starts neutral heartbeats before the first handshake PING and renews the lease
+during slow RELEASE/PAUSE replies, while continuing to reject realtime input until the handshake
+finishes. The original maximum of four outstanding heartbeats, failure cleanup and old-connection/
+late-ACK guards remain. Two old-implementation red tests reproduce the lease gap; the updated
+focused suite **PASSES 55/55**. Typecheck/build **PASS**, the full PC suite **PASSES 419/419** and
+the final EXE **PASSES 13/13 offline scenarios**. Logs: `apps/android-mcp/build/handshake-v29-typecheck.log`,
+`handshake-v29-build.log`, `handshake-v29-host-tests.log` and `handshake-v29-exe-tests.log`.
+Packaged scenarios use local phone/controller fixtures with `realDeviceInput=false`; they do not
+establish real-device control acceptance.
+
+- Actual official MCP queries still **FAIL**: sample 0 reaches a PING ACK timeout after 4,247ms. Evidence: `apps/android-mcp/build/mcp-v29-new-board-status.json`.
+- An independent raw TCP trace still **FAILS**: ten successful samples precede a sample-10 PING ACK timeout. Evidence: `apps/android-mcp/build/tcp-v29-neutral-wire.json`.
+- A separate raw trace concurrent with header capture **PASSES 30/30**, using one connection for approximately 36.6s, with maximum Node event-loop delay 34ms. Evidence: `apps/android-mcp/build/tcp-v29-capture-wire.json`. This passed observation window does not supersede the separate failures.
+- A non-elevated, non-promiscuous 30s header observation restricted to the exact WLAN and target/port records 365 packets. It shows **nine PC→ESP retransmissions of overlapping sequence ranges**, including resegmentation; exact sequence-and-length equality alone misses them. For example, PING 36 is resent about 532ms and 1,043ms after its first send, followed by batched ACKs. Incoming data reaches the Node callback within approximately 5.9ms; no zero window or RST is observed. This run's main second-scale wait occurs before Node reads the data. Evidence: `apps/android-mcp/build/npcap-v29-tcp-headers.json`, containing header fields only, with no payload or pcap file.
+- That capture does **not overlap** the UART window in `tcp-v29-diagnostics.json`, so their counters cannot be correlated as concurrent measurements. Host WLAN headers establish PC-stack retransmission attempts; they do not independently establish over-air transmission, RF loss, ESP receipt or a unique outbound/inbound failure direction.
+
+PC EXE buildId: `b5f42c55d15153b3a302`.
+EXE SHA-256: `4c0f43a7cee36e0710b7abbedcd38e2ab39ad99e32584e3276a4faf53137735c` (94,428,160 bytes).
+
+## v28 Bounded TCP diagnostics — flashed, continuous LAN queries still FAIL
+
+2026-10-17: Initial TCP RTO is 1000ms with 32 bytes of cumulative socket diagnostics.
+The PC ACK deadline remains 1200ms and the controller watchdog 1500ms. Diagnostics neither
+queue commands, replay input nor parse private radio packets. The complete firmware gate and
+archive verification **PASS**; focused Wi-Fi backend host tests **PASS in 17 groups**.
+COM6 received only the 1,660,224-byte App into existing `ota_0` at `0x20000`, with written-data
+verification. Bootloader, original partition table, otadata, NVS, PHY, assets and the other OTA
+slot were preserved; no full erase occurred. Evidence: `apps/esp/build/tcp-v28-build-final.log`,
+`new-com6-v28-flash-plan.json` and the matching flash log.
+
+| Current device check | Result and boundary |
+| --- | --- |
+| Startup observation | 30s, 10 read-only replies, OOM 0 and `faults=[]`. Evidence: `apps/esp/build/new-com6-v28-startup.json`. This observation window does not establish long-term stability |
+| Read-only diagnostics | 90s, 158 samples, maximum UART request 78ms, OOM 0 and `faults=[]`. Lowest sampled available internal heap is **23,344** bytes; the SDK's since-boot low-water mark is **16,836** bytes. These are distinct metrics. Evidence: `apps/esp/build/tcp-v28-diagnostics.json` |
+| Controller APK download | PASS: HTTP 200, 49,634 bytes in 3,240ms, unchanged SHA-256 `7cff0c5e1f3d00fdb645d1dad64a08cd9b692c7bdbb2eef203c136db06931812`. Evidence: `apps/android-mcp/build/new-board-v28-download.json`. Download success does not establish phone installation or projection setup |
+| Official MCP neutral status queries | FAIL: the first two samples succeed; sample 2 reports `ESP32 PING acknowledgement timed out` after 5,200ms. Evidence: `apps/android-mcp/build/mcp-v28-new-board-status.json` |
+| Source-bound raw TCP trace | FAIL: sample 0 receives peer END at 2,076ms before STATUS completes. The local source is `192.168.100.160`; maximum Node event-loop delay is 22ms. Evidence: `apps/android-mcp/build/tcp-v28-neutral-wire.json` |
+| Source-bound ICMP comparison | Controller `192.168.101.75`: 17/20 received, 15% loss, average 239ms/max 1,061ms. Gateway: 10/10, average 22ms. Phone: 10/10, average 114ms. These limited samples support remaining controller-link loss/delay but do not independently identify an RF, router or TCP cause |
+
+During failure windows, the new diagnostics show TCP receive totals stop increasing while UART
+continues responding promptly; socket failed-write counts remain zero. A full write only proves
+lwIP accepted the bytes, not wireless delivery. Last close reason/errno persist across later
+connections and require epoch/counter deltas before attribution. A separate gap between completing
+the PC cold handshake and starting periodic heartbeats has been identified and is being fixed and
+retested. That fix has not passed device acceptance, and it does not establish a single cause for
+every observed link failure.
+
+Build: **PASS**; Host tests: **PASS**; Device tests: **PARTIAL, continuous LAN queries FAIL**.
+Real BLE pairing, nonzero input and final end-to-end product acceptance remain **NOT RUN**.
+Completion or stability is not claimed. The v27 and earlier success/failure records remain below.
+
+Firmware archive/full SHA-256: `e7b9c1858d6004d0be1fea42cdd619415e97c600210a4f75bdd5d10dac758036`.
+App SHA-256: `8e614c846cab586f1468f9cfd4f824b80514d65397dea04508a3fddb2ae103b2` (1,660,224 bytes).
+ELF SHA-256: `905d00a988c92d12ad497e73fd3178e4d0a5cc364d2700565d7dbd3766b18666`.
+
+## v27 Internal-memory budget — observed OOM cleared, LAN queries still fail
+
+The two Wi-Fi IRAM speed options are disabled; matching ELF comparison confirms **19,456 bytes**
+of shared SRAM reclaimed, rather than adding the SDK's separate savings estimates. Radio queues,
+NimBLE, task stacks, UI and safety deadlines are unchanged. Firmware gate/archive verification and
+COM6 App-only flashing PASS: 1,659,824 bytes into existing OTA slot at `0x20000`, preserving data.
+
+- Startup observation: 30s, minimum internal heap 42,588 bytes, OOM count 0. With concurrent APK download and MCP queries, the next 30s diagnostics show minimum heap 19,684 bytes, OOM 0 and `faults=[]`, with no observed Wi-Fi disconnect or reboot. Evidence: `apps/esp/build/new-com6-v27-startup.json`, `new-com6-v27-lan-diag.json`. This addresses observed memory exhaustion in those windows, not every cause of link failure.
+- APK download: 49,634 bytes, unchanged SHA-256 `7cff0c5e1f3d00fdb645d1dad64a08cd9b692c7bdbb2eef203c136db06931812`, PASS in 2,248ms. Evidence: `apps/android-mcp/build/new-board-v27-download.json`.
+- Official MCP neutral queries: sample 17 of 18 FAILS with PING ACK timeout after 17 successful samples. Evidence: `apps/android-mcp/build/mcp-v27-new-board-status.json`.
+- Fresh source-bound wire trace: 20 STATUS replies succeed, then PING 95 sent at 23,015ms receives its ACK at 24,455ms (1,440ms); ACKs 96–98 follow in a batch after a 1,369ms receive gap. The maximum Node event-loop delay is 23ms; the board does not close the connection before the client closes it. Evidence: `apps/android-mcp/build/tcp-v27-neutral-wire2.json`. The pattern is compatible with TCP head-of-line/retransmission delay but does not establish the loss direction.
+- Device tests: PARTIAL; continuous LAN **queries** remain FAIL. The user explicitly chose to validate the computer connection first: BLE pairing and nonzero input are **NOT RUN** by scope, not failed-input acceptance.
+- Follow-up: v28 global initial TCP RTO 1000ms plus 32-byte bounded diagnostics is building; it is not device-validated. PC ACK deadline 1200ms and firmware watchdog 1500ms remain unchanged.
+
+Firmware archive/full SHA-256: `eaaa7d7305a954cb47811bfbd169dfd45b3b5c87526cd3cc3b963514432ba233`.
+App SHA-256: `6dec0fd45c58249ec59411b81e2f182e8418194199a61ccd1c019fbe33584eb4` (1,659,824 bytes).
+ELF SHA-256: `e04c97669536264f32885bcd3e09602436de23db1a01b5f19a6d73a439414953`.
+
+## v26 New controller and explicit LAN source selection — partial acceptance
+
+2026-10-17: Desktop setup now preserves an existing phone address/UUID when a discovered
+controller has no fresh phone registration. Explicit Find/Select chooses Wi-Fi unless USB was
+explicitly chosen in that form; background discovery preserves saved USB. An edit revision stops
+late discovery overwriting active edits. Pasted IP:port/full-width-colon/download-page addresses
+are normalized consistently: embedded ports win and download port 3334 becomes control port 3333;
+bare LAN hostnames remain supported.
+
+A real unbound connection selected Mihomo TUN source 198.18.0.1. TCP now resolves a hostname once,
+validates its private IPv4 and binds the matching local subnet address, preferring the longest prefix.
+Phone HTTP and board registration own source-bound pools, replace them on address changes and
+release them on close. Loopback and unmatched routed destinations retain their previous behavior.
+No proxy/security settings, HID deadlines, action retries or automatic USB fallback changed.
+
+- Build / Host tests: PC typecheck/build PASS; serial/TCP/LAN 59/59 and HTTP/screen/registration 57/57 focused checks PASS; complete PC suite 417/417 PASS. The EXE passes 13 offline scenarios, including pasted-port persistence and official MCP before BLE readiness, with zero real input. Logs: `apps/android-mcp/build/lan-v26-host-tests.log`, `exe-v26-lan-tests.log`.
+- Firmware Build / Flash: gate and archive verification PASS. COM6 existing `ota_0` received only the 1,660,800-byte App at `0x20000`, preserving its partition table, bootloader, otadata, NVS, PHY and assets; no full erase or merged image at the existing OTA offset. Plan: `apps/esp/build/new-com6-v26-flash-plan.json`.
+- Startup: 30s observation received 11 read-only replies with `faults=[]`; this is bounded startup acceptance, not long-term stability. Evidence: `apps/esp/build/new-com6-v26-startup.json`.
+- Real phone MCP: 20 tools discovered and three original 1080×2400 JPEG captures PASS; `realDeviceInput=false`. Evidence: `apps/android-mcp/build/mcp-v26-phone-readonly.json`.
+- New-controller LAN: corrected same-LAN address `192.168.101.75:3333`; official MCP sample 1 FAILS with PING ACK timeout after one successful status. Evidence: `apps/android-mcp/build/mcp-v26-new-board-status.json`. Source selection alone has not solved persistent status queries.
+- Memory evidence: UART diagnostics remain responsive; minimum internal heap is 312 bytes and allocation failures increase 295→297. The tuple is `[count,size,caps]`: failed size is **1700 bytes**, caps **6144 (0x1800)**, not a 6144-byte allocation. This establishes memory pressure, without identifying every failed caller. Evidence: `apps/esp/build/new-com6-v26-lan-diag.json`.
+- APK transfer: explicitly source-bound download from the new controller PASS, HTTP 200, 49,634 bytes in 2,973ms, matching SHA-256 below; v2/v3 signature checks PASS. No APK source change. Evidence: `apps/android-mcp/build/new-board-v26-download.json`.
+- Device tests: PARTIAL; persistent LAN queries are FAIL; real input is NOT RUN. The new controller is not BLE-paired, and the phone App must select it. PC registration is not proof of phone installation. Complete pairing, physical-key flow and nonzero input remain unverified. Observed results of the v27 memory adjustment are recorded above.
+
+EXE buildId: `3ff7c5d09cd457ec3fbf`; SHA-256 `ce6e48761abead97a359f04294bc1a2af65ce72312ea7aef498076f2ea418945` (94,429,696 bytes).
+Firmware archive/full SHA-256: `07e676807906e7f6f0bd68df27f22fa2921eebfdac86f097b340b3b0f21e4e14`.
+App SHA-256: `d7636d16ed21b8ebde611d4581679002eaf284ed15cc45dbd88072e5e5a7a3e2`; ELF SHA-256: `1617e8b930efddd48a5f87d7e8e52bddfa2f6e6ed0906bfb85f5c58f19e7b494`.
+APK SHA-256: `7cff0c5e1f3d00fdb645d1dad64a08cd9b692c7bdbb2eef203c136db06931812`.
 
 ## v25 Cold-start diagnostic guard — flashed, cold-state observation passed
 

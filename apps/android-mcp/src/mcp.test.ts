@@ -451,6 +451,46 @@ test("cold screenshot failures do not open HID and used bridges stop on stale or
   }
 });
 
+test("PC-first STATUS completes through shared projection loss without claiming or releasing input", async () => {
+  const fixture = createFixture();
+  const blocked = fixture.bridge.blockNext("STATUS");
+  const observed = fixture.tools.call("android_hid_status");
+  await blocked.started;
+  const lost = fixture.tools.visualLost();
+  blocked.release();
+  assert.equal(jsonResult(await observed)["v"], 1);
+  await lost;
+  assert.deepEqual(fixture.bridge.records.map(({ op }) => op), ["STATUS"]);
+  assert.equal(fixture.input.state.armed, false);
+});
+
+test("cancelling a read-only STATUS fork preserves another caller's held input and control round", async () => {
+  const fixture = createFixture(), observer = fixture.tools.fork();
+  jsonResult(await fixture.tools.call("android_hid_arm"));
+  jsonResult(await fixture.tools.call("android_key_report", { modifier: 0, keycode: 4 }));
+  const request = fixture.bridge.request.bind(fixture.bridge);
+  let started!: () => void;
+  const reading = new Promise<void>((resolve) => { started = resolve; });
+  fixture.bridge.request = async (op, args = [], signal) => {
+    if (op !== "STATUS") return request(op, args, signal);
+    fixture.bridge.records.push({ op, args }); started();
+    return new Promise((_resolve, reject) => {
+      signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+      if (signal?.aborted) reject(signal.reason);
+    });
+  };
+  const abort = new AbortController(), epoch = fixture.input.controlEpoch;
+  const pending = observer.call("android_hid_status", {}, abort.signal);
+  await reading;
+  const before = fixture.bridge.records.length;
+  abort.abort(new Error("Observer cancelled inspection"));
+  errorResult(await pending, /Observer cancelled inspection/);
+  assert.equal(fixture.input.state.armed, true);
+  assert.equal(fixture.input.controlEpoch, epoch);
+  assert.equal(fixture.bridge.records.length, before, "The read-only caller must not release or pause the owner's held key.");
+  jsonResult(await fixture.tools.call("android_key_report", { modifier: 0, keycode: 0 }));
+});
+
 test("a read-only tools fork's failed original capture preserves another caller's input and chosen frame", async () => {
   const fixture = createFixture();
   const observer = fixture.tools.fork();

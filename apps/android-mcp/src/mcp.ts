@@ -536,12 +536,16 @@ export class AndroidTools {
   }
 }
 
-export function createMcpServer(tools: AndroidTools): Server {
+export function createMcpServer(tools: AndroidTools, requestSignal?: (id: string | number) => AbortSignal | undefined): Server {
   const sessionTools = tools.fork();
   const server = new Server({ name: "qdd-android-hid", version: "0.0.0" }, { capabilities: { tools: {} }, instructions:
     "Observe the device with android_screenshot, then prefer android_control with that frameId: it prepares input, executes one action, and returns a real newer image captured after the action completed. Continue using the returned frameId. Relative move/click, key, scroll, home and back need no calibration. Coordinates in tap/swipe remain estimates and require explicit measured calibration. All input is through the ESP32 BLE keyboard/mouse, connected over Wi-Fi TCP or USB serial. Never use ADB input as a fallback. Legacy individual input tools require android_hid_arm and a separate screenshot afterward. If an action completed but the image failed, do not repeat it blindly; observe again. Cancellation/failure releases input; clear physical emergency stop only on the board. Text typing is US-layout ASCII. No model API or API key is required by this MCP server.",
   });
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: ANDROID_TOOLS }));
-  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => sessionTools.call(request.params.name, request.params.arguments, extra.signal));
+  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+    const lostResponse = requestSignal?.(extra.requestId);
+    const signal = lostResponse ? AbortSignal.any([extra.signal, lostResponse]) : extra.signal;
+    return sessionTools.call(request.params.name, request.params.arguments, signal);
+  });
   return server;
 }

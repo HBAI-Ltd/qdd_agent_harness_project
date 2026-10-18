@@ -274,6 +274,32 @@ static void check_completed_guide(lv_display_t *display) {
         lv_refr_now(display);
         assert(lv_screen_active() == completed_screen && qdd_ui_guide_step() == 0);
     }
+    state.heartbeat_seen = false;
+    s_onboarding.pc_fresh = true; // PC inspection does not send a HID PING.
+    qdd_ui_refresh(&state, (qdd_ble_status_t){0}, false, 87, 2000, "", 0);
+    lv_refr_now(display); check_labels(lv_screen_active());
+    assert(lv_screen_active() == completed_screen && qdd_ui_guide_step() == 0);
+    assert(has_visible_label(lv_screen_active(), "电脑已连接") && has_visible_label(lv_screen_active(), "可以远程操作"));
+    assert(!state.heartbeat_seen && !state.armed);
+    write_frame("completed_pc_registered_without_control");
+    s_onboarding.phone_projecting = false;
+    qdd_ui_refresh(&state, (qdd_ble_status_t){0}, false, 87, 2000, "", 0);
+    lv_refr_now(display); check_labels(lv_screen_active());
+    assert(lv_screen_active() == completed_screen && qdd_ui_guide_step() == 0);
+    assert(has_visible_label(lv_screen_active(), "分享手机画面") && !has_visible_label(lv_screen_active(), "可以远程操作"));
+    write_frame("completed_projection_stopped");
+    s_onboarding.phone_fresh = false;
+    qdd_ui_refresh(&state, (qdd_ble_status_t){0}, false, 87, 2000, "", 0);
+    lv_refr_now(display); check_labels(lv_screen_active());
+    assert(lv_screen_active() == completed_screen && qdd_ui_guide_step() == 0);
+    assert(has_visible_label(lv_screen_active(), "打开手机投屏"));
+    write_frame("completed_projection_app_missing");
+    s_onboarding.phone_fresh = s_onboarding.phone_projecting = true;
+    qdd_ui_refresh(&state, (qdd_ble_status_t){0}, false, 87, 2000, "", 0);
+    lv_refr_now(display); check_labels(lv_screen_active());
+    assert(has_visible_label(lv_screen_active(), "可以远程操作"));
+    s_onboarding.pc_fresh = false;
+    state.heartbeat_seen = true;
     wifi.connected = false; wifi.ip[0] = 0;
     qdd_ui_wifi(&setup, wifi);
     qdd_ui_refresh(&state, (qdd_ble_status_t){0}, false, 87, 2000, "", 0);
@@ -572,12 +598,37 @@ int main(int argc, char **argv) {
     qdd_ui_wifi(&setup, wifi); lv_refr_now(display); check_labels(lv_screen_active());
     assert(has_label(lv_screen_active(), "1. Updated network")); // Same count, new scan must refresh.
     qdd_setup_exit(&setup);
+    // Earlier skip scenarios intentionally leave an unpaired guide active.
+    // Exercise its unchanged QR content before isolating the main-page checks.
+    qdd_ui_wifi(&setup, wifi);
+    qdd_ui_refresh(&state, ble, true, 87, 2000, "", 0);
+    lv_refr_now(display);
+    assert(qdd_ui_guide_step() == 2);
+    const unsigned qr_flushes = flushes;
+    lv_mem_monitor(&before);
+    for (unsigned i = 0; i < 100; i++) {
+        qdd_ui_wifi(&setup, wifi);
+        qdd_ui_refresh(&state, ble, true, 87, 2000, "", 0);
+        lv_refr_now(display);
+    }
+    lv_mem_monitor(&after);
+    assert(flushes == qr_flushes && before.free_size == after.free_size && before.used_cnt == after.used_cnt);
+    state.connected = state.encrypted = state.authenticated = state.bonded = state.ready = true;
+    s_onboarding = (qdd_onboarding_view_t){.phone_seen = true, .phone_fresh = true,
+        .phone_projecting = true, .pc_fresh = true};
     // Both the dynamic network address and configuration screen must cache updates.
     for (unsigned screen = 0; screen < 2; screen++) {
         if (screen) { qdd_setup_enter(&setup); qdd_setup_select(&setup, "Home Wi-Fi", false); }
         qdd_ui_wifi(&setup, wifi);
         qdd_ui_refresh(&state, ble, true, 87, 2000, "", 0);
         lv_refr_now(display);
+        if (!screen) {
+            assert(qdd_ui_guide_step() == 0 && has_visible_label(lv_screen_active(), "可以远程操作"));
+            // Completing the guide is a transition. Measure the stable main
+            // view after its next refresh, rather than counting that transition.
+            qdd_ui_refresh(&state, ble, true, 87, 2000, "", 0);
+            lv_refr_now(display);
+        }
         const unsigned cached_flushes = flushes;
         lv_mem_monitor(&before);
         for (unsigned i = 0; i < 100; i++) {
@@ -586,6 +637,10 @@ int main(int argc, char **argv) {
             lv_refr_now(display);
         }
         lv_mem_monitor(&after);
+        if (flushes != cached_flushes || before.free_size != after.free_size || before.used_cnt != after.used_cnt) {
+            fprintf(stderr, "Unchanged screen %u: flushes %u -> %u, free %zu -> %zu, allocations %zu -> %zu\n",
+                screen, cached_flushes, flushes, before.free_size, after.free_size, before.used_cnt, after.used_cnt);
+        }
         assert(flushes == cached_flushes && before.free_size == after.free_size && before.used_cnt == after.used_cnt);
     }
     // Screen replacement deletes the old tree before building the next one.
@@ -614,6 +669,10 @@ int main(int argc, char **argv) {
         if (after.free_size > maximum_free) maximum_free = after.free_size;
         assert(maximum_free - minimum_free <= 128);
         assert(after.free_size + 128 >= before.free_size);
+        if (after.free_biggest_size < 4096) {
+            fprintf(stderr, "Replacement %u: free=%zu largest=%zu peak=%zu baseline_free=%zu baseline_largest=%zu\n",
+                i, after.free_size, after.free_biggest_size, after.max_used, before.free_size, before.free_biggest_size);
+        }
         assert(after.free_biggest_size >= 4096);
         assert(after.max_used <= 20 * 1024);
     }

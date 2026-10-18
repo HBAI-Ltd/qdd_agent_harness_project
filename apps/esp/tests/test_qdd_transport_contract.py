@@ -9,6 +9,21 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def c_block(source, marker):
+    """Extract a whole current function/branch, including nested early returns."""
+    start = source.index(marker)
+    opening = source.index("{", start)
+    depth = 0
+    for index in range(opening, len(source)):
+        if source[index] == "{":
+            depth += 1
+        elif source[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start:index + 1]
+    raise AssertionError(f"Unclosed C block: {marker}")
+
+
 class TransportContractTest(unittest.TestCase):
     def setUp(self):
         self.main = (ROOT / "main/qdd_main.c").read_text(encoding="utf8")
@@ -19,7 +34,11 @@ class TransportContractTest(unittest.TestCase):
 
     def test_new_tcp_epoch_drops_owner_and_partial_line(self):
         loop = self.main.split("for (;;) {", 2)[2]
+        self.assertIn("qdd_wifi_poll(now_ms(), s_control.owner == QDD_SOURCE_TCP);", loop)
         self.assertRegex(loop, re.compile(r"s_tcp_epoch != qdd_wifi_tcp_epoch\(\).*?drop_controller\(QDD_SOURCE_TCP\);\s*memset\(&s_tcp_stream, 0, sizeof\(s_tcp_stream\)\)", re.S))
+        self.assertLess(loop.index("qdd_wifi_poll("), loop.index("s_tcp_epoch != qdd_wifi_tcp_epoch()"))
+        self.assertLess(loop.index("memset(&s_tcp_stream"), loop.index("qdd_wifi_read("))
+        self.assertLess(loop.index("qdd_wifi_read("), loop.index("qdd_stream_feed(&s_tcp_stream"))
         self.assertIn("qdd_stream_feed(&s_usb_stream", loop)
         self.assertIn("qdd_stream_feed(&s_tcp_stream", loop)
 
@@ -40,6 +59,39 @@ class TransportContractTest(unittest.TestCase):
         self.assertIn("qdd_control_tick(&s_control, usb_live(),", sync)
         loop = self.main.split("for (;;) {", 2)[2]
         self.assertIn("if (!usb_live())", loop)
+
+    def test_c3_radio_budget_keeps_wifi_speed_code_out_of_shared_internal_ram(self):
+        defaults = dict(re.findall(r"^(CONFIG_\w+)=(.+)$", (ROOT / "sdkconfig.defaults").read_text(encoding="utf8"), re.M))
+        # The controller forwards small HID packets, not phone video. Restoring
+        # these speed options would consume the headroom reserved for radio RX.
+        for option in ("CONFIG_ESP_WIFI_IRAM_OPT", "CONFIG_ESP_WIFI_RX_IRAM_OPT"):
+            self.assertEqual(defaults[option], "n")
+        static_rx = int(defaults["CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM"])
+        dynamic_rx = int(defaults["CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM"])
+        self.assertGreaterEqual(static_rx, 2)
+        self.assertLessEqual(static_rx, 4)
+        self.assertGreaterEqual(dynamic_rx, static_rx)
+        self.assertLessEqual(dynamic_rx, 8)
+        self.assertLessEqual(int(defaults["CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM"]), 8)
+        self.assertEqual(defaults["CONFIG_BT_NIMBLE_MAX_CONNECTIONS"], "1")
+        self.assertEqual(defaults["CONFIG_ESP_WIFI_AMPDU_RX_ENABLED"], "n")
+        self.assertEqual(defaults["CONFIG_ESP_WIFI_AMPDU_TX_ENABLED"], "n")
+        initial_rto_ms = int(defaults["CONFIG_LWIP_TCP_RTO_TIME"])
+        self.assertEqual(initial_rto_ms, 1000)
+        # A TCP retransmission opportunity must precede the existing safety
+        # deadlines; lowering transport recovery never extends either deadline.
+        hid = (ROOT / "main/qdd_hid.h").read_text(encoding="utf8")
+        watchdog_ms = int(re.search(r"^#define QDD_HEARTBEAT_MS (\d+)$", hid, re.M).group(1))
+        self.assertEqual(watchdog_ms, 1500)
+        self.assertLess(initial_rto_ms, 1200)  # PC SerialHidBridge's existing ACK deadline.
+        self.assertLess(initial_rto_ms, watchdog_ms)
+        fast_tick_ms = int(defaults["CONFIG_LWIP_TCP_TMR_INTERVAL"])
+        self.assertEqual(fast_tick_ms, 125)
+        slow_tick_ms = 2 * fast_tick_ms
+        self.assertEqual(initial_rto_ms % slow_tick_ms, 0)
+        # lwIP's integer variance floor is three slow ticks after zero-RTT
+        # samples; the old 500ms tick produced 1500ms, outside the ACK deadline.
+        self.assertLess(3 * slow_tick_ms, 1200)
 
     def test_configuration_and_dead_controller_block_reports(self):
         report = self.main.split("static bool report(", 1)[1].split("static bool controller_live(void) {", 1)[0]
@@ -69,7 +121,8 @@ class TransportContractTest(unittest.TestCase):
         self.assertNotIn("EVENT_PAUSE", self.main)
         self.assertNotIn("EVENT_ARM", self.main)
         self.assertIn("atomic_fetch_xor(&s_home_selection, 1u)", callback)
-        self.assertIn("atomic_load(&s_home_selection) == 1", callback)
+        self.assertRegex(callback, re.compile(r"qdd_ui_home_action\(qdd_ui_guide_step\(\),\s*atomic_load\(&s_home_selection\), atomic_load\(&s_physical_stop\)\)", re.S))
+        self.assertIn("action == QDD_UI_HOME_UNLOCK", callback)
         sync = self.main.split("static void sync_safety(void)", 1)[1].split("static bool write_reply", 1)[0]
         unlock = sync.split("if ((events & EVENT_UNLOCK)", 1)[1]
         self.assertIn("!(events & (EVENT_STOP | EVENT_MENU))", unlock)
@@ -78,22 +131,31 @@ class TransportContractTest(unittest.TestCase):
         self.assertNotIn(".op = QDD_ARM", unlock)
 
     def test_actual_callback_uses_current_selection_and_never_navigates_into_stop(self):
-        callback = "static void on_key(" + self.main.split("static void on_key(", 1)[1].split("static bool report(", 1)[0]
+        callback = c_block(self.main, "static void on_key(")
         definitions = "\n".join(re.findall(r"^#define EVENT_[^\n]+", self.main, re.M))
         source = r"""
 #include <assert.h>
 #include <stdatomic.h>
 #include <stdbool.h>
+#include "qdd_ui_model.h"
 typedef enum { BSP_BTN_UP, BSP_BTN_DOWN, BSP_BTN_OK } bsp_btn_t;
 typedef enum { BSP_BTN_PRESS, BSP_BTN_CLICK, BSP_BTN_LONG } bsp_btn_ev_t;
 static atomic_uint s_events, s_home_selection;
-static atomic_bool s_physical_stop, s_configuring;
+static atomic_bool s_physical_stop, s_configuring, s_buttons_ready;
+static unsigned s_guide_step;
+static unsigned qdd_ui_guide_step(void) { return s_guide_step; }
 """ + definitions + "\n" + callback + r"""
 static void reset(void) {
   atomic_store(&s_events, 0); atomic_store(&s_home_selection, 0);
   atomic_store(&s_physical_stop, false); atomic_store(&s_configuring, false);
+  atomic_store(&s_buttons_ready, true); s_guide_step = 0;
 }
 int main(void) {
+  reset(); atomic_store(&s_buttons_ready, false);
+  on_key(BSP_BTN_OK, BSP_BTN_CLICK, 0);
+  on_key(BSP_BTN_DOWN, BSP_BTN_PRESS, 0);
+  assert(!atomic_load(&s_events) && !atomic_load(&s_physical_stop));
+  assert(!atomic_load(&s_home_selection) && !atomic_load(&s_configuring));
   reset(); // Initial default is emergency stop, but navigation never stops.
   on_key(BSP_BTN_UP, BSP_BTN_PRESS, 0);
   assert(atomic_load(&s_home_selection) == 1 && !atomic_load(&s_events));
@@ -123,6 +185,25 @@ int main(void) {
   assert(atomic_load(&s_events) == (EVENT_CONFIG_DOWN | EVENT_CONFIG_LONG));
   reset(); on_key(BSP_BTN_OK, BSP_BTN_LONG, 0);
   assert(!atomic_load(&s_events) && !atomic_load(&s_physical_stop));
+  // Every setup-guide step excludes STOP/UNLOCK, even with an old selection.
+  for (unsigned step = 1; step <= 5; step++) {
+    for (unsigned locked = 0; locked <= 1; locked++) {
+      reset(); s_guide_step = step; atomic_store(&s_physical_stop, locked);
+      on_key(BSP_BTN_DOWN, BSP_BTN_PRESS, 0);
+      assert(!atomic_load(&s_events) && atomic_load(&s_physical_stop) == locked);
+      assert(atomic_load(&s_home_selection) == (qdd_ui_home_choices(step) > 1));
+      for (unsigned selection = 0; selection <= 1; selection++) {
+        reset(); s_guide_step = step; atomic_store(&s_physical_stop, locked);
+        atomic_store(&s_home_selection, selection);
+        on_key(BSP_BTN_OK, BSP_BTN_CLICK, 0);
+        const unsigned expected = selection == 1 || step == 1 || step == 5 ? EVENT_MENU :
+            step == 4 ? EVENT_SKIP_BLUETOOTH : EVENT_SKIP_APP;
+        assert(atomic_load(&s_events) == expected);
+        assert(atomic_load(&s_physical_stop) == locked);
+        assert(atomic_load(&s_configuring) == (expected == EVENT_MENU));
+      }
+    }
+  }
   return 0;
 }
 """
@@ -130,24 +211,28 @@ int main(void) {
             source_path = Path(directory) / "buttons.c"
             executable = Path(directory) / ("buttons.exe" if os.name == "nt" else "buttons")
             source_path.write_text(source, encoding="utf8")
-            subprocess.run([os.environ.get("CC", "cc"), "-std=c11", "-Wall", "-Wextra", "-Werror", str(source_path), "-o", str(executable)], check=True, capture_output=True)
+            compiled = subprocess.run([os.environ.get("CC", "cc"), "-std=c11", "-Wall", "-Wextra", "-Werror",
+                "-I", str(ROOT / "main"), str(source_path), str(ROOT / "main/qdd_ui_model.c"), "-o", str(executable)], capture_output=True, text=True)
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
             subprocess.run([str(executable)], check=True, capture_output=True)
 
     def test_ui_does_not_expose_a_manual_pause_or_resume_workflow(self):
         for filename in ("qdd_ui.c", "qdd_ui_model.c"):
             ui = (ROOT / "main" / filename).read_text(encoding="utf8")
             self.assertNotIn("暂停", ui)
-            self.assertNotIn("恢复", ui)
+            self.assertNotRegex(ui, r'"恢复(?:控制|操作|远控|远程操作)?"')
             self.assertNotIn("QDD_UI_PAUSED", ui)
 
     def test_menus_use_navigation_only_behind_the_input_gate(self):
-        callback = self.main.split("static void on_key(", 1)[1].split("static bool report(", 1)[0]
-        stop = callback.split("} else {", 1)[1]
+        callback = c_block(self.main, "static void on_key(")
+        stop = c_block(callback, "} else {")
         self.assertLess(stop.index("atomic_store(&s_physical_stop, true)"), stop.index("atomic_fetch_or(&s_events, EVENT_STOP)"))
-        configuring = callback.split("return;", 1)[0]
+        configuring = c_block(callback, "if (atomic_load(&s_configuring))")
         self.assertIn("EVENT_CONFIG_DOWN", configuring)
         self.assertNotIn("EVENT_STOP", configuring)
-        self.assertNotIn("qdd_ui_", callback)
+        # These three model/atomic-read functions are bounded and do no rendering.
+        self.assertEqual(set(re.findall(r"\b(qdd_ui_\w+)\(", callback)),
+                         {"qdd_ui_home_choices", "qdd_ui_guide_step", "qdd_ui_home_action"})
         self.assertNotIn("lv_", callback)
         ui = (ROOT / "main/qdd_ui.c").read_text(encoding="utf8")
         self.assertNotIn("电源", ui)

@@ -1,5 +1,6 @@
 // Application-owned HOGP GATT service on ESP-IDF NimBLE; one Bluetooth host.
 #include "qdd_ble.h"
+#include "qdd_ble_policy.h"
 
 #include "esp_mac.h"
 #include "esp_random.h"
@@ -21,7 +22,6 @@
 #include <stdatomic.h>
 #include <string.h>
 
-#define PAIRING_WINDOW_MS 120000
 #define REPORT_MODE 1
 
 // Standard HID report descriptors: relative 3-button mouse with wheel, boot
@@ -50,7 +50,7 @@ static uint8_t s_address_type;
 static atomic_uint_fast16_t s_connection = BLE_HS_CONN_HANDLE_NONE;
 static uint16_t s_input_handles[2][4];
 static qdd_hid_subscriptions_t s_subscriptions;
-static uint64_t s_pairing_deadline;
+static qdd_ble_policy_t s_policy;
 static atomic_bool s_new_peer;
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 static qdd_ble_status_t s_status;
@@ -62,6 +62,7 @@ static uint8_t s_pnp_id[7];
 void ble_store_config_init(void);
 static int gap_event(struct ble_gap_event *event, void *argument);
 static void on_reset(int reason);
+static void reset_link(void);
 
 static uint64_t now_ms(void) { return (uint64_t)esp_timer_get_time() / 1000u; }
 
@@ -237,8 +238,31 @@ static bool known_peer(const ble_addr_t *address) {
 
 void qdd_ble_open_pairing(void) {
   portENTER_CRITICAL(&s_lock);
-  s_pairing_deadline = now_ms() + PAIRING_WINDOW_MS;
-  s_status.pairing_open = true;
+  qdd_ble_policy_open(&s_policy, now_ms());
+  s_status.pairing_open = s_policy.pairing_open;
+  portEXIT_CRITICAL(&s_lock);
+}
+
+void qdd_ble_pairing_context(bool active) {
+  portENTER_CRITICAL(&s_lock);
+  const bool was_open = s_policy.pairing_open;
+  const bool secure = s_status.connected && s_status.encrypted &&
+                      s_status.authenticated && s_status.bonded;
+  qdd_ble_policy_context(&s_policy, active, secure, now_ms());
+  s_status.pairing_open = s_policy.pairing_open;
+  const bool closed = was_open && !s_policy.pairing_open;
+  if (closed) s_status.passkey_visible = false;
+  const bool terminate = closed && !s_status.authenticated;
+  portEXIT_CRITICAL(&s_lock);
+  const uint16_t connection = atomic_load(&s_connection);
+  if (terminate && atomic_load(&s_new_peer) && connection != BLE_HS_CONN_HANDLE_NONE) {
+    (void)ble_gap_terminate(connection, BLE_ERR_REM_USER_CONN_TERM);
+  }
+}
+
+static void request_advertising(void) {
+  portENTER_CRITICAL(&s_lock);
+  qdd_ble_policy_advertise(&s_policy, now_ms());
   portEXIT_CRITICAL(&s_lock);
 }
 
@@ -276,7 +300,10 @@ static void update_security(uint16_t connection) {
   update_ready_locked();
   if (s_status.encrypted && s_status.authenticated && s_status.bonded) {
     s_status.passkey_visible = false;
-    if (s_new_peer) s_status.pairing_open = false;
+    if (s_new_peer) {
+      qdd_ble_policy_secure(&s_policy);
+      s_status.pairing_open = false;
+    }
   }
   portEXIT_CRITICAL(&s_lock);
 }
@@ -286,8 +313,8 @@ static int gap_event(struct ble_gap_event *event, void *argument) {
   switch (event->type) {
     case BLE_GAP_EVENT_CONNECT: {
       if (event->connect.status != 0) {
-        on_reset(event->connect.status);
-        (void)advertise();
+        reset_link();
+        request_advertising();
         return 0;
       }
       s_connection = event->connect.conn_handle;
@@ -364,10 +391,10 @@ static int gap_event(struct ble_gap_event *event, void *argument) {
       qdd_hid_subscriptions_reset(&s_subscriptions);
       update_ready_locked();
       portEXIT_CRITICAL(&s_lock);
-      (void)advertise();
+      request_advertising();
       return 0;
     case BLE_GAP_EVENT_ADV_COMPLETE:
-      (void)advertise();
+      request_advertising();
       return 0;
     default: return 0;
   }
@@ -375,16 +402,18 @@ static int gap_event(struct ble_gap_event *event, void *argument) {
 
 static void on_sync(void) {
   if (ble_hs_util_ensure_addr(0) != 0 || ble_hs_id_infer_auto(0, &s_address_type) != 0) return;
+  portENTER_CRITICAL(&s_lock);
+  s_policy.host_synced = true;
+  portEXIT_CRITICAL(&s_lock);
   ble_addr_t peers[CONFIG_BT_NIMBLE_MAX_BONDS];
   int count = 0;
   if (ble_store_util_bonded_peers(peers, &count, CONFIG_BT_NIMBLE_MAX_BONDS) == 0 && !count) {
     qdd_ble_open_pairing();
   }
-  (void)advertise();
+  request_advertising();
 }
 
-static void on_reset(int reason) {
-  (void)reason;
+static void reset_link(void) {
   portENTER_CRITICAL(&s_lock);
   s_status.link_epoch++;
   s_status.connected = false;
@@ -396,6 +425,14 @@ static void on_reset(int reason) {
   update_ready_locked();
   portEXIT_CRITICAL(&s_lock);
   atomic_store(&s_connection, BLE_HS_CONN_HANDLE_NONE);
+}
+
+static void on_reset(int reason) {
+  (void)reason;
+  reset_link();
+  portENTER_CRITICAL(&s_lock);
+  s_policy.host_synced = false;
+  portEXIT_CRITICAL(&s_lock);
 }
 
 static void host_task(void *argument) {
@@ -442,17 +479,31 @@ esp_err_t qdd_ble_start(void) {
 }
 
 void qdd_ble_poll(void) {
-  bool expired = false;
+  const uint64_t now = now_ms();
   portENTER_CRITICAL(&s_lock);
-  if (s_status.pairing_open && now_ms() >= s_pairing_deadline) {
-    s_status.pairing_open = false;
+  const bool expired = qdd_ble_policy_expire(&s_policy, now);
+  s_status.pairing_open = s_policy.pairing_open;
+  if (expired) {
     s_status.passkey_visible = false;
-    expired = true;
   }
+  const bool retry = s_policy.host_synced && s_policy.advertise_pending &&
+                     now >= s_policy.advertise_at;
   portEXIT_CRITICAL(&s_lock);
   if (expired && s_new_peer && s_connection != BLE_HS_CONN_HANDLE_NONE &&
       !qdd_ble_status().authenticated) {
     (void)ble_gap_terminate(s_connection, BLE_ERR_REM_USER_CONN_TERM);
+  }
+  if (retry && atomic_load(&s_connection) == BLE_HS_CONN_HANDLE_NONE) {
+    const bool active = ble_gap_adv_active() != 0;
+    portENTER_CRITICAL(&s_lock);
+    const bool due = qdd_ble_policy_advertise_due(&s_policy,
+        atomic_load(&s_connection) != BLE_HS_CONN_HANDLE_NONE, active, now);
+    portEXIT_CRITICAL(&s_lock);
+    if (due && advertise() != 0) {
+      portENTER_CRITICAL(&s_lock);
+      qdd_ble_policy_advertise_failed(&s_policy);
+      portEXIT_CRITICAL(&s_lock);
+    }
   }
 }
 

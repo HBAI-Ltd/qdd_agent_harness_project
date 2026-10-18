@@ -126,12 +126,14 @@ public final class ScreenService extends Service {
   @Override public int onStartCommand(Intent intent, int flags, int startId) {
     if (intent == null || STOP.equals(intent.getAction())) { requestStop("投屏已停止"); return START_NOT_STICKY; }
     if (!START.equals(intent.getAction()) || app.frames.isActive()) return START_NOT_STICKY;
+    // onDestroy releases two worker queues asynchronously. Never consume a
+    // second grant in this stopping instance or overlap its old pixel buffers.
+    if (stopRequested || app.frames.isStopping()) { stopSelfResult(startId); return START_NOT_STICKY; }
     Intent permission = intent.getParcelableExtra("projectionData");
     int resultCode = intent.getIntExtra("projectionResult", 0);
     if (permission == null || resultCode != android.app.Activity.RESULT_OK) { requestStop("未获得系统录屏授权"); return START_NOT_STICKY; }
-    stopRequested = false;
-    generation = app.frames.begin();
     try {
+      generation = app.frames.begin();
       if (Build.VERSION.SDK_INT >= 29) startForeground(NOTIFICATION, notification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION);
       else startForeground(NOTIFICATION, notification());
     } catch (RuntimeException error) { requestStop("无法启动前台投屏服务，请检查系统授权"); return START_NOT_STICKY; }
@@ -406,8 +408,10 @@ public final class ScreenService extends Service {
 
   private void closeReader() {
     capture.removeCallbacks(encodeLatest); encodePending = false;
-    if (reader != null) { closeImageReader(reader); reader = null; }
-    if (standbyReader != null) { closeImageReader(standbyReader); standbyReader = null; }
+    ImageReader previous = reader, standby = standbyReader;
+    reader = standbyReader = null;
+    try { closeImageReader(previous); } catch (RuntimeException ignored) { /* Release the other producer as well. */ }
+    try { closeImageReader(standby); } catch (RuntimeException ignored) { /* Continue bitmap cleanup. */ }
     synchronized (encodeLock) {
       layoutRevision += 1;
       if (pendingFrame != null) { pendingFrame.bitmap.recycle(); pendingFrame = null; }
@@ -424,12 +428,20 @@ public final class ScreenService extends Service {
 
   private void releaseProjection() {
     capture.removeCallbacks(refreshProjection);
-    if (displayListenerRegistered) { getSystemService(DisplayManager.class).unregisterDisplayListener(displayListener); displayListenerRegistered = false; }
-    if (display != null) { display.release(); display = null; }
+    if (displayListenerRegistered) {
+      displayListenerRegistered = false;
+      try { getSystemService(DisplayManager.class).unregisterDisplayListener(displayListener); }
+      catch (RuntimeException ignored) { /* Vendor display service may already be gone. */ }
+    }
+    VirtualDisplay previousDisplay = display; display = null;
+    if (previousDisplay != null) {
+      try { previousDisplay.release(); } catch (RuntimeException ignored) { /* Still release readers and grant. */ }
+    }
     closeReader();
     if (projection != null) {
       MediaProjection previous = projection; projection = null;
-      previous.unregisterCallback(projectionCallback); previous.stop();
+      try { previous.unregisterCallback(projectionCallback); } catch (RuntimeException ignored) { /* Grant may already be invalid. */ }
+      try { previous.stop(); } catch (RuntimeException ignored) { /* Cleanup is idempotent after a system stop. */ }
     }
   }
 
@@ -444,7 +456,16 @@ public final class ScreenService extends Service {
     stopRequested = true;
     releaseWifiLock();
     app.frames.stop(generation, "投屏已停止"); stopForeground(STOP_FOREGROUND_REMOVE);
-    capture.post(() -> { releaseProjection(); captureThread.quitSafely(); encoder.post(this::closePreviewBitmap); encodeThread.quitSafely(); });
+    capture.post(() -> {
+      try { releaseProjection(); }
+      finally {
+        captureThread.quitSafely();
+        encoder.post(() -> {
+          try { closePreviewBitmap(); }
+          finally { app.frames.finishStop(generation); encodeThread.quitSafely(); }
+        });
+      }
+    });
     super.onDestroy();
   }
 

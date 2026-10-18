@@ -20,6 +20,8 @@ esp_err_t qdd_ble_start(void);
 const char *qdd_ble_name(void);
 qdd_ble_status_t qdd_ble_status(void);
 void qdd_ble_open_pairing(void);
+// Main-loop context: guide step four / Bluetooth settings. Never erases bonds.
+void qdd_ble_pairing_context(bool active);
 void qdd_ble_poll(void);
 // Presentation task publishes its cached sample; GATT callbacks never read I2C.
 void qdd_ble_set_battery(int percent);

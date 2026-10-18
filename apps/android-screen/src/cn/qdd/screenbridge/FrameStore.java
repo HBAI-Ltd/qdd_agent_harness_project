@@ -51,6 +51,7 @@ final class FrameStore {
   private long generation;
   private long geometryEpoch;
   private boolean active;
+  private boolean stopping;
   private boolean wifiLockHeld;
   private String wifiLockRequestedMode = "none";
   private Frame latest;
@@ -99,6 +100,7 @@ final class FrameStore {
   private int recentFrameIndex;
 
   synchronized long begin() {
+    if (stopping) throw new IllegalStateException("The previous screen-sharing session is still closing");
     generation += 1; geometryEpoch += 1; active = true; latest = null; status = "正在启动投屏";
     original = null; originalRequests.clear(); deviceWidth = deviceHeight = 0;
     wifiLockHeld = false; wifiLockRequestedMode = "none";
@@ -112,11 +114,20 @@ final class FrameStore {
   synchronized void stop(long owner, String message) {
     if (owner != generation) return;
     if (!active && latest == null && !status.equals("尚未开始投屏")) return;
+    stopping = true;
     active = false; latest = null; status = message;
     original = null; originalRequests.clear();
     wifiLockHeld = false; wifiLockRequestedMode = "none";
     notifyAll();
   }
+
+  synchronized void finishStop(long owner) {
+    if (owner != generation) return;
+    stopping = false;
+    notifyAll();
+  }
+
+  synchronized boolean isStopping() { return stopping; }
 
   synchronized void invalidate(long owner) {
     if (owner == generation) { geometryEpoch += 1; latest = original = null; originalRequests.clear(); status = "屏幕转向了，正在更新画面"; notifyAll(); }
@@ -253,6 +264,7 @@ final class FrameStore {
       json.put("maxFps", streamClients > 0 ? Math.round(10000.0 / STREAM_FRAME_GAP_MS) / 10.0 : 5.0);
       json.put("deviceId", deviceId); json.put("model", model); json.put("rotation", rotation);
       json.put("projecting", active);
+      json.put("stopping", stopping);
       json.put("previewProfile", previewProfile.id); json.put("deviceWidth", deviceWidth); json.put("deviceHeight", deviceHeight);
       json.put("wifiLockRequestedMode", wifiLockRequestedMode); json.put("wifiLockHeld", wifiLockHeld);
       json.put("active", active); json.put("port", port); json.put("message", status);

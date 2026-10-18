@@ -4,6 +4,8 @@ import type { HidOperation, HidStatus } from "./protocol.js";
 const MAX_PENDING_HEARTBEATS = 4;
 
 export interface SerialBridge {
+  /** Recent current-round control ACK, when the transport can prove freshness. */
+  readonly controlStatus?: HidStatus | undefined;
   request(op: HidOperation, args?: readonly number[], signal?: AbortSignal): Promise<HidStatus>;
   requestRealtime?(op: "MOVE" | "KEY", args: readonly number[], signal?: AbortSignal): Promise<HidStatus>;
   close(): Promise<void>;
@@ -32,6 +34,7 @@ export interface SerialBridgeOptions {
 interface Pending {
   id: number;
   sequence: number;
+  controlRevision: number;
   resolve: (status: HidStatus) => void;
   reject: (error: Error) => void;
   timer: NodeJS.Timeout;
@@ -47,6 +50,12 @@ class AckTimeoutError extends Error {
 
 export function aborted(signal?: AbortSignal): void {
   if (signal?.aborted) throw new Error("HID operation cancelled.", { cause: signal.reason });
+}
+
+/** Cancellation must belong to this signal; an independently failed link stays fail-closed. */
+export function isHidCancellation(error: unknown, signal?: AbortSignal): boolean {
+  return signal?.aborted === true && (error === signal.reason || error instanceof Error && error.cause === signal.reason
+    && (error.name === "AbortError" || error.message === "HID operation cancelled."));
 }
 
 /** Shared HID session; every new serial/TCP connection stays paused until explicit ARM. */
@@ -65,19 +74,25 @@ export class SerialHidBridge implements SerialBridge {
   private realtimeCleanup: Promise<void> | undefined;
   private sequence = 0;
   private latestSequence = 0;
+  private latestReceivedAt = -Infinity;
+  private latestControlRevision = -1;
   private heartbeat: NodeJS.Timeout | undefined;
   private heartbeatRevision = 0;
   private readonly heartbeatPendingIds = new Set<number>();
   private readonly retiredHeartbeats = new Set<number>();
   private ready = false;
+  private observing = false;
+  private controlAttempted = false;
   private disposed = false;
   private transportFailure: Error | undefined;
   private latest: HidStatus | undefined;
   private readonly timeoutMs: number;
+  private readonly observationTimeoutMs: number;
   private readonly heartbeatMs: number;
 
   constructor(private readonly options: SerialBridgeOptions) {
     this.timeoutMs = options.timeoutMs ?? 1200;
+    this.observationTimeoutMs = options.timeoutMs === undefined ? 3000 : Math.min(options.timeoutMs, 3000);
     this.heartbeatMs = options.heartbeatMs ?? 300;
     if (!Number.isFinite(this.timeoutMs) || this.timeoutMs <= 0
       || !Number.isFinite(this.heartbeatMs) || this.heartbeatMs <= 0 || this.heartbeatMs >= 1500) {
@@ -86,6 +101,11 @@ export class SerialHidBridge implements SerialBridge {
   }
 
   get lastStatus(): HidStatus | undefined { return this.latest; }
+  get controlStatus(): HidStatus | undefined {
+    return this.ready && !this.transportFailure && this.port?.isOpen
+      && this.latestControlRevision === this.heartbeatRevision && performance.now() - this.latestReceivedAt <= this.timeoutMs
+      && this.latest ? { ...this.latest } : undefined;
+  }
 
   request(op: HidOperation, args: readonly number[] = [], signal?: AbortSignal): Promise<HidStatus> {
     encodeCommand(1, op, args); // reject malformed input before opening the port
@@ -96,7 +116,8 @@ export class SerialHidBridge implements SerialBridge {
       await Promise.allSettled(reports);
       aborted(signal);
       if (this.disposed) throw new Error("HID bridge is closed.");
-      await this.connect();
+      if (op !== "STATUS") this.controlAttempted = true;
+      await this.connect(op === "STATUS" && !this.controlAttempted);
       aborted(signal);
       if (this.disposed) throw new Error("HID bridge is closing.");
       try {
@@ -105,10 +126,20 @@ export class SerialHidBridge implements SerialBridge {
         // A timer may have run while the exclusive request or ARM's PING waited.
         // Retire it at the actual state-changing wire boundary as well.
         if (startsRound) this.retireHeartbeat();
-        return await this.exchange(op, args, signal);
+        return await this.exchange(op, args, signal, this.observing ? this.observationTimeoutMs : this.timeoutMs);
       } catch (error) {
+        if (this.observing) {
+          // Observation has never claimed control. A real fault closes only
+          // this socket; cancellation can leave it open for another STATUS.
+          if (!isHidCancellation(error, signal)) {
+            const observed = this.port;
+            this.port = undefined; this.observing = false; this.latest = undefined;
+            if (observed?.isOpen) await new Promise<void>((resolve) => observed.close(() => resolve()));
+          }
+          throw error;
+        }
         // An acknowledgement can be lost after execution. Release, never retry the input.
-        if (op !== "RELEASE" && this.port?.isOpen) {
+        if (op !== "RELEASE" && !(op === "STATUS" && isHidCancellation(error, signal)) && this.port?.isOpen) {
           try { await this.exchange("RELEASE", []); } catch { /* firmware watchdog releases on link loss */ }
         }
         throw error;
@@ -182,24 +213,34 @@ export class SerialHidBridge implements SerialBridge {
     await Promise.allSettled([this.tail, this.launches, ...this.realtime]);
     const port = this.port;
     if (port?.isOpen) {
-      try { await this.exchange("RELEASE", []); } catch { /* best effort */ }
-      try { await this.exchange("PAUSE", []); } catch { /* best effort */ }
+      if (!this.observing) {
+        try { await this.exchange("RELEASE", []); } catch { /* best effort */ }
+        try { await this.exchange("PAUSE", []); } catch { /* best effort */ }
+      }
       await new Promise<void>((resolve, reject) => port.close((error) => error ? reject(error) : resolve()));
     }
     this.ready = false;
   }
 
-  private async connect(): Promise<void> {
+  private async connect(observeOnly = false): Promise<void> {
     if (!this.options.path.trim()) throw new Error("ESP_PORT is not configured. Set it to the ESP32 serial port to use HID input.");
-    if (this.port?.isOpen && this.ready) return;
+    if (this.port?.isOpen && !this.transportFailure && (this.ready || observeOnly && this.observing)) return;
     this.clearHeartbeat();
     this.ready = false;
     this.buffer = "";
     this.decoder = new StringDecoder("utf8");
     const stale = this.port;
+    const wasObserving = this.observing;
+    this.observing = false;
     if (stale?.isOpen) {
-      try { await this.exchange("RELEASE", []); } catch { /* best effort before replacing transport */ }
-      try { await this.exchange("PAUSE", []); } catch { /* best effort */ }
+      if (wasObserving) {
+        // Never upgrade an old observation byte stream into control. Retire
+        // its callbacks before closing so late ACKs cannot affect the new one.
+        this.port = undefined; this.latest = undefined;
+      } else {
+        try { await this.exchange("RELEASE", []); } catch { /* best effort before replacing transport */ }
+        try { await this.exchange("PAUSE", []); } catch { /* best effort */ }
+      }
       await new Promise<void>((resolve) => stale.close(() => resolve()));
     }
     const port: SerialTransport = this.options.portFactory
@@ -230,6 +271,7 @@ export class SerialHidBridge implements SerialBridge {
         if (error) reject(error); else resolve();
       });
     });
+    let handshaking = true;
     try {
       this.assertConnectPort(port);
       // ESP USB Serial/JTAG uses DTR for CDC traffic; asserting RTS can keep a
@@ -250,25 +292,15 @@ export class SerialHidBridge implements SerialBridge {
         });
       }
       this.assertConnectPort(port);
-      try {
-        await this.exchange("PING", []);
-      } catch (error) {
-        // A cold connection may miss its first neutral handshake. Only
-        // that ACK timeout can retry; report/ARM requests are never replayed.
-        if (!(error instanceof AckTimeoutError) || error.op !== "PING") throw error;
-        this.assertConnectPort(port);
-        await new Promise<void>((resolve) => setTimeout(resolve, 100));
-        this.assertConnectPort(port);
-        await this.exchange("PING", []);
+      if (observeOnly) {
+        this.observing = true;
+        return;
       }
-      this.assertConnectPort(port);
-      await this.exchange("RELEASE", []);
-      this.assertConnectPort(port);
-      await this.exchange("PAUSE", []);
-      this.assertConnectPort(port);
-      this.ready = true;
+      // The first PING claims the board's 1500ms owner lease. Its ACK and the
+      // paused handshake can each be slow, so keep neutral renewals running
+      // from the first wire attempt without opening the realtime input gate.
       this.heartbeat = setInterval(() => {
-        if (!this.ready || this.disposed || this.heartbeatPendingIds.size >= MAX_PENDING_HEARTBEATS) return;
+        if ((!this.ready && !handshaking) || this.port !== port || this.disposed || this.heartbeatPendingIds.size >= MAX_PENDING_HEARTBEATS) return;
         const revision = this.heartbeatRevision;
         const heartbeatId = this.nextId;
         this.heartbeatPendingIds.add(heartbeatId);
@@ -292,10 +324,29 @@ export class SerialHidBridge implements SerialBridge {
         });
       }, this.heartbeatMs);
       this.heartbeat.unref();
+      try {
+        await this.exchange("PING", []);
+      } catch (error) {
+        // A cold connection may miss its first neutral handshake. Only
+        // that ACK timeout can retry; report/ARM requests are never replayed.
+        if (!(error instanceof AckTimeoutError) || error.op !== "PING") throw error;
+        this.assertConnectPort(port);
+        await new Promise<void>((resolve) => setTimeout(resolve, 100));
+        this.assertConnectPort(port);
+        await this.exchange("PING", []);
+      }
+      this.assertConnectPort(port);
+      await this.exchange("RELEASE", []);
+      this.assertConnectPort(port);
+      await this.exchange("PAUSE", []);
+      this.assertConnectPort(port);
+      this.ready = true;
+
     } catch (error) {
+      this.clearHeartbeat();
       if (port.isOpen) await new Promise<void>((resolve) => port.close(() => resolve()));
       throw error;
-    }
+    } finally { handshaking = false; }
   }
 
   private assertConnectPort(port: SerialTransport): void {
@@ -304,7 +355,7 @@ export class SerialHidBridge implements SerialBridge {
     if (this.port !== port || !port.isOpen) throw new Error("ESP32 link is not open.");
   }
 
-  private exchange(op: HidOperation, args: readonly number[], signal?: AbortSignal): Promise<HidStatus> {
+  private exchange(op: HidOperation, args: readonly number[], signal?: AbortSignal, timeoutMs = this.timeoutMs): Promise<HidStatus> {
     aborted(signal);
     const port = this.port;
     if (!port?.isOpen) return Promise.reject(new Error("ESP32 link is not open."));
@@ -313,13 +364,17 @@ export class SerialHidBridge implements SerialBridge {
     const line = encodeCommand(id, op, args);
     return new Promise<HidStatus>((resolve, reject) => {
       const onAbort = () => this.failPending(new Error("HID operation cancelled.", { cause: signal?.reason }), id);
-      const timer = setTimeout(() => this.failPending(new AckTimeoutError(op), id), this.timeoutMs);
-      this.pending.set(id, { id, sequence: ++this.sequence, resolve, reject, timer, removeAbort: () => signal?.removeEventListener("abort", onAbort) });
+      const timer = setTimeout(() => this.failPending(new AckTimeoutError(op), id), timeoutMs);
+      this.pending.set(id, { id, sequence: ++this.sequence, controlRevision: this.heartbeatRevision,
+        resolve, reject, timer, removeAbort: () => signal?.removeEventListener("abort", onAbort) });
       signal?.addEventListener("abort", onAbort, { once: true });
       port.write(line, (error) => {
         if (error && this.port === port) {
-          this.transportFailure = error;
-          this.failPending(error, id);
+          // A write callback is a transport fault just like its error event.
+          // Do not retain ready/heartbeat or reuse its failure latch on rearm.
+          this.ready = false;
+          this.clearHeartbeat();
+          this.failTransport(error);
         }
       });
     });
@@ -357,6 +412,7 @@ export class SerialHidBridge implements SerialBridge {
         }
         if (waiting.sequence >= this.latestSequence) {
           this.latest = reply.status; this.latestSequence = waiting.sequence;
+          this.latestReceivedAt = performance.now(); this.latestControlRevision = waiting.controlRevision;
         }
         const pending = this.takePending(reply.id);
         pending?.resolve(reply.status);

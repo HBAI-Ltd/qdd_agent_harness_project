@@ -31,6 +31,113 @@ class FakeBridge implements SerialBridge {
   async close(): Promise<void> {}
 }
 
+test("read-only STATUS and its failure do not make stop claim or release a controller", async () => {
+  const bridge = new FakeBridge(); bridge.status.armed = true;
+  const input = new InputController(bridge, { width: 100, height: 200 });
+  assert.equal((await input.status()).armed, true);
+  await input.stop();
+  assert.deepEqual(bridge.records.map(({ op }) => op), ["STATUS"]);
+  bridge.failNext = "STATUS";
+  await assert.rejects(input.status(), /disconnected/);
+  await input.stop();
+  assert.deepEqual(bridge.records.map(({ op }) => op), ["STATUS", "STATUS"]);
+  assert.equal(bridge.status.armed, true, "An observer cannot pause a different controller.");
+});
+
+test("never-control STATUS remains independent of screen geometry changes and visual/session stop", async () => {
+  const bridge = new FakeBridge();
+  let finish!: () => void, started!: () => void;
+  const pending = new Promise<void>((resolve) => { started = resolve; });
+  bridge.request = (op, args = [], signal) => {
+    assert.equal(op, "STATUS"); bridge.records.push({ op, args });
+    return new Promise<HidStatus>((resolve, reject) => {
+      signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+      finish = () => resolve({ ...bridge.status }); started();
+    });
+  };
+  const input = new InputController(bridge, { width: 100, height: 200 });
+  const observed = input.status(); void observed.catch(() => {});
+  await pending;
+  input.setScreen({ width: 200, height: 100, rotation: 1 });
+  const stopped = input.stop();
+  finish();
+  assert.equal((await observed).v, 1);
+  await stopped;
+  assert.deepEqual(bridge.records.map(({ op }) => op), ["STATUS"]);
+  assert.equal(input.state.armed, false);
+});
+
+test("cached control STATUS is observation-only, honours caller cancellation and reconciles negative state", async (context) => {
+  for (const negative of [{ locked: true }, { connected: false }, { encrypted: false }, { bonded: false }, { armed: false }]) {
+    await context.test(JSON.stringify(negative), async () => {
+      class CachedBridge extends FakeBridge {
+        get controlStatus(): HidStatus { return { ...this.status }; }
+      }
+      const bridge = new CachedBridge(), input = new InputController(bridge, { width: 100, height: 200 });
+      await input.arm(); await input.keyReport(0, 4);
+      const before = bridge.records.length, epoch = input.controlEpoch;
+      const abort = new AbortController(); abort.abort(new Error("Cancel this observer"));
+      await assert.rejects(input.status(abort.signal), /cancelled/);
+      assert.equal(input.state.armed, true); assert.equal(input.controlEpoch, epoch);
+      assert.equal((await input.status()).armed, true);
+      assert.equal(bridge.records.length, before, "Reading a valid snapshot cannot send any wire command or renew the lease.");
+      Object.assign(bridge.status, negative);
+      const status = await input.status();
+      assert.equal(status.input.armed, false); assert.equal(input.controlEpoch, epoch + 1);
+      assert.equal(bridge.records.length, before, "A negative cached ACK revokes local input without claiming another round.");
+    });
+  }
+});
+
+test("STATUS cannot consume an old negative snapshot while a new ARM's preparatory PING is pending", async () => {
+  let release!: () => void, started!: () => void;
+  const waiting = new Promise<void>((resolve) => { started = resolve; });
+  class CachedBridge extends FakeBridge {
+    holdPing = false;
+    get controlStatus(): HidStatus { return { ...this.status, armed: false }; }
+    override async request(op: HidOperation, args: readonly number[] = [], signal?: AbortSignal): Promise<HidStatus> {
+      if (op === "PING" && this.holdPing) {
+        this.holdPing = false;
+        await new Promise<void>((resolve) => { release = resolve; started(); });
+      }
+      return super.request(op, args, signal);
+    }
+  }
+  const bridge = new CachedBridge(), input = new InputController(bridge, { width: 100, height: 200 });
+  await input.arm(); bridge.holdPing = true;
+  const armed = input.arm(); await waiting;
+  const epoch = input.controlEpoch;
+  let finished = false;
+  const observed = input.status().then((status) => { finished = true; return status; });
+  await delay(0);
+  try {
+    assert.equal(finished, false, "A reserved ARM must retire the old snapshot before its first bridge ARM write.");
+    assert.equal(input.controlEpoch, epoch);
+  } finally { release(); }
+  await armed;
+  assert.equal((await observed).input.armed, true);
+});
+
+test("a real STATUS failure concurrent with external cancellation still releases and pauses input", async () => {
+  const abort = new AbortController();
+  class FailedStatusBridge extends FakeBridge {
+    override async request(op: HidOperation, args: readonly number[] = [], signal?: AbortSignal): Promise<HidStatus> {
+      if (op === "STATUS") {
+        this.records.push({ op, args });
+        abort.abort(new Error("Observer cancelled"));
+        throw new Error("Actual transport failure");
+      }
+      return super.request(op, args, signal);
+    }
+  }
+  const bridge = new FailedStatusBridge();
+  const input = new InputController(bridge, { width: 100, height: 200 });
+  await input.arm(); await input.keyReport(0, 4);
+  await assert.rejects(input.status(abort.signal), /Actual transport failure/);
+  assert.equal(input.state.armed, false);
+  assert.deepEqual(bridge.records.slice(-2).map(({ op }) => op), ["RELEASE", "PAUSE"]);
+});
+
 test("realtime reports overlap ACK waits, preserve edges and drain before ordinary input", async () => {
   const bridge = new FakeBridge(); bridge.reportDelay = 80;
   bridge.requestRealtime = bridge.request.bind(bridge);

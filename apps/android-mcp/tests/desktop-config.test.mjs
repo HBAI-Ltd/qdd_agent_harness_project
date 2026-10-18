@@ -24,12 +24,35 @@ test("desktop config accepts the phone's displayed address and keeps Wi-Fi and U
   assert.equal(normalizeDesktopConfig({ ...config, ESP_HOST: "", ESP_SETUP_URL: "http://192.168.1.21:3334/" }).ESP_SETUP_URL, "http://192.168.1.21:3334");
 });
 
+test("copied controller addresses normalize an embedded port and correct download port 3334", () => {
+  const defaults = { ANDROID_SCREEN_URL: "192.168.1.20:8791", ESP_TCP_PORT: "5555" };
+  for (const ESP_HOST of ["192.168.1.21:4444", "192.168.1.21：4444"]) {
+    const saved = normalizeDesktopConfig({ ...defaults, ESP_HOST });
+    assert.equal(saved.ESP_HOST, "192.168.1.21"); assert.equal(saved.ESP_TCP_PORT, "4444");
+  }
+  for (const ESP_HOST of ["192.168.1.21:3334", "192.168.1.21：3334", "http://192.168.1.21:3334/", "http：//192.168.1.21：3334/"]) {
+    const saved = normalizeDesktopConfig({ ...defaults, ESP_HOST });
+    assert.equal(saved.ESP_HOST, "192.168.1.21"); assert.equal(saved.ESP_TCP_PORT, "3333");
+  }
+  assert.equal(normalizeDesktopConfig({ ...defaults, ESP_HOST: "192.168.1.21" }).ESP_TCP_PORT, "5555");
+  assert.equal(normalizeDesktopConfig({ ...defaults, ESP_HOST: "192.168.1.21", ESP_TCP_PORT: "3334" }).ESP_TCP_PORT, "3333");
+  for (const ESP_HOST of ["qdd.local", "localhost"]) assert.equal(normalizeDesktopConfig({ ...defaults, ESP_HOST }).ESP_HOST, ESP_HOST);
+});
+
+test("copied controller addresses reject credentials, public IPs, paths and invalid ports", () => {
+  for (const ESP_HOST of ["8.8.8.8:3333", "http://8.8.8.8:3334/", "http://u:p@192.168.1.21:3334/",
+    "http://192.168.1.21:3334/path", "http://192.168.1.21:3334/?x=1", "http://192.168.1.21:3334/#x",
+    "https://192.168.1.21:3334/", "192.168.1.21:0", "192.168.1.21:65536", "http://0x7f000001:3334/"]) {
+    assert.throws(() => normalizeDesktopConfig({ ANDROID_SCREEN_URL: "192.168.1.20:8791", ESP_HOST }));
+  }
+});
+
 test("desktop config rejects malformed endpoints and ports with actionable Chinese messages", () => {
   const valid = { ANDROID_SCREEN_URL: "192.168.1.20:8791", ESP_HOST: "192.168.1.21" };
   for (const change of [{ ANDROID_SCREEN_URL: "" }, { ANDROID_SCREEN_URL: "http://user:password@192.168.1.20:8791" },
     { ANDROID_SCREEN_URL: "http://192.168.1.20:8791/evil" }, { ESP_HOST: "8.8.8.8" },
     { ANDROID_SCREEN_URL: "https://public.example" }, { ANDROID_SCREEN_URL: "http://8.8.8.8:8791" },
-    { ESP_HOST: "192.168.1.21:3333" }, { ESP_TCP_PORT: "0" }, { ANDROID_MCP_PORT: "65536" },
+    { ESP_HOST: "192.168.1.21:invalid" }, { ESP_TCP_PORT: "0" }, { ANDROID_MCP_PORT: "65536" },
     { ESP_HOST: "", ESP_PORT: "garbage" }, { ANDROID_DEVICE_ID: "not-an-id" }, { ESP_SETUP_URL: "http://8.8.8.8:3334" },
     { ESP_SETUP_URL: "http://192.168.1.21:3334/api/status" }, { ESP_SETUP_URL: "http://user:password@192.168.1.21:3334" }]) {
     assert.throws(() => normalizeDesktopConfig({ ...valid, ...change }));

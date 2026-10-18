@@ -37,11 +37,44 @@ class QddBleContractTest(unittest.TestCase):
         )
         self.assertIsNotNone(failed)
         branch = failed.group(1)
-        self.assertIn("on_reset(event->connect.status)", branch)
-        self.assertIn("advertise()", branch)
+        self.assertIn("reset_link()", branch)
+        self.assertIn("request_advertising()", branch)
         self.assertIn("return 0;", branch)
         self.assertNotIn("ble_gap_conn_find", branch)
+        self.assertNotIn("on_reset", branch)
         self.assertLess(failed.end(), body.index("ble_gap_conn_find("))
+        self.assertIn("s_policy.host_synced = false", function_body(self.source, "on_reset"))
+
+    def test_gap_callbacks_defer_advertising_without_recursive_restart(self) -> None:
+        gap = function_body(self.source, "gap_event")
+        self.assertNotRegex(gap, r"\badvertise\s*\(")
+        for event in ("BLE_GAP_EVENT_DISCONNECT", "BLE_GAP_EVENT_ADV_COMPLETE"):
+            marker = f"case {event}:"
+            branch = gap[gap.index(marker) + len(marker):]
+            branch = branch.split("case ", 1)[0] if "case " in branch else branch
+            self.assertIn("request_advertising()", branch)
+        self.assertIn("request_advertising()", function_body(self.source, "on_sync"))
+        poll = function_body(self.source, "qdd_ble_poll")
+        self.assertIn("qdd_ble_policy_advertise_due", poll)
+        self.assertIn("ble_gap_adv_active()", poll)
+        self.assertIn("qdd_ble_policy_advertise_failed", poll)
+
+    def test_pairing_policy_is_integrated_without_deleting_existing_bonds(self) -> None:
+        self.assertIn('"qdd_ble_policy.h"', self.source)
+        self.assertIn("qdd_ble_policy_open", function_body(self.source, "qdd_ble_open_pairing"))
+        self.assertIn("qdd_ble_policy_context", function_body(self.source, "qdd_ble_pairing_context"))
+        self.assertIn("qdd_ble_policy_expire", function_body(self.source, "qdd_ble_poll"))
+        self.assertIn("qdd_ble_policy_secure", function_body(self.source, "update_security"))
+        context = function_body(self.source, "qdd_ble_pairing_context")
+        self.assertIn("s_status.passkey_visible = false", context)
+        self.assertIn("closed && !s_status.authenticated", context)
+        self.assertIn("atomic_load(&s_new_peer)", context)
+        gap = function_body(self.source, "gap_event")
+        repeat = gap[gap.index("case BLE_GAP_EVENT_REPEAT_PAIRING:"):]
+        self.assertIn("return BLE_GAP_REPEAT_PAIRING_IGNORE;", repeat)
+        for forbidden in ("ble_store_util_delete_peer", "ble_store_util_delete_all",
+                          "ble_gap_unpair", "nvs_flash_erase"):
+            self.assertNotRegex(self.source, rf"\b{forbidden}\s*\(")
 
     def test_no_private_sdk_listener_can_be_instantiated(self) -> None:
         self.assertNotRegex(self.source, r"\besp_hidd_dev_init\s*\(")

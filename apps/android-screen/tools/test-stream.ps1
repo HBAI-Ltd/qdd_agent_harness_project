@@ -19,6 +19,7 @@ $sources = @((Join-Path $projectRoot "src/cn/qdd/screenbridge/FrameStore.java"),
 $sources += @(Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot "tests") -Recurse -Filter "*.java" -File | ForEach-Object { $_.FullName })
 $sources += Join-Path $projectRoot "src/cn/qdd/screenbridge/CaptureWifiLock.java"
 $sources += Join-Path $projectRoot "src/cn/qdd/screenbridge/PreviewProfile.java"
+$sources += Join-Path $projectRoot "src/cn/qdd/screenbridge/CaptureConsent.java"
 & $javac -encoding UTF-8 -d $output @sources
 if ($LASTEXITCODE -ne 0) { throw "Stream test compilation failed." }
 & $java "-Djava.awt.headless=true" -cp $output cn.qdd.screenbridge.StreamTransportTest
@@ -29,6 +30,10 @@ if ($LASTEXITCODE -ne 0) { throw "Frame pixel regression failed." }
 if ($LASTEXITCODE -ne 0) { throw "Frame cadence regression failed." }
 & $java -cp $output cn.qdd.screenbridge.CaptureWifiLockTest
 if ($LASTEXITCODE -ne 0) { throw "Projection Wi-Fi lock regression failed." }
+& $java -cp $output cn.qdd.screenbridge.ProjectionLifecycleTest
+if ($LASTEXITCODE -ne 0) { throw "Projection lifecycle regression failed." }
+& $java -cp $output cn.qdd.screenbridge.CaptureConsentTest
+if ($LASTEXITCODE -ne 0) { throw "Capture authorization regression failed." }
 & $java -cp $output cn.qdd.screenbridge.PreviewProfileTest
 if ($LASTEXITCODE -ne 0) { throw "Preview profile regression failed." }
 & $java -cp $output cn.qdd.screenbridge.SetupAddressTest

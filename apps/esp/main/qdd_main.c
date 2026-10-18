@@ -170,6 +170,8 @@ static void setup_key(qdd_setup_key_t key) {
 }
 
 static void sync_safety(void) {
+  qdd_ble_pairing_context(atomic_load(&s_configuring) ?
+      s_setup.page == QDD_SETUP_PAIR : qdd_ui_guide_step() == 4);
   qdd_ble_poll();
   const qdd_ble_status_t ble = qdd_ble_status();
   if (s_link_epoch != ble.link_epoch) {
@@ -407,7 +409,7 @@ void app_main(void) {
   atomic_store(&s_buttons_ready, true);
   vTaskPrioritySet(NULL, 6);
   for (;;) {
-    qdd_wifi_poll(now_ms());
+    qdd_wifi_poll(now_ms(), s_control.owner == QDD_SOURCE_TCP);
     if (s_tcp_epoch != qdd_wifi_tcp_epoch()) {
       drop_controller(QDD_SOURCE_TCP);
       memset(&s_tcp_stream, 0, sizeof(s_tcp_stream));

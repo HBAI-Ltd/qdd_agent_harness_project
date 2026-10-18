@@ -214,3 +214,10 @@ export async function saveStyle(base: string, token: string, text: string, signa
 export async function resetStyle(base: string, token: string, signal?: AbortSignal): Promise<string> {
   return (await request(base, token, "/api/style", { method: "DELETE", signal: signal ?? null })).text();
 }
+
+/** Fetch generated camera recordings without exposing credentials in media URLs. */
+export async function downloadChatVideo(base: string, token: string, url: string, signal?: AbortSignal): Promise<Blob> {
+  return (await request(base, token, "/api/chat/videos", {
+    method: "POST", body: JSON.stringify({ url }), cache: "no-store", signal: signal ?? null,
+  })).blob();
+}

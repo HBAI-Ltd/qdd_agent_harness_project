@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { isCameraCaptureUrl } from "../src/utils/media.ts";
+import { isCameraCaptureUrl, isCameraRecordingUrl } from "../src/utils/media.ts";
 
 const capturePath = "/captures/5a7cc6d8d6ad0b5c262605c7dae903ec/frame_000001.jpg";
 
@@ -31,5 +31,13 @@ test("camera screenshot recognition rejects unrelated images, credentials, query
     "",
   ]) {
     assert.equal(isCameraCaptureUrl(value), false, value);
+  }
+});
+
+test("camera recordings recognize only generated absolute MP4 URLs", () => {
+  const url = "http://127.0.0.1:8790" + capturePath.replace("frame_000001.jpg", "recording.mp4");
+  assert.equal(isCameraRecordingUrl(url), true);
+  for (const invalid of [capturePath, url + "?token=secret", url + "#fragment", url.replace("recording.mp4", "other.mp4"), url.replace("http://", "http://user:pass@"), url + "\n"]) {
+    assert.equal(isCameraRecordingUrl(invalid), false, invalid);
   }
 });

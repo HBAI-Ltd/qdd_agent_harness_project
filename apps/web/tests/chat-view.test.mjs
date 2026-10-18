@@ -60,6 +60,7 @@ const workspaceApiUrl = "data:text/javascript," + encodeURIComponent(`
   export async function downloadAttachment() { return new Blob(); }
   let imageDownloader = async () => new Blob(["fixture"], { type: "image/jpeg" });
   export function setChatImageDownloader(download = async () => new Blob(["fixture"], { type: "image/jpeg" })) { imageDownloader = download; }
+  export async function downloadChatVideo() { return new Blob(); }
   export function downloadChatImage(...args) { return imageDownloader(...args); }
 `);
 const composerUrl = "data:text/javascript," + encodeURIComponent(`

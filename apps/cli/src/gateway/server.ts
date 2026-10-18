@@ -17,7 +17,7 @@ import { pageCsp } from "../guard.js";
 import { BadRequest, Conflict, NotFound, SessionHub } from "../sessions.js";
 import { pinPage, readPages, readPins, readStyle, unpinPage, resetStyle, toScriptJson, writeAtomic, writeStyle } from "../web/site.js";
 import { Auth } from "./auth.js";
-import { chatImageOrigins, readChatImage } from "./chat-images.js";
+import { chatImageOrigins, readChatImage, readChatVideo } from "./chat-images.js";
 import { handleMcp } from "./mcp-endpoint.js";
 import { buildComputeScript, SDK_JS } from "./sdk.js";
 import { CameraLogin } from "../workbench/cameras.js";
@@ -333,6 +333,21 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
       const connectors = await workbench.connectors.list(mcpInfo());
       const image = await readChatImage(body, chatImageOrigins(sources, connectors));
       return send(res, 200, "image/jpeg", image);
+    }
+
+    if (p === "/api/chat/videos") {
+      if (m !== "POST") throw new HttpError(405, "录像读取接口只接受 POST");
+      const body = await readJson(req, 4096);
+      const connectors = await workbench.connectors.list(mcpInfo());
+      const controller = new AbortController();
+      const cancel = () => controller.abort();
+      res.once("close", cancel);
+      try {
+        const video = await readChatVideo(body, chatImageOrigins(sources, connectors), { signal: controller.signal });
+        return send(res, 200, "video/mp4", video);
+      } finally {
+        res.off("close", cancel);
+      }
     }
 
     if (p === "/api/events" && m === "GET") {

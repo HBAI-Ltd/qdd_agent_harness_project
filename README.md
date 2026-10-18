@@ -48,6 +48,12 @@ Aidol 创造营参赛项目——钱多多门店人工智能助手：店铺管�
 
 对话提示词位于 `apps/cli/src/agent/prompt.ts`。策略与结束工具的回归测试位于 `apps/cli/src/agent/conversation-prompt.test.ts`，使用 Node.js 内置测试运行器：`npm run build` 后执行 `node --test apps/cli/dist/agent/conversation-prompt.test.js`；也包含在 `npm test` 中。
 
+### 对话中的摄像头录像
+
+Web 对话中的 `/captures/<32位任务ID>/recording.mp4` 通过 `POST /api/chat/videos` 读取，请求头为 `Authorization: Bearer <网关 token>`，JSON 请求体例如 `{"url":"http://127.0.0.1:8790/captures/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/recording.mp4"}`；成功返回 `200 video/mp4`，前端下载完成后以 blob URL 播放。仅允许运行时已安装且已连接的摄像头来源，不转发凭据、不跟随重定向；最大 256 MiB，读取超时 120 秒，关闭媒体时取消读取。无须放宽采集服务的跨域权限；文件过期、连接器断开或返回非 MP4 时显示具体错误。
+
+离线回归：构建后运行 `node --test apps/cli/dist/chat-images.test.js`，前端运行 `node --test apps/web/tests/media.test.ts apps/web/tests/chat-view.test.mjs`；真实浏览器合成视频验证运行 `node scripts/test-chat-media-browser.mjs`（需要本机 Chrome/Edge 和 FFmpeg）。
+
 ### 图片与截图连续分析
 
 - 浏览器截图、MCP `image` 内容和摄像头结果中的 `job.frames` 会作为真正的 `image_url` 输入传给下一轮模型，不再只返回路径或“无法查看图片”的文字。同批工具全部返回后才附加图片，保持工具调用与结果配对；截图后继续分析、调用后续工具，最后再 `reply` / `finish`。
@@ -123,6 +129,8 @@ Agent 的白名单播放器规范支持在任务 iframe 内生成监控播放页
 播放器的内部取流不等于允许页面业务代码直接联网。视频地址通过已授权的 `qdd.tool` 获取，或由用户在页面输入；不要把签名地址写死在页面中，也不要为视频域名授予脚本 CDN 权限。跨源媒体需要配置上述 `mediaOrigins`，并由媒体服务提供 CORS；HLS 清单、分片、密钥和重定向来源都必须允许。HTTPS 页面仍受浏览器混合内容限制。
 
 FLV 在点击播放后创建 `autoPlay: true` 的 SDK 实例，成功状态兼容 `playing` / `videoFrame` 事件和 `getState().playing`；WASM 使用 canvas 时不能只检查 video 元素。天翼本地接口目前只保留一路预览，监控页面应显式切换摄像头，诊断不能额外请求预览抢占画面；hls.js 解析清单成功不代表视频已解码。
+
+HLS 优先使用同源 hls.js，在 `MEDIA_ATTACHED` 后加载地址、`MANIFEST_PARSED` 后请求播放，只有实际 `playing` 才显示播放中。Chromium 的原生 HLS 检测可能返回 `maybe` 却报 `DEMUXER_ERROR_COULD_NOT_PARSE`，因此仅在 hls.js 或 MSE 不可用时回退原生。天翼本地流已转为 H.264，不应把该解复用错误直接归因于设备 H.265。小猫值班室支持重新取流，失败保留错误详情并释放播放器。
 
 天翼本地服务对 `/streams/<id>/index.m3u8` 和对应 TS 分片开放跨源读取，任务 iframe 可直接播放返回的 HLS 地址。监控相关回归可用 `npm test --prefix mcp/apps/tysl-console`（含实际 HTTP 媒体响应验证）和 `node scripts/test-camera-player-browser.mjs`（本地合成 FLV、WASM 与 Worker 验证）运行；当前生成的总台另有 `node scripts/test-generated-monitor.mjs` 验证播放与切换逻辑。
 

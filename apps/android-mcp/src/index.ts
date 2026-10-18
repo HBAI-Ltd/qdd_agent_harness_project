@@ -47,11 +47,13 @@ export async function startService(options: ServiceOptions): Promise<AndroidServ
   let registration: ReturnType<typeof startBoardRegistration> | undefined;
   const close = (): Promise<void> => {
     closing ??= (async () => {
-      await input.stop().catch(() => {});
+      // Retire the transport before later source/session cleanup can reopen a
+      // disconnected controller. Its close still releases the existing link.
+      await Promise.all([input.stop().catch(() => {}), bridge.close().catch(() => {})]);
       await registration?.close().catch(() => {});
       await liveScreen.close().catch(() => {});
+      await screen.close().catch(() => {});
       await closeTransport?.().catch(() => {});
-      await bridge.close().catch(() => {});
     })();
     return closing;
   };

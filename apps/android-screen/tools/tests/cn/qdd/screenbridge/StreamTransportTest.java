@@ -253,6 +253,7 @@ public final class StreamTransportTest {
         fixture.frames.stop(fixture.owner, "Stopped");
         check("--qdd-frame--".equals(line(stream.input)), "Final multipart boundary on stop");
         check(stream.input.read() == -1, "Stopped stream closes");
+        fixture.frames.finishStop(fixture.owner);
         long next = fixture.frames.begin();
         fixture.frames.publish(next, new FrameStore.Frame(jpeg, "image/jpeg", 8, 12, 0, SystemClock.elapsedRealtime(), Instant.now().toString(), "new-consent"));
         check(!fixture.frames.streaming(fixture.owner), "Old authorization generation cannot resume");
@@ -328,6 +329,7 @@ public final class StreamTransportTest {
         fixture.frames.wifiLock(fixture.owner, "high_performance", true);
         health = fixture.frames.health(fixture.port, "test", "test", 0);
         check(health.contains("\"wifiLockHeld\":false") && health.contains("\"wifiLockRequestedMode\":\"none\""), "A late acquisition result cannot resurrect stopped health state");
+        fixture.frames.finishStop(fixture.owner);
         long next = fixture.frames.begin(); fixture.frames.wifiLock(next, "low_latency", true);
         fixture.frames.wifiLock(fixture.owner, "none", false);
         health = fixture.frames.health(fixture.port, "test", "test", 0);
@@ -428,6 +430,7 @@ public final class StreamTransportTest {
       check(!frames.hasCaptureDemand(), "Timeout releases sparse full encoding demand");
       FrameStore.OriginalRequest stopping = frames.requestOriginal(); frames.stop(owner, "Stopped");
       check(frames.awaitOriginal(stopping, 100) == null, "Stop unblocks original requests");
+      frames.finishStop(owner);
       frames.begin(); check(!frames.publishOriginal(owner, geometry, new FrameStore.Frame(jpeg, "image/jpeg", 8, 12, 0, SystemClock.elapsedRealtime(), Instant.now().toString(), "old-consent")), "Old grant cannot paint a new projection");
     });
 

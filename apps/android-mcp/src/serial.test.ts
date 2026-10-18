@@ -41,16 +41,197 @@ class LostHandshakePort extends FakePort {
   }
 }
 
+class WatchdogHandshakePort extends FakePort {
+  watchdogExpired = false;
+  private lastPing = 0;
+  private watchdog: NodeJS.Timeout | undefined;
+  private readonly timers = new Set<NodeJS.Timeout>();
+  private pings = 0;
+  private releases = 0;
+  private pauses = 0;
+  constructor(private readonly delays: { firstPingAck: number; pingIngress: number; releaseAck: number; pauseAck: number }) { super(); }
+  private later(callback: () => void, milliseconds: number): void {
+    const timer = setTimeout(() => { this.timers.delete(timer); if (this.isOpen) callback(); }, milliseconds);
+    this.timers.add(timer);
+  }
+  override write(data: string, callback: (error?: Error | null) => void): void {
+    this.writes.push(data); callback();
+    const [, id, op] = data.trim().split(" ");
+    const firstPing = op === "PING" && this.pings++ === 0;
+    this.later(() => {
+      if (op === "PING") {
+        this.lastPing = Date.now();
+        this.watchdog ??= setInterval(() => {
+          if (Date.now() - this.lastPing > 1500) { this.watchdogExpired = true; this.disconnect(); }
+        }, 10);
+      }
+      if (op === "PAUSE") this.status.armed = false;
+      const wait = firstPing ? this.delays.firstPingAck : op === "RELEASE" && this.releases++ === 0 ? this.delays.releaseAck
+        : op === "PAUSE" && this.pauses++ === 0 ? this.delays.pauseAck : 0;
+      const reply = `QDDHID/1 ${id} OK ${JSON.stringify(this.status)}\n`;
+      this.later(() => this.emit("data", Buffer.from(reply)), wait);
+    }, op === "PING" && !firstPing ? this.delays.pingIngress : 0);
+  }
+  private clearTimers(): void {
+    clearInterval(this.watchdog); this.watchdog = undefined;
+    for (const timer of this.timers) clearTimeout(timer);
+    this.timers.clear();
+  }
+  override close(callback: (error?: Error | null) => void): void { this.clearTimers(); super.close(callback); }
+  override disconnect(): void { this.clearTimers(); super.disconnect(); }
+}
+
+test("cold STATUS observes without claiming ownership, heartbeats or release and accepts a neutral ACK after 1200ms", { timeout: 4000 }, async (context) => {
+  const port = new FakePort(); port.hold = "STATUS"; port.status.armed = true;
+  const bridge = new SerialHidBridge({ path: "FAKE", portFactory: () => port, heartbeatMs: 40 });
+  context.after(() => bridge.close());
+  const observed = bridge.request("STATUS");
+  void observed.catch(() => {});
+  await delay(1300);
+  assert.deepEqual(port.writes.map((line) => line.trim().split(" ")[2]), ["STATUS"]);
+  await assert.rejects(bridge.requestRealtime("KEY", [0, 4]), /unavailable/);
+  port.emit("data", Buffer.from(`QDDHID/1 ${port.writes[0]!.split(" ")[1]} OK ${JSON.stringify(port.status)}\n`));
+  assert.equal((await observed).armed, true, "Observing must not pause a different controller.");
+  await bridge.close();
+  assert.deepEqual(port.writes.map((line) => line.trim().split(" ")[2]), ["STATUS"]);
+});
+
+test("cold STATUS failure respects an explicit short deadline and never synthesizes control cleanup", async (context) => {
+  const port = new FakePort(); port.hold = "STATUS";
+  const bridge = new SerialHidBridge({ path: "FAKE", portFactory: () => port, timeoutMs: 35, heartbeatMs: 10 });
+  context.after(() => bridge.close());
+  await assert.rejects(bridge.request("STATUS"), /STATUS acknowledgement timed out/);
+  assert.deepEqual(port.writes.map((line) => line.trim().split(" ")[2]), ["STATUS"]);
+  assert.equal(port.isOpen, false);
+});
+
+test("control snapshots expire by actual ACK age and cannot be refreshed by a retired reply", async (context) => {
+  const port = new FakePort();
+  const bridge = new SerialHidBridge({ path: "FAKE", portFactory: () => port, timeoutMs: 40 });
+  const snapshot = () => bridge.controlStatus;
+  context.after(() => bridge.close());
+  await bridge.request("ARM");
+  assert.equal(snapshot()?.armed, true);
+  const oldId = port.writes.at(-1)!.split(" ")[1];
+  await delay(55);
+  assert.equal(snapshot(), undefined);
+  port.emit("data", Buffer.from(`QDDHID/1 ${oldId} OK ${JSON.stringify(port.status)}\n`));
+  assert.equal(snapshot(), undefined, "Retired ACKs cannot reset the observation age.");
+  await bridge.request("STATUS");
+  assert.equal(snapshot()?.armed, true);
+  await bridge.close();
+  assert.equal(snapshot(), undefined);
+});
+
+test("a new control round and transport faults invalidate control snapshots immediately", async (context) => {
+  const port = new FakePort();
+  const bridge = new SerialHidBridge({ path: "FAKE", portFactory: () => port, timeoutMs: 100 });
+  const snapshot = () => bridge.controlStatus;
+  context.after(() => bridge.close());
+  await bridge.request("ARM");
+  port.hold = "ARM";
+  const abort = new AbortController(), rearming = bridge.request("ARM", [], abort.signal);
+  const rejected = assert.rejects(rearming, /cancelled/);
+  assert.equal(snapshot(), undefined);
+  await delay(0);
+  assert.equal(snapshot(), undefined, "The old round and its pre-ARM PING cannot authorize a new-round snapshot.");
+  abort.abort(); await rejected;
+  port.hold = "";
+  await bridge.request("ARM");
+  assert.equal(snapshot()?.armed, true);
+  port.emit("error", new Error("Fixture transport fault"));
+  assert.equal(snapshot(), undefined);
+});
+
+test("control replaces the observation socket and ignores its cancelled late ACK before strict input failure", async (context) => {
+  const ports = [new FakePort(), new FakePort()]; ports[0]!.hold = "STATUS";
+  let opened = 0;
+  const bridge = new SerialHidBridge({ path: "FAKE", portFactory: () => ports[opened++]!, timeoutMs: 80 });
+  context.after(() => bridge.close());
+  const abort = new AbortController(), observed = bridge.request("STATUS", [], abort.signal);
+  const rejected = assert.rejects(observed, /cancelled/);
+  await delay(0); abort.abort(new Error("Observer only")); await rejected;
+  const oldId = ports[0]!.writes[0]!.split(" ")[1];
+  ports[1]!.hold = "ARM";
+  let armSettled = false;
+  const arming = bridge.request("ARM");
+  void arming.then(() => { armSettled = true; }, () => { armSettled = true; });
+  await delay(0);
+  const armId = ports[1]!.writes.at(-1)!.split(" ")[1];
+  assert.match(ports[1]!.writes.at(-1)!, / ARM\n$/);
+  ports[0]!.emit("data", Buffer.from(`QDDHID/1 ${oldId} OK ${JSON.stringify({ ...ports[0]!.status, armed: true })}\n`));
+  await delay(0);
+  assert.equal(armSettled, false, "An old observation reply cannot acknowledge a pending ARM on the new connection.");
+  ports[1]!.status.armed = true;
+  ports[1]!.emit("data", Buffer.from(`QDDHID/1 ${armId} OK ${JSON.stringify(ports[1]!.status)}\n`));
+  assert.equal((await arming).armed, true);
+  assert.equal(opened, 2); assert.equal(ports[0]!.isOpen, false);
+  assert.deepEqual(ports[0]!.writes.map((line) => line.trim().split(" ")[2]), ["STATUS"]);
+  assert.deepEqual(ports[1]!.writes.map((line) => line.trim().split(" ")[2]), ["PING", "RELEASE", "PAUSE", "PING", "ARM"]);
+  ports[0]!.emit("data", Buffer.from(`QDDHID/1 ${oldId} OK ${JSON.stringify({ ...ports[0]!.status, armed: false })}\n`));
+  assert.equal(bridge.lastStatus?.armed, true);
+  ports[1]!.hold = "KEY";
+  await assert.rejects(bridge.request("KEY", [0, 4]), /KEY acknowledgement timed out/);
+  assert.deepEqual(ports[1]!.writes.slice(-2).map((line) => line.trim().split(" ")[2]), ["KEY", "RELEASE"]);
+});
+
+test("cold RELEASE/PAUSE acknowledgements exceeding the owner lease keep neutral heartbeats without enabling input", { timeout: 5000 }, async (context) => {
+  const port = new WatchdogHandshakePort({ firstPingAck: 0, pingIngress: 0, releaseAck: 800, pauseAck: 800 });
+  port.status.armed = true; // A stale board state must not open the realtime gate.
+  const bridge = new SerialHidBridge({ path: "FAKE", portFactory: () => port, timeoutMs: 1200, heartbeatMs: 300 });
+  context.after(() => bridge.close());
+  const connecting = bridge.request("PING");
+  await delay(40);
+  await assert.rejects(bridge.requestRealtime("MOVE", [1, 0, 0, 0]), /unavailable/);
+  assert.equal((await connecting).armed, false);
+  assert.equal(port.watchdogExpired, false);
+  assert.ok(port.writes.filter((line) => line.endsWith(" PING\n")).length >= 5);
+  assert.deepEqual(port.writes.map((line) => line.trim().split(" ")[2]).filter((op) => op !== "PING"), ["RELEASE", "PAUSE"]);
+});
+
+test("cold heartbeat renewal starts before a late first ACK rather than waiting one more interval", { timeout: 5000 }, async (context) => {
+  const port = new WatchdogHandshakePort({ firstPingAck: 1050, pingIngress: 250, releaseAck: 0, pauseAck: 0 });
+  const bridge = new SerialHidBridge({ path: "FAKE", portFactory: () => port, timeoutMs: 1200, heartbeatMs: 300 });
+  context.after(() => bridge.close());
+  await bridge.request("PING"); await delay(600);
+  assert.equal(port.watchdogExpired, false, "Waiting for the first ACK plus another 300ms interval and ingress would exceed the original 1500ms lease.");
+  assert.equal(port.isOpen, true); assert.equal(port.opens, 1);
+  assert.equal(port.writes.some((line) => / (?:ARM|MOVE|KEY|CONSUMER)(?: |\n)/u.test(line)), false);
+});
+
 test("serial opens lazily, handshakes paused and PING precedes explicit ARM", async () => {
   const port = new FakePort();
   const bridge = new SerialHidBridge({ path: "FAKE", portFactory: () => port });
   assert.equal(port.opens, 0);
-  await bridge.request("STATUS");
-  assert.deepEqual(port.writes.map((line) => line.split(" ")[2]?.trim()), ["PING", "RELEASE", "PAUSE", "STATUS"]);
+  await bridge.request("PING");
+  assert.deepEqual(port.writes.map((line) => line.split(" ")[2]?.trim()), ["PING", "RELEASE", "PAUSE", "PING"]);
   const status = await bridge.request("ARM");
   assert.equal(status.armed, true);
   assert.deepEqual(port.writes.slice(-2).map((line) => line.split(" ")[2]?.trim()), ["PING", "ARM"]);
   await bridge.close();
+});
+
+test("a transport write fault retires the failed connection before explicit rearm and restores a valid status snapshot", async (context) => {
+  class FaultedWritePort extends FakePort {
+    override write(data: string, callback: (error?: Error | null) => void): void {
+      if (data.includes(" MOVE ")) { this.writes.push(data); callback(new Error("Fixture write fault")); return; }
+      super.write(data, callback);
+    }
+  }
+  const ports = [new FaultedWritePort(), new FakePort()];
+  let opened = 0;
+  const bridge = new SerialHidBridge({ path: "FAKE", portFactory: () => ports[opened++]!, timeoutMs: 100 });
+  context.after(() => bridge.close());
+  await bridge.request("ARM");
+  await assert.rejects(bridge.request("MOVE", [1, 0, 0, 0]), /Fixture write fault/);
+  const snapshot = () => bridge.controlStatus;
+  assert.equal(snapshot(), undefined);
+  assert.equal((await bridge.request("ARM")).armed, true);
+  assert.equal(opened, 2, "Explicit recovery cannot keep the transport whose write-failure latch is set.");
+  assert.equal(ports[0]!.isOpen, false);
+  assert.equal(snapshot()?.armed, true);
+  assert.equal(ports[0]!.writes.filter((line) => line.includes(" MOVE ")).length, 1);
+  assert.equal(ports[1]!.writes.some((line) => line.includes(" MOVE ")), false, "Input is never replayed on recovery.");
 });
 
 test("lost acknowledgement releases reports and never retries the input", async () => {
@@ -67,10 +248,10 @@ test("lost acknowledgement releases reports and never retries the input", async 
 test("cold connection retries only its first neutral PING with a new id and remains paused", async () => {
   const port = new LostHandshakePort();
   const bridge = new SerialHidBridge({ path: "FAKE", portFactory: () => port, timeoutMs: 20 });
-  const status = await bridge.request("STATUS");
+  const status = await bridge.request("PING");
   assert.equal(status.armed, false);
   assert.equal(port.opens, 1);
-  assert.deepEqual(port.writes.map((line) => line.split(" ")[2]?.trim()), ["PING", "PING", "RELEASE", "PAUSE", "STATUS"]);
+  assert.deepEqual(port.writes.map((line) => line.split(" ")[2]?.trim()), ["PING", "PING", "RELEASE", "PAUSE", "PING"]);
   assert.notEqual(port.writes[0]!.split(" ")[1], port.writes[1]!.split(" ")[1]);
   await bridge.close();
 });
@@ -117,7 +298,7 @@ test("transport and malformed protocol faults during cold settle prevent the ret
       const port = new LostHandshakePort();
       port.onLostPing = () => { setTimeout(() => fault(port), 50); };
       const bridge = new SerialHidBridge({ path: "FAKE", portFactory: () => port, timeoutMs: 20 });
-      await assert.rejects(bridge.request("STATUS"), expected);
+      await assert.rejects(bridge.request("ARM"), expected);
       assert.equal(port.writes.length, 1);
       assert.equal(port.isOpen, false);
       await bridge.close();
@@ -143,7 +324,7 @@ test("non-timeout cold handshake errors are never retried, including timeout-lik
       }
       const port = new FailedHandshakePort();
       const bridge = new SerialHidBridge({ path: "FAKE", portFactory: () => port, timeoutMs: 20 });
-      await assert.rejects(bridge.request("STATUS"), expected);
+      await assert.rejects(bridge.request("ARM"), expected);
       assert.equal(port.writes.length, 1);
       assert.equal(port.isOpen, false);
       await bridge.close();
@@ -154,7 +335,7 @@ test("non-timeout cold handshake errors are never retried, including timeout-lik
 test("ARM watchdog PING and ordinary PING timeouts remain single-attempt requests", async () => {
   const port = new FakePort();
   const bridge = new SerialHidBridge({ path: "FAKE", portFactory: () => port, timeoutMs: 20 });
-  await bridge.request("STATUS");
+  await bridge.request("PING");
   port.hold = "PING";
   const beforeArm = port.writes.length;
   await assert.rejects(bridge.request("ARM"), /acknowledgement timed out/);
@@ -182,6 +363,45 @@ test("cancelled report releases and stale response cannot resolve a different re
   await bridge.close();
 });
 
+test("cancelling STATUS preserves the armed owner and ignores its late stale acknowledgement", async (context) => {
+  const port = new FakePort();
+  const bridge = new SerialHidBridge({ path: "FAKE", portFactory: () => port, heartbeatMs: 1400 });
+  context.after(() => bridge.close());
+  await bridge.request("ARM"); await bridge.request("KEY", [0, 4]);
+  port.hold = "STATUS";
+  const abort = new AbortController();
+  const pending = bridge.request("STATUS", [], abort.signal);
+  await delay(0);
+  const id = port.writes.at(-1)!.split(" ")[1], before = port.writes.length;
+  abort.abort(new Error("Observer cancelled inspection"));
+  await assert.rejects(pending, /HID operation cancelled/);
+  assert.equal(port.writes.length, before, "Cancelling a neutral query must not RELEASE another caller's held key.");
+  assert.equal(bridge.lastStatus?.armed, true);
+  port.emit("data", Buffer.from(`QDDHID/1 ${id} OK ${JSON.stringify({ ...port.status, armed: false })}\n`));
+  await delay(0);
+  assert.equal(bridge.lastStatus?.armed, true);
+  assert.equal((await bridge.request("MOVE", [1, 0, 0, 0])).armed, true);
+});
+
+test("an independently failed STATUS still releases when its caller signal is also aborted", async (context) => {
+  const abort = new AbortController();
+  class FailedStatusPort extends FakePort {
+    override write(data: string, callback: (error?: Error | null) => void): void {
+      if (data.endsWith(" STATUS\n")) {
+        this.writes.push(data); callback(new Error("Actual transport write failure"));
+        abort.abort(new Error("Observer also cancelled")); return;
+      }
+      super.write(data, callback);
+    }
+  }
+  const port = new FailedStatusPort();
+  const bridge = new SerialHidBridge({ path: "FAKE", portFactory: () => port, heartbeatMs: 1400 });
+  context.after(() => bridge.close());
+  await bridge.request("ARM");
+  await assert.rejects(bridge.request("STATUS", [], abort.signal), /Actual transport write failure/);
+  assert.equal(port.writes.at(-1)!.trim().split(" ")[2], "RELEASE");
+});
+
 test("disconnect clears pending and reconnect never re-arms", async () => {
   const ports = [new FakePort(), new FakePort()];
   let index = 0;
@@ -200,7 +420,7 @@ test("disconnect clears pending and reconnect never re-arms", async () => {
 test("timer heartbeats stop on close and an unconfigured port never opens", async () => {
   const port = new FakePort();
   const bridge = new SerialHidBridge({ path: "FAKE", portFactory: () => port, heartbeatMs: 10 });
-  await bridge.request("STATUS");
+  await bridge.request("PING");
   const deadline = Date.now() + 500;
   while (port.writes.filter((line) => line.endsWith(" PING\n")).length < 3 && Date.now() < deadline) await delay(10);
   assert.ok(port.writes.filter((line) => line.endsWith(" PING\n")).length >= 3);
@@ -265,7 +485,7 @@ test("ESP control lines release RTS with DTR enabled before the first PING", asy
   }
   const port = new ControlledPort();
   const bridge = new SerialHidBridge({ path: "FAKE", portFactory: () => port });
-  await bridge.request("STATUS");
+  await bridge.request("PING");
   assert.deepEqual(port.controls, [{ dtr: true, rts: false }]);
   assert.match(port.writes[0]!, / PING\n$/);
   await bridge.close();
@@ -458,7 +678,7 @@ async function waitForHeldPing(port: HeldNeutralPort): Promise<void> {
 test("an old neutral heartbeat cannot pause a newer explicit ARM or suppress its fresh heartbeat", { timeout: 2500 }, async () => {
   const port = new HeldNeutralPort();
   const bridge = new SerialHidBridge({ path: "FAKE", portFactory: () => port, timeoutMs: 60, heartbeatMs: 10 });
-  await bridge.request("STATUS");
+  await bridge.request("PING");
   port.holdNextPing = true; await waitForHeldPing(port);
   await bridge.request("ARM");
   const afterArm = port.writes.length;
@@ -477,7 +697,7 @@ test("an old connection's neutral heartbeat cannot stop the reconnected and rear
   const ports = [new HeldNeutralPort(), new HeldNeutralPort()];
   let index = 0;
   const bridge = new SerialHidBridge({ path: "FAKE", portFactory: () => ports[index++]!, timeoutMs: 60, heartbeatMs: 10 });
-  await bridge.request("STATUS");
+  await bridge.request("PING");
   ports[0]!.holdNextPing = true; await waitForHeldPing(ports[0]!);
   ports[0]!.disconnect();
   await bridge.request("ARM");

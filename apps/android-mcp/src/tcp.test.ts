@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createServer, Socket } from "node:net";
 import type { AddressInfo } from "node:net";
+import type { NetworkInterfaceInfo } from "node:os";
 import { setTimeout as delay } from "node:timers/promises";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -9,6 +10,7 @@ import { promisify } from "node:util";
 import { DEFAULT_ESP_TCP_PORT, parseEspTcpPort, TcpHidBridge, validateEspHost } from "./tcp.js";
 import { HidProtocolError } from "./protocol.js";
 import type { HidStatus } from "./protocol.js";
+import type { TcpBridgeOptions } from "./tcp.js";
 
 interface Command { socket: Socket; id: number; op: string; args: number[]; connection: number }
 
@@ -49,17 +51,17 @@ async function board(onCommand?: (command: Command) => boolean) {
   };
 }
 
-test("TCP uses one lazy persistent connection, FIFO reports and an explicit paused handshake", async (t) => {
+test("TCP replaces a read-only observation with one fresh persistent control connection and FIFO reports", async (t) => {
   const device = await board();
   const bridge = new TcpHidBridge({ host: "127.0.0.1", port: device.port });
   t.after(async () => { await bridge.close(); await device.close(); });
   assert.equal(device.connections, 0);
   assert.equal((await bridge.request("STATUS")).name, "中文控制板");
-  assert.deepEqual(device.commands.map(({ op }) => op), ["PING", "RELEASE", "PAUSE", "STATUS"]);
+  assert.deepEqual(device.commands.map(({ op }) => op), ["STATUS"]);
   assert.equal((await bridge.request("ARM")).armed, true);
   await Promise.all([bridge.request("MOVE", [2, 3, 0, 0]), bridge.request("KEY", [0, 4]), bridge.request("KEY", [0, 0])]);
   assert.deepEqual(device.commands.slice(-5).map(({ op }) => op), ["PING", "ARM", "MOVE", "KEY", "KEY"]);
-  assert.equal(device.connections, 1);
+  assert.equal(device.connections, 2);
   assert.equal(new Set(device.commands.map(({ id }) => id)).size, device.commands.length);
   await bridge.close();
   assert.deepEqual(device.commands.slice(-2).map(({ op }) => op), ["RELEASE", "PAUSE"]);
@@ -174,6 +176,61 @@ test("TCP connect timeout destroys the unopened socket without sending reports",
   const bridge = new TcpHidBridge({ host: "127.0.0.1", timeoutMs: 100, connectTimeoutMs: 20, socketFactory: () => socket });
   await assert.rejects(bridge.request("ARM"), /连接控制板超时/);
   assert.equal(socket.destroyed, true);
+  await bridge.close();
+});
+
+const interfaceAddress = (address: string, netmask: string): NetworkInterfaceInfo => ({
+  address, netmask, family: "IPv4", mac: "00:00:00:00:00:00", internal: false, cidr: null,
+});
+async function attemptedConnection(options: TcpBridgeOptions) {
+  class CapturedSocket extends Socket {
+    options: { host?: string; localAddress?: string; lookup?: unknown } | undefined;
+    override connect(...args: unknown[]): this { this.options = args[0] as typeof this.options; return this; }
+  }
+  const socket = new CapturedSocket();
+  const bridge = new TcpHidBridge({ ...options, timeoutMs: 100, connectTimeoutMs: 20, socketFactory: () => socket });
+  try { await assert.rejects(bridge.request("STATUS"), /连接控制板超时/); }
+  finally { await bridge.close(); }
+  return socket.options;
+}
+
+test("TCP binds the matching physical LAN address instead of leaving a TUN default source", async () => {
+  let reads = 0;
+  const options = await attemptedConnection({ host: "192.168.100.167", networkInterfaces: () => {
+    reads++;
+    return { Mihomo: [interfaceAddress("198.18.0.1", "255.255.0.0")], WLAN: [interfaceAddress("192.168.100.160", "255.255.254.0")] };
+  } });
+  assert.equal(options?.host, "192.168.100.167");
+  assert.equal(options?.localAddress, "192.168.100.160");
+  assert.equal(reads, 1);
+});
+
+test("TCP resolves a hostname only once and binds for its validated literal destination", async () => {
+  let lookups = 0;
+  const options = await attemptedConnection({ host: "passport.local", resolveHost: async (hostname) => {
+    assert.equal(hostname, "passport.local"); lookups++; return "192.168.100.167";
+  }, networkInterfaces: () => ({ WLAN: [interfaceAddress("192.168.100.160", "255.255.254.0")] }) });
+  assert.equal(lookups, 1);
+  assert.equal(options?.host, "192.168.100.167");
+  assert.equal(options?.localAddress, "192.168.100.160");
+  assert.equal(options?.lookup, undefined, "Connecting the resolved literal must not perform another DNS lookup.");
+});
+
+test("TCP preserves loopback and unmatched routed LAN connections without forcing a source", async () => {
+  for (const host of ["127.0.0.1", "10.20.30.40"]) {
+    const options = await attemptedConnection({ host, networkInterfaces: () => ({ WLAN: [interfaceAddress("192.168.100.160", "255.255.254.0")] }) });
+    assert.equal(options?.host, host); assert.equal(options?.localAddress, undefined);
+  }
+});
+
+test("TCP rejects a public DNS result before connecting or choosing a source address", async () => {
+  let connects = 0, interfacesRead = 0;
+  class ForbiddenSocket extends Socket { override connect(): this { connects++; return this; } }
+  const socket = new ForbiddenSocket();
+  const bridge = new TcpHidBridge({ host: "passport.local", socketFactory: () => socket,
+    resolveHost: async () => "8.8.8.8", networkInterfaces: () => { interfacesRead++; return {}; } });
+  await assert.rejects(bridge.request("STATUS"), /不是局域网 IPv4/);
+  assert.equal(connects, 0); assert.equal(interfacesRead, 0); assert.equal(socket.destroyed, true);
   await bridge.close();
 });
 

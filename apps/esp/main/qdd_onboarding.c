@@ -166,27 +166,32 @@ static esp_err_t page_handler(httpd_req_t *request) {
         "<!doctype html><html lang=\"zh-CN\"><meta charset=\"utf-8\">"
         "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
         "<title>设备控制器 · 连接指引</title><style>"
-        "body{font:16px/1.7 system-ui,sans-serif;background:#f3f5f9;color:#17243b;margin:0;padding:24px}"
-        "main{max-width:560px;margin:auto;background:white;border-radius:24px;padding:24px}"
-        "h1{font-size:25px;line-height:1.3}h2{font-size:18px;margin-top:28px}"
-        "a{display:block;padding:13px 18px;margin:14px 0;border-radius:12px;background:#246be8;color:white;text-align:center;text-decoration:none}"
-        "small{color:#526077}code{overflow-wrap:anywhere}li{margin:8px 0}"
-        ".tip{padding:14px;border-radius:12px;background:#fff2d5;border:1px solid #e9bc5b;color:#694700}</style><main>"
+        ":root{color-scheme:dark}*{box-sizing:border-box}"
+        "body{font:16px/1.7 system-ui,sans-serif;background:#0e1116;color:#f3f4f6;margin:0;padding:28px 16px}"
+        "main{max-width:560px;margin:auto}h1{font-size:25px;line-height:1.3;margin:0 0 20px}"
+        "h2{font-size:18px;line-height:1.5;margin:0 0 12px}"
+        "section{margin:16px 0;padding:20px;background:#191d24;border:1px solid #303640;border-radius:16px}"
+        "p{margin:12px 0;color:#c3c8d0}"
+        "a{display:block;padding:13px 18px;margin:14px 0;border-radius:10px;background:#d4380d;color:white;text-align:center;text-decoration:none;font-weight:600}"
+        "a:hover{background:#eb481c}a:focus-visible{outline:3px solid #ff987d;outline-offset:3px}"
+        "small{display:block;color:#a8afbb}code{overflow-wrap:anywhere}li{margin:8px 0}"
+        ".tip{padding:14px;border-radius:12px;background:#33241f;border:1px solid #704236;color:#f3c1b0}"
+        "@media(max-width:380px){body{padding:20px 12px}section{padding:16px}}</style><main>"
         "<h1>把手机连接到电脑遥控</h1>"
         "<p class=\"tip\"><strong>仅支持同一局域网</strong><br>手机、电脑和 ESP 必须连接同一局域网，"
         "例如同一路由器的 Wi-Fi。</p>"
         "<p>可扫描控制板二维码，或在手机浏览器输入屏幕上的 IP 和端口（<code>IP:3334</code>），打开本页下载 App。</p>"
-        "<h2>1. 在手机安装设备投屏</h2>"
+        "<section><h2>1. 在手机安装设备投屏</h2>"
         "<a href=\"/qdd-remote.apk\" download=\"设备投屏.apk\">下载设备投屏</a>"
         "<small>下载后打开 APK，按手机提示允许安装。扫码软件无法下载时，请用手机浏览器打开本页再下载。已安装则直接打开。</small>"
-        "<h2>2. 打开 App，开始共享屏幕</h2><a href=\"qddscreen://setup?esp=http%3A%2F%2F";
+        "</section><section><h2>2. 打开 App，开始共享屏幕</h2><a href=\"qddscreen://setup?esp=http%3A%2F%2F";
     static const char suffix[] =
         "%3A3334\">打开设备投屏</a><p>在 App 点“开始投屏”，同意系统共享屏幕。"
         "首次连接蓝牙时，在手机设置中选择板上显示的蓝牙名称，并核对配对数字。</p>"
-        "<h2>3. 在电脑打开设备操作台</h2><p>运行电脑上的设备操作台；"
+        "</section><section><h2>3. 在电脑打开设备操作台</h2><p>运行电脑上的设备操作台；"
         "电脑浏览器打开 <code>http://127.0.0.1:8790</code>。这个地址只在电脑上打开。</p>"
         "<p>看到手机画面后，点击画面即可控制，按 Esc 退出。需要停止时，在控制板选择“紧急停止”并按确认键。</p>"
-        "<small>本连接页不需要令牌，也不会因为打开页面而控制手机。</small></main></html>";
+        "</section><small>本连接页不需要令牌，也不会因为打开页面而控制手机。</small></main></html>";
     // HTTPD runs these synchronous handlers on one worker. Keep the complete
     // small page off its 4 KiB stack and send one response with Content-Length.
     static char page[sizeof(prefix) + 16 + sizeof(suffix)];

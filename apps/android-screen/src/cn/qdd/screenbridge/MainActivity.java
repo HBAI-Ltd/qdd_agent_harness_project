@@ -13,6 +13,7 @@ import android.media.projection.MediaProjectionManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
+import android.os.SystemClock;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
@@ -38,7 +39,7 @@ public final class MainActivity extends Activity {
   private Button stop;
   private TextView setupGuide;
   private Button bluetooth;
-  private boolean consentPending;
+  private CaptureConsent consent;
   private final Runnable refresh = new Runnable() {
     @Override public void run() { update(); handler.postDelayed(this, 500); }
   };
@@ -46,6 +47,9 @@ public final class MainActivity extends Activity {
   @Override public void onCreate(Bundle state) {
     super.onCreate(state);
     app = (ScreenApplication) getApplication();
+    consent = new CaptureConsent(state != null && state.getBoolean("authorizationPending", false),
+        getPreferences(MODE_PRIVATE).getBoolean("notificationPrompted", false),
+        state == null ? 0 : state.getLong("captureStartDeadline", 0));
     applyConfiguration(getIntent());
     getWindow().setStatusBarColor(BACKGROUND);
     getWindow().setNavigationBarColor(BACKGROUND);
@@ -145,37 +149,55 @@ public final class MainActivity extends Activity {
   @Override public void onNewIntent(Intent intent) {
     super.onNewIntent(intent); setIntent(intent);
     if (ScreenService.STOP.equals(intent.getAction())) stopCapture();
-    else if (!consentPending) applyConfiguration(intent);
+    else if (!consent.isBusy(SystemClock.elapsedRealtime())) applyConfiguration(intent);
+    else Toast.makeText(this, "请先完成或取消系统授权，再连接其他设备控制器", Toast.LENGTH_LONG).show();
     update();
   }
 
   private void update() {
     boolean active = app.frames.isActive();
-    if (active) consentPending = false;
-    setLabel(status, app.serverError() != null ? app.serverError() : consentPending ? "等待系统录屏授权" : app.frames.status());
-    start.setEnabled(!active && !consentPending && app.serverError() == null); stop.setEnabled(active);
+    if (active) consent.finished();
+    setLabel(status, app.serverError() != null ? app.serverError() : app.frames.isStopping() ? "正在结束投屏，请稍候"
+        : consent.isStarting(SystemClock.elapsedRealtime()) ? "正在启动投屏"
+        : consent.isWaiting() ? "等待系统授权" : app.frames.status());
+    start.setEnabled(!active && !app.frames.isStopping() && !consent.isBusy(SystemClock.elapsedRealtime()) && app.serverError() == null); stop.setEnabled(active);
     setLabel(endpoint, app.wifiAddress() == null ? "暂未连接 Wi-Fi，请先连接电脑所在的局域网。" : "http://" + app.wifiAddress() + ":" + app.port());
     setLabel(setupGuide, app.boardSetup().guide());
-    bluetooth.setText(app.boardSetup().bluetoothReady() ? "查看蓝牙连接" : "连接 " + app.boardSetup().deviceName());
+    setLabel(bluetooth, app.boardSetup().bluetoothReady() ? "查看蓝牙连接" : "连接 " + app.boardSetup().deviceName());
   }
 
   private void requestCapture() {
-    if (app.frames.isActive() || consentPending) return;
-    if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
-      requestPermissions(new String[] { Manifest.permission.POST_NOTIFICATIONS }, NOTIFICATIONS); return;
+    boolean notificationsMissing = Build.VERSION.SDK_INT >= 33
+        && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED;
+    CaptureConsent.Step next = consent.request(app.frames.isActive(), app.frames.isStopping(), app.serverError() == null,
+        notificationsMissing, SystemClock.elapsedRealtime());
+    if (next == CaptureConsent.Step.NONE) return;
+    update();
+    try {
+      if (next == CaptureConsent.Step.NOTIFICATIONS) {
+        getPreferences(MODE_PRIVATE).edit().putBoolean("notificationPrompted", true).apply();
+        requestPermissions(new String[] { Manifest.permission.POST_NOTIFICATIONS }, NOTIFICATIONS); return;
+      }
+      MediaProjectionManager manager = getSystemService(MediaProjectionManager.class);
+      Intent permission = Build.VERSION.SDK_INT >= 34
+          ? manager.createScreenCaptureIntent(MediaProjectionConfig.createConfigForDefaultDisplay()) : manager.createScreenCaptureIntent();
+      startActivityForResult(permission, CAPTURE);
+    } catch (RuntimeException unavailable) {
+      consent.finished(); update();
+      Toast.makeText(this, "系统共享授权暂时不可用，请稍后再试", Toast.LENGTH_LONG).show();
     }
-    MediaProjectionManager manager = getSystemService(MediaProjectionManager.class);
-    consentPending = true; update();
-    Intent permission = Build.VERSION.SDK_INT >= 34
-        ? manager.createScreenCaptureIntent(MediaProjectionConfig.createConfigForDefaultDisplay()) : manager.createScreenCaptureIntent();
-    startActivityForResult(permission, CAPTURE);
   }
 
   @Override public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] results) {
     super.onRequestPermissionsResult(requestCode, permissions, results);
     if (requestCode == NOTIFICATIONS) {
-      if (results.length > 0 && results[0] == PackageManager.PERMISSION_GRANTED) requestCapture();
-      else Toast.makeText(this, "请允许通知，以便投屏期间随时停止", Toast.LENGTH_LONG).show();
+      consent.finished();
+      if (results.length == 0 || results[0] != PackageManager.PERMISSION_GRANTED) {
+        Toast.makeText(this, "通知未开启，投屏时可回到此处点“停止投屏”", Toast.LENGTH_LONG).show();
+      }
+      // Android does not require notification permission to run an FGS. The
+      // separate system screen-sharing prompt still requires explicit consent.
+      requestCapture();
     }
   }
 
@@ -183,16 +205,21 @@ public final class MainActivity extends Activity {
     super.onActivityResult(requestCode, resultCode, data);
     if (requestCode != CAPTURE) return;
     if (resultCode == RESULT_OK && data != null) {
+      consent.serviceRequested(SystemClock.elapsedRealtime());
       Intent service = new Intent(this, ScreenService.class).setAction(ScreenService.START)
           .putExtra("projectionResult", resultCode).putExtra("projectionData", data);
       try { startForegroundService(service); }
-      catch (RuntimeException error) { consentPending = false; Toast.makeText(this, "无法启动投屏服务，请重新授权", Toast.LENGTH_LONG).show(); }
-      handler.postDelayed(() -> { if (!app.frames.isActive()) consentPending = false; update(); }, 3000);
-    } else { consentPending = false; Toast.makeText(this, "未开始投屏，系统授权已取消", Toast.LENGTH_SHORT).show(); }
+      catch (RuntimeException error) { consent.finished(); Toast.makeText(this, "无法启动投屏服务，请重新授权", Toast.LENGTH_LONG).show(); }
+    } else { consent.finished(); Toast.makeText(this, "未开始投屏，系统授权已取消", Toast.LENGTH_SHORT).show(); }
     update();
   }
 
   private void stopCapture() { startService(new Intent(this, ScreenService.class).setAction(ScreenService.STOP)); }
+  @Override public void onSaveInstanceState(Bundle state) {
+    state.putBoolean("authorizationPending", consent.isWaiting());
+    state.putLong("captureStartDeadline", consent.startingDeadline());
+    super.onSaveInstanceState(state);
+  }
   @Override public void onResume() { super.onResume(); handler.post(refresh); }
   @Override public void onPause() { handler.removeCallbacks(refresh); super.onPause(); }
   @Override public void onDestroy() { handler.removeCallbacksAndMessages(null); super.onDestroy(); }

@@ -283,11 +283,15 @@ Build the EXE on Windows x64 with the pinned Node 24.15.0:
 npm run build:exe --workspace @qdd/android-mcp
 npm run test:exe --workspace @qdd/android-mcp
 node apps/android-mcp/tools/soak-exe.mjs
+# Optional 15-minute resource observation (default: 120 seconds).
+node apps/android-mcp/tools/soak-exe.mjs --duration-seconds 900
 ```
 
 EXE checks launch with empty PATH and Chinese/space paths, covering first setup,
 duplicate launch, same-process reloads, official HTTP/stdio MCP and embedded resources.
 The sustained stress fixture uses a loopback phone/ESP; it is not physical-device acceptance.
+Its optional `--duration-seconds` accepts 120–7200 seconds and records the fixture EXE's
+private/working memory and cleanup. These local fixtures do not measure real-device performance.
 Tests use mocked devices plus official MCP clients for stdio and loopback HTTP.
 JPEG reception validates dimensions, segment lengths, scans and the complete ending;
 PNG adapters remain supported for existing fixtures. Current device results and remaining checks are recorded below.

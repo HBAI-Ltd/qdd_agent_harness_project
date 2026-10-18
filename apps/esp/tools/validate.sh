@@ -46,6 +46,9 @@ run_static_checks() {
         -o "${test_dir}/test_qdd_hid"
     "${test_dir}/test_qdd_hid"
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/test_qdd_ble_policy.c -o "${test_dir}/test_qdd_ble_policy"
+    "${test_dir}/test_qdd_ble_policy"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
         tests/test_qdd_ui_model.c main/qdd_ui_model.c main/qdd_hid.c \
         -o "${test_dir}/test_qdd_ui_model"
     "${test_dir}/test_qdd_ui_model"

@@ -75,10 +75,18 @@ code, password or application token is needed. There is no runtime USB requireme
 Guest networks or access-point client isolation may block phone-to-computer LAN
 traffic; use a network that permits local peers to connect.
 
-Tap **开始投屏**, allow notifications, then confirm Android's screen-sharing
-dialog. Android 14+ requests the whole display. The persistent notification and
-**停止投屏** button both stop capture. A stopped session must obtain fresh
-system consent before restarting.
+Tap **开始投屏**, then confirm Android's screen-sharing dialog. Notification
+permission is optional: denial still proceeds to the separate sharing prompt and
+does not repeatedly request notifications. Android 14+ requests the whole display.
+When notifications are allowed, the ongoing notification can stop capture; the
+**停止投屏** button in the App is always available during capture. See the
+[Android notification permission guidance](https://developer.android.com/develop/ui/views/notifications/notification-permission).
+
+Stopping immediately revokes frames. A new session is admitted only after the
+capture and encoding workers release the old resources, and needs fresh system
+consent. Activity recreation preserves a pending system prompt and the original
+three-second monotonic startup deadline. A failed startup cannot permanently
+disable the button after recreation, and an old timer cannot clear a later grant.
 
 The app stores a random UUID device identity, its port and the preview quality in private preferences.
 The identity remains stable across app restarts. Backups are disabled.
@@ -230,9 +238,12 @@ They compile the production HTTP server and frame store with host-only Android
 clock/JSON stand-ins under `tools/tests`, use real localhost sockets and JPEG
 fixtures, and access no phone, ADB or BLE. Results cover continuous delivery,
 freshness, latest-frame selection, stream limits, slow-client cleanup, stop,
-rotation metadata and server shutdown. Three pixel regressions also cover packed
-buffer reuse, padded rows, and invalid layout rejection. They do not establish Android streaming
-frame rate or phone resource usage; those need a new installed-build test.
+rotation metadata and server shutdown. `ProjectionLifecycleTest` and
+`CaptureConsentTest` also cover blocking restarts during resource cleanup, stale
+callback isolation, notification denial, Activity recreation and service-start
+wait recovery. Three pixel regressions cover packed buffer reuse, padded rows and
+invalid layout rejection. They do not establish Android streaming frame rate or
+phone resource usage; those need a new installed-build test.
 
 ## Validation boundary
 

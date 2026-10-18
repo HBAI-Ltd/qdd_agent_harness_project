@@ -20,6 +20,32 @@ export function normalizeBoardUrl(value) {
   return url.origin;
 }
 
+/** Shared with the settings page; keep this function independent of Node APIs. */
+export function normalizeControllerAddress(value, portValue = 3333) {
+  const address = String(value ?? "").trim().replaceAll("：", ":");
+  let host = address;
+  let embeddedPort;
+  if (address.includes(":") || address.includes("/")) {
+    const match = /^(?:http:\/\/)?(\d+\.\d+\.\d+\.\d+)(?::(\d+))?\/?$/.exec(address);
+    if (!match) throw new Error("设备控制器地址应为内网 IP、IP:端口或扫码下载页地址，不含账号或页面路径。");
+    host = match[1];
+    embeddedPort = match[2];
+  }
+  const parts = host.split(".");
+  const ipv4 = parts.length === 4 && parts.every((part) => /^(?:0|[1-9]\d{0,2})$/.test(part) && Number(part) <= 255);
+  const octets = parts.map(Number);
+  const privateIp = ipv4 && (octets[0] === 10 || octets[0] === 127 || (octets[0] === 192 && octets[1] === 168)
+    || (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31));
+  const hostname = !address.includes(":") && !address.includes("/") && !/^[\d.]+$/.test(host) && host.length <= 253
+    && parts.every((label) => /^[a-z\d](?:[a-z\d-]{0,61}[a-z\d])?$/i.test(label));
+  if (host && !privateIp && !hostname) throw new Error("设备控制器地址请填写内网 IPv4 地址或局域网主机名。");
+  let tcpPort = Number(embeddedPort ?? portValue);
+  if (!Number.isInteger(tcpPort) || tcpPort < 1 || tcpPort > 65535) throw new Error("设备控制器端口应为 1 到 65535 之间的整数。");
+  // 3334 serves the QR installation page, never the control protocol.
+  if (tcpPort === 3334) tcpPort = 3333;
+  return { host, tcpPort };
+}
+
 export function normalizeDesktopConfig(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("连接配置格式不正确。");
   let screenUrl = String(value.ANDROID_SCREEN_URL ?? "").trim().replaceAll("：", ":");
@@ -33,16 +59,10 @@ export function normalizeDesktopConfig(value) {
     || (phoneOctets[0] === 192 && phoneOctets[1] === 168) || (phoneOctets[0] === 172 && phoneOctets[1] >= 16 && phoneOctets[1] <= 31))) {
     throw new Error("手机地址请填写 App 显示的内网 IPv4 地址，例如 192.168.1.20:8791。");
   }
-  const espHost = String(value.ESP_HOST ?? "").trim();
-  const octets = espHost.split(".").map(Number);
-  const privateIp = isIP(espHost) === 4 && (octets[0] === 10 || octets[0] === 127 || (octets[0] === 192 && octets[1] === 168)
-    || (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31));
-  const hostname = !isIP(espHost) && !/^[\d.]+$/.test(espHost) && espHost.length <= 253
-    && espHost.split(".").every((label) => /^[a-z\d](?:[a-z\d-]{0,61}[a-z\d])?$/i.test(label));
-  if (espHost && !privateIp && !hostname) throw new Error("设备控制器 Wi-Fi 地址只填内网 IP 或主机名，端口单独填写。");
+  const { host: espHost, tcpPort } = normalizeControllerAddress(value.ESP_HOST, value.ESP_TCP_PORT ?? 3333);
   const espPort = String(value.ESP_PORT ?? "COM5").trim().toUpperCase();
   if (!espHost && !/^COM[1-9]\d{0,4}$/.test(espPort)) throw new Error("请选择设备控制器的 USB 串口，例如 COM5。");
-  const port = Number(value.ANDROID_MCP_PORT ?? 8790), tcpPort = Number(value.ESP_TCP_PORT ?? 3333);
+  const port = Number(value.ANDROID_MCP_PORT ?? 8790);
   if (![port, tcpPort].every((item) => Number.isInteger(item) && item >= 1 && item <= 65535)) throw new Error("端口应为 1 到 65535 之间的整数。");
   const deviceId = String(value.ANDROID_DEVICE_ID ?? "").trim();
   if (deviceId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(deviceId)) throw new Error("手机设备 ID 格式不正确，请清除旧配置后重新连接。");

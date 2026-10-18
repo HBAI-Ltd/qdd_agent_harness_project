@@ -416,6 +416,7 @@
     }).catch(() => {});
     if (!preserveCapture) {
       context.enteringRemote = false;
+      context.remoteEntryKey = null;
       clearTimeout(context.captureTimer);
       context.lockIntent = null;
       context.capturePending = false;
@@ -841,18 +842,20 @@
       if (current(context, epoch) && frame && !context.actionTask && ui["error-box"].hidden) ui["activity"].textContent = "手机画面已更新。";
     });
   });
-  function startControlCapture() {
+  function startControlCapture(entryKey = null) {
     const context = client;
     if (!context || !videoReady() || context.remoteActive || context.enteringRemote || context.actionTask || context.pauseTask || connecting) return;
     if (hid.locked) { showError(new Error("LOCKED")); return; }
     if (!hid.ready) { showError(new Error("HID_NOT_READY")); return; }
     context.enteringRemote = true;
+    context.remoteEntryKey = entryKey;
+    ui["screen-stage"].scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
     void run("连接鼠标", async (active) => (await tool(active, "android_hid_arm")).data, true);
     // Keep the browser's user activation: request capture in this click handler,
     // while ARM and the input lease still gate every report independently.
     requestMouseCapture(context);
   }
-  ui["phone-screen"].addEventListener("click", startControlCapture);
+  ui["phone-screen"].addEventListener("click", () => startControlCapture());
   action("home-button", "返回主页", "android_home");
   action("back-button", "返回上一页", "android_back");
   action("scroll-up-button", "向上滚动", "android_scroll", () => ({ amount: 3 }));
@@ -1018,7 +1021,19 @@
       }
       return;
     }
-    if (!remoteUiLocked()) return;
+    if (context?.remoteEntryKey === event.code) {
+      event.preventDefault(); event.stopImmediatePropagation();
+      if (type === "keyup") context.remoteEntryKey = null;
+      return;
+    }
+    if (!remoteUiLocked()) {
+      if (type === "keydown" && !event.repeat && document.activeElement === ui["phone-screen"] &&
+          (event.code === "Enter" || event.code === "Space")) {
+        event.preventDefault(); event.stopImmediatePropagation();
+        startControlCapture(event.code);
+      }
+      return;
+    }
     event.preventDefault(); event.stopImmediatePropagation();
     if (!context?.remoteActive) return;
     flushRemoteHover(context);

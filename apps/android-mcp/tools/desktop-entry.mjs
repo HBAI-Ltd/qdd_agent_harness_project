@@ -105,7 +105,7 @@ function installSettings(path, config, configHash, url, restart) {
       response.writeHead(200, { "Content-Type": "application/json" });
       response.end(JSON.stringify({ url: `${deviceBaseUrl(next.ANDROID_MCP_PORT)}/`, restart: nextHash !== configHash, configHash: nextHash }));
     } catch (error) {
-      restarting = false;
+      // A rejected concurrent request does not own the pending restart claim.
       response.writeHead(400, { "Content-Type": "application/json" }); response.end(JSON.stringify({ error: error.message }));
     }
   };

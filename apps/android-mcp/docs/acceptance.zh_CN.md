@@ -7,7 +7,425 @@
 2026-10-17：用户明确反馈真机下载正常，并要求停止下载排查和推测性修改。
 本记录以该实际使用反馈为准。此前电脑 curl、Node 及经 ADB 启动的手机 curl 探测出现超时或截断，
 仅说明这些特定探测未通过，不能等同于用户浏览器/App 下载功能故障；原始日志仍保留供追溯。
-不再基于这些探测继续下载修改或测试。
+该停止要求针对此前的推测性排查。此后用户新报更换控制器后的局域网问题，
+本轮仅按新问题范围进行有界传输验证：v26 新板 APK 下载及哈希通过，没有修改 APK 源码，
+也不把下载通过当作手机已安装。
+
+## v38 空闲观察连接恢复——真机专项 PASS，完整成品仍未通过验收
+
+2026-10-18：新实物证据闭环确认旧连接占槽机制：绑定来源的新 TCP 连接握手成功并发送 STATUS，
+随后收到 FIN/RST、没有回复，板端 TCP epoch/RX/TX 计数仍未改变；持有的沉默观察连接拒绝了新连接。
+旧 socket 最初为何沉默仍未知，不据此认定无线根因。证据：
+`apps/android-mcp/build/heartbeat-status-loss-tcp.json`、
+`heartbeat-status-loss-capture/npcap-v30-tcp-headers.json`、
+`apps/esp/build/heartbeat-status-loss-uart-before-tcp.json`。
+
+此次五文件固件修复只允许通过私网校验、非阻塞设置成功的新 peer，在 TCP **不持有控制权**且
+旧连接自身 accept/成功 RX 活动年龄严格超过原 **1500ms** 时替换旧观察者。TCP owner、活跃观察者、
+无效新 peer、时钟回退均受保护；空闲本身不会主动踢线。新 epoch 仍先清理旧半包，再读取新连接。
+没有改变时限、无线参数、输入重放或 NVS 策略；主控及独立审查没有阻断项。
+
+| 本轮检查 | 结果与边界 |
+| --- | --- |
+| 红绿回归与完整固件门禁 | 已先复现替换断言失败，修复后 **PASS**：socket mock 全集、**13/13** 传输/线路契约，以及完整 static、firmware、合并镜像与归档校验。保留既有静态平台跳过项，不宣称 ESP 零跳过。证据：`apps/esp/build/tcp-observer-v38-{red,green,contract,full-gate}.log` |
+| 精确 App-only 烧录 | 新鲜读取核对 COM6 / MAC **4c:11:ae:31:32:6c** 及实际分区表，已有 `ota_0` 为 **0x20000 / 0x2f0000**；仅在 **0x20000** 写入 **1,665,424B** App，擦除范围截至不含 **0x1b7000**，写入哈希校验通过。保留 bootloader、分区表、OTA 元数据、NVS/配对、PHY、assets、`ota_1`；没有整片擦除或从零烧入合并镜像。证据：`apps/esp/build/new-com6-v38-{layout-read.log,partition-table.bin,flash-plan.json,flash.log}` |
+| 启动与配对保留 | **30.015 秒**只读观察 **PASS**：观察开始后 **1.047 秒** Wi-Fi 已配置/连接，地址 **192.168.101.75:3333**；**3.047 秒** BLE 未连接，**15.047 秒**及 **25.062 秒**已 encrypted/bonded/ready、未启用输入/未锁定，无需重新配对。这些是观察起点后的采样时间，不是精确开机恢复时刻。无线事件保持 `[1,0,0,0,-1,-1]`，fault/OOM **0**、报告的内部堆最低空闲值 **43,552B**。COM6 已关闭，未保存原始串口。证据：`apps/esp/build/new-com6-v38-startup.json` |
+| 真实中立 TCP 恢复场景 | **PASS**：超过 1500ms 的空闲 observer 可被替换；活跃 observer 拒绝竞争连接后原 STATUS 仍成功；中立 PING owner 持续响应且拒绝竞争连接。共 **11** 次成功回复、最大 **394ms**，ACK 仍 **1200ms**。仅 STATUS/PING，没有 ARM/非零 HID，全部 socket 在 `finally` 关闭。证据：`apps/android-mcp/build/tcp-observer-v38-device.json` |
+| 恢复实际 EXE / 官方 SDK | 核对原 PID **74036** 后 POST quit **204** 并正常退出，隔离设备验收；恢复未改动的 v37 EXE，核对 PID **90416**、监听 **0.0.0.0:8790**，局域网/loopback health **200**、未知路由 **404**。官方 SDK 列 **20** 工具、**七次** POST 全 SSE、STATUS **5/5**、最大 **177ms**，全部 BLE ready、未启用输入/未锁定。证据：`apps/android-mcp/build/mcp-v38-final-status.json`。既有电脑 **454/454 + 15/15** 门禁没有无变化重跑 |
+
+当前固件归档/合并镜像 SHA-256：
+`cb35c2df6d5996efd1c2f4bc7a4f0f1c7dd1ce7cb805b1131e92fb59830fdd74`；
+App **1,665,424B**，SHA-256 `a608f6b783602779e3c18c175b43f66e6aad3e8774d07513d0d312d9701de734`；
+ELF SHA-256 `430b2e1d096a2dbf409d4abe90eb77258d2cb1876568d16c8e15bdb44b4a7961`。
+实际保留的分区表 SHA-256：
+`bd386c960f8b827e812dd238af37d469c319d7e9ecc2d7501d00296c46804a4f`。
+没有捕获 boot ELF 哈希行；安装身份依据已验证产物及烧录写入校验绑定，不声称实机启动日志哈希匹配。
+
+EXE 仍为 build **c2042f779676b1fb0546**，SHA-256
+`b0ec182895000c740e4f3472a4db848b36c539ffd677ad0ea239cb6fe30cd701`；APK 未改。
+投屏 App 启动审批边界不变，没有重试或换接口启动。
+Build：**PASS**；Host tests：**PASS**；Device tests：**PASS，仅限上述连接恢复专项**。
+完整成品尚未通过验收。Unverified：当前固件直接 20ms/1200ms 高频门禁、长期内存上界、
+真实 MediaProjection/内网画面、非零 HID 操作反馈及完整手机控制闭环。v36 高频失败仍待解决，
+本次中立/低频场景通过不等于该门禁已经通过。
+
+## v37 MCP 已完成请求资源释放专项——回归与十五分钟模拟长测 PASS
+
+2026-10-18：已用实际 HTTP 服务及官方 SDK 客户端复现 SDK **1.32.1** 的资源生命周期缺陷：
+`enableJsonResponse: true` 时，已完成 JSON POST 仍残留在 `_streamMapping`，直到会话关闭。
+初始化后执行 **100** 次 `listTools`，残留 **102** 个 stream 条目，其中包括一个独立 GET。
+证据：`apps/android-mcp/build/mcp-stream-retention-red.log`。该回归没有截图或 HID 输入。
+
+现在使用 `enableJsonResponse: false`，走 SDK 标准 POST SSE 响应；现有操作台本来已兼容 SSE。
+生产代码没有读取 SDK 私有字段，也没有升级依赖。只有资源回归检查内部映射：已完成 POST
+残留归零，最多保留一个独立 GET，请求到 stream/response 映射为零。
+最终专项记录明确观察到 **0** 个 POST、**1** 个独立 GET，且验证唯一剩余项确为 GET：
+`apps/android-mcp/build/mcp-stream-retention-resource-final.log`。
+四处原始取消测试把 `response.arrayBuffer()` 纳入请求生命周期，保留取消及新 ARM 隔离语义。
+
+| 本轮检查 | 结果与边界 |
+| --- | --- |
+| 软件门禁 | **PASS**：资源回归及 HTTP/browser **122/122**；typecheck/build；完整主机 **454/454**、零跳过；EXE **15/15**。证据：`apps/android-mcp/build/mcp-stream-retention-{green,typecheck,build,host-tests,exe-build,exe-tests}.log` |
+| 实际 EXE 服务 / 官方 SDK | **PASS**：核对程序路径及 PID **74036**，监听 **0.0.0.0:8790**；局域网/loopback health **200**、未知路由 **404**。实际 **七次** POST 均为 `text/event-stream`；**20** 个工具、STATUS **5/5**、最大 **178ms**；每个状态均 connected/encrypted/bonded/ready，未启用输入、未锁定，没有真实输入。证据：`apps/android-mcp/build/mcp-v37-final-status.json` |
+| 旧包两小时资源观察 | **已完成——功能/清理 PASS**，**7,200,277ms**，build **ba710a04fbdc29d19fd2**、旧 JSON 响应实现。子进程 PID **65376** exit **0**、未强制结束，残留流/socket 为零、模拟服务器关闭、临时目录删除。内存增长边界详见 v35。固定证据：`apps/android-mcp/build/windows/exe-soak-2h.json`。不是 v37 新包或真实 LAN/BLE 验证 |
+| 新包十五分钟模拟观察 | **已完成——功能/清理 PASS**，**900,386ms**，build **c2042f779676b1fb0546**：**27,021** 帧 / **30.0104480674fps**、图像数据 **4,150,425,600B**、最大帧间隔 **57.5429ms**；**37,864** 次模拟 ACK，中位 **0.5052ms**、p95 **1.0944ms**、最大 **22.3903ms**；**860** 次只读观察、**七次**原图截图。子进程 PID **88900** exit **0**、未强制结束、临时目录删除、流/socket **0**、模拟服务器不再监听，`realDeviceInput=false`。固定证据：`apps/android-mcp/build/windows/exe-soak-v37-15m.json`；日志：`exe-soak-v37-15m.log`。属于 loopback 模拟验证，不是真实 LAN/BLE 验收 |
+
+v37 模拟长测覆盖四档预览不抢占输入所有者、MCP 原图采集、45 秒 active 四 report burst、
+15 秒 idle、WebSocket 关闭释放后新会话恢复，以及 ACK 前 TCP 丢失不重放输入。
+报告完成时间 **2026-10-17T18:41:19.930Z**，SHA-256 为
+`d4caa0868880fdff428307bd450de770fde681b2b0d4e67cc4536c22daa4185f`。
+
+**32** 次内存采样中，**61,035ms** 预热样本的 private bytes / working set 为
+**82,538,496 / 105,852,928B**，**901,473ms** 结束时为 **149,725,184 / 157,163,520B**，
+增量 **67,186,688 / 51,310,592B**，结束值也是采样峰值。有限观察仍显示增长，
+不能定性泄漏、无泄漏或长期资源上界；不能把与旧十五分钟/两小时结果的所有差异都归因于 SDK 修复。
+独立且确定的 stream 映射红绿回归仍是该具体缺陷及清理修复的证据。
+
+当前 EXE：`apps/android-mcp/build/windows/设备操作台.exe`，buildId **c2042f779676b1fb0546**，
+**94,434,816B**，SHA-256 `b0ec182895000c740e4f3472a4db848b36c539ffd677ad0ea239cb6fe30cd701`。
+核对原实际 PID **84880**、路径及哈希后，POST `/desktop/quit` 返回 **204** 并优雅退出；
+已验证的旧 EXE 与 manifest 保留在
+`apps/android-mcp/build/windows/history/ba710a04fbdc29d19fd2`。
+
+stream 残留缺陷已经证实，但不能把此前 Private Bytes/working set 的全部增长都归因于它。
+APK/ESP 产物不变，手机 App 仍未启动，内网投屏源返回 `ECONNREFUSED`；v36 的启动审核边界不变。
+该 HTTP 资源修复不证明直接局域网高压失败已解决。
+Build：**PASS**；Host tests：**PASS**；Device tests：总体 **FAIL**，短时实际 EXE 只读 MCP 与十五分钟模拟长测通过。
+Unverified：长期资源行为、真实内网画面/MediaProjection、
+非零 HID 及完整手机操作反馈闭环。
+
+## v36 一加新授权与配对——只读 BLE/MCP 专项 PASS，操作闭环仍未验收
+
+2026-10-18：用户新明确授权 ADB 测试后继续准备。一加 8 已解锁并连接电脑所在 Wi-Fi，
+本记录不保存凭据。按新授权用 ADB 打开/配置投屏 App 仍被审核拒绝，返回 `blocked by policy`，
+没有通过 UI 或深链替代启动。另一个独立动作——打开安卓系统蓝牙设置——获准执行。
+首次准备脚本耗时过长，错过约 30 秒的安全挑战；这属于准备失误，不认定为固件缺陷。
+调整扫描刷新、数字 keyevent 输入及 `menu_save` 确认后，**QDD-Passport-326E** 成功配对，
+保留原 **QDD-Passport-A1BA** bond。证据：`apps/esp/build/oneplus-pairing-result.json`。
+
+新板本轮共重启**两次**：此前启动对照、此次配对后持久化检查；用只读 `chip_id` 核对 MAC 后
+执行 `hard_reset`。没有刷入/修改固件、擦除或清空 NVS，
+继续使用 v35 已验证产物。ADB 仅用于准备/诊断，运行时仍由内网投屏 App 提供画面、ESP 提供 HID。
+本轮没有发送 ARM 或非零 HID 输入。
+
+| 新增检查 | 结果与边界 |
+| --- | --- |
+| 配对后 BLE 串口观察 | **PASS**，**60.032 秒**、**60/60** STATUS 均 connected/encrypted/bonded/ready，未启用输入、未锁定。7 次无线诊断均 `up=1`、事件计数未变、TCP epoch **1**、OOM/fault/error **0**，采样可用内部堆最低 **36,472B**。协议未暴露 BLE link epoch。结束后关闭 COM6；未保存原始串口或 passkey 字段。证据：`apps/esp/build/oneplus-bonded-stability.json` |
+| 实际 EXE / 官方 SDK 只读查询 | **PASS**：**20** 个工具、STATUS **5/5**，所有 payload 均 connected/encrypted/bonded/ready，最大 **277ms**。证据：`apps/android-mcp/build/mcp-oneplus-bonded-status.json` |
+| 实际 EXE / 官方 SDK 排队 STATUS 负载 | 该 API 场景 **PASS**：约 **25 秒**、**221/221**、全部 ready，包含并发队列的最大调用延迟 **2,187ms**。保持最多四条并发、目标调度 20ms，但实际仅约 **8.8 次/秒**。证据：`apps/android-mcp/build/mcp-oneplus-status-stress.json`。不能当作直接 TCP 20ms/四条未确认/**1200ms ACK** 门禁通过，也不能宣称最大延迟已解决 |
+| 手机发起的网络对照 | 手机→电脑 **15/15**，最小/平均/最大 **6.020/22.827/43.425ms**；手机→ESP **14/15**，**12.096/80.992/356.436ms**。电脑/手机使用同一 5GHz AP，ESP 仍在信道 **6**。证据：`apps/android-mcp/build/oneplus-network-crosscheck.json`。不能唯一定位 AP、电脑或 ESP 原因 |
+| 重启后配对持久化/自动恢复 | **30 秒**观察内 **PASS**：**3.16 秒**样本 BLE 未连接；**6.19 秒** Wi-Fi 已恢复 `up=1`、信道 **6**、RSSI **−62dBm**；**25.12 秒**样本前 BLE 已 connected/encrypted/bonded/ready，`pairingOpen/passkeyVisible=false`，无需新 PIN。采样不能给出更精确的 BLE 恢复时刻。无 fault/OOM。证据：`apps/esp/build/oneplus-bonded-reboot-startup.json`。原 EXE 不重启即完成官方 SDK STATUS **5/5**、最大 **582ms**：`apps/android-mcp/build/mcp-oneplus-reboot-recovery.json` |
+| BLE 已配对条件下的直接 TCP 门禁 | 原目标 20ms / 最多四条未确认 / **1200ms ACK** 仍 **FAIL**：**18.207 秒**、发送 **245** / 最终收到 **244**；STATUS 100241 在 **16,994ms** 超时、等待 **1,211ms**，最终最大 RTT **1,969ms**。证据：`apps/android-mcp/build/tcp-status-stress-oneplus-bonded.json`。同期 UART **40 秒 / 71** 样本无 fault/error/OOM，采样可用内部堆最低 **36,708B**，无线始终 up、事件计数未变；证据：`apps/esp/build/oneplus-bonded-direct-status-diagnostics.json`。最终 errno **104** / 关闭原因 **4** 是电脑测试关闭后的接收错误，不能据此认定固件主动掉线或初始超时由某一传输方向导致 |
+| 恢复实际 EXE / 最终官方 SDK | 核对原 PID **56384** 的路径/版本后，POST quit 返回 **204**，隔离直接 TCP 测试；随后恢复同一 EXE，已核对 PID **84880**、监听 **0.0.0.0:8790**。最终 SDK 列出 **20** 个工具、STATUS **5/5**、最大 **280ms**，五个 payload 均 connected/encrypted/bonded/ready，未启用输入、未锁定。证据：`apps/android-mcp/build/mcp-oneplus-final-status.json` |
+
+MCP 负载报告的 UTC 窗口为 **16:32:50.822–16:33:16.343**，初始化后计时 **25,480ms**；
+UART 窗口为 **16:32:55.264–16:33:55.326**。负载约提前 **4.4 秒**开始，串口只覆盖其后段约
+**21 秒**，没有完整覆盖全部 25 秒。`sentMs` 以独立 performance 时点计时，上述为时间边界，
+不伪造精确包超时。此前五次 SDK 查询也不在该串口窗口内。
+
+Build：**PASS**；Host tests：**PASS**，沿用未改动的 v35 产物及 **453/453 + 15/15** 结果，
+没有重复构建或运行。Device tests：总体 **FAIL**——最新只读 BLE/MCP 及配对持久化专项通过，
+但本轮在 BLE 已配对条件下直接高频局域网门禁再次失败。投屏 App 仍无进程。
+Unverified：真实 MediaProjection 与内网画面、
+BLE 输入/操作反馈、全部实物 UI 流程及完整端到端控制。旧包两小时资源观察已完成，功能/清理 PASS；
+增长边界见 v35，不代表 v37 或真机性能。
+
+## v35 夜间全面对抗迭代——软件门禁 PASS，真机局域网压力仍 FAIL
+
+2026-10-18：本轮检查电脑服务/EXE、手机 APK 和控制器固件。下列产物身份替代此前记录中的
+“当前版本”，原章节保留为历史证据。本轮真机验收结论为 **FAIL**，因为局域网压力仍失败；
+下列通过项不代表远控成品已经通过验收。
+
+已修复有证据的以下软件问题：
+
+- 电脑端：设置/重启并发抢占、旧取消误停新 ARM、批量请求/重复 ID、串口写入期间就绪状态失效、
+  关闭过程中再次重连；操作台请求有界等待、保存互斥，并覆盖矮视口及键盘激活。
+- APK：停止立即撤销采集，资源清理期间禁止新授权重开；用会话代次隔离旧回调及旧资源完成事件。
+  生命周期/授权主机回归覆盖通知拒绝、Activity 重建及原有服务启动等待的恢复。
+- ESP：从电脑只读注册的新鲜状态反映连接，且不伪造控制授权；已完成引导在手机停止投屏时如实提示，
+  不再返回扫码步骤。SSID 按实际标签宽度显示，静止二维码页面避免重复刷新，下载页使用暗色卡片。
+  这些展示修复没有修改无线或安全参数。
+
+| 本轮检查 | 结果与边界 |
+| --- | --- |
+| 电脑构建与主机门禁 | **PASS**：typecheck/build；主机 **453/453**、零跳过；EXE **15/15** 场景，`realDeviceInput=false`。证据：`apps/android-mcp/build/overnight-{typecheck,build,host-tests,exe-tests}.log` |
+| EXE 两分钟模拟设备长测 | **PASS**，120,085ms：**3,613** 帧 / **30.0869fps**、**4,540** 次模拟 ACK，中位 **0.6185ms**、p95 **1.3781ms**、最大 **16.0813ms**。覆盖连续画面、空闲/重连、ACK 前连接丢失不重放输入，以及预览档位与原图采集。这是 localhost 模拟设备，不能当作手机/BLE 性能。证据：`apps/android-mcp/build/windows/exe-soak-2m.json` |
+| EXE 十五分钟模拟设备长测 | **PASS**，**900,250ms**：**27,021** 帧 / **30.01499fps**、**38,000** 次模拟 ACK，中位 **0.5942ms**、p95 **1.5007ms**、最大 **108.3172ms**；**862** 次只读观察查询。子进程 exit **0**、未强制结束、残留手机流/ESP socket 均为 **0**、模拟服务器已关闭、临时目录已删除。这是 loopback 模拟验证，不是手机/BLE 性能。固定证据：`apps/android-mcp/build/windows/exe-soak-15m.json` |
+| 两小时资源观察 | **已完成——功能/清理 PASS**，**7,200,277ms**：**216,018** 帧 / **30.0013456957fps**、图像数据 **33,180,364,800B**、最大帧间隔 **58.8444ms**；**306,556** 次模拟 ACK，中位 **0.4793ms**、p95 **0.9954ms**、最大 **27.6363ms**，**6,950** 次只读观察。子进程 exit **0**、未强制结束、流/socket **0**、模拟服务器关闭、临时目录删除。属于旧 **ba710a04fbdc29d19fd2** JSON 响应版本，不是 v37 或真实 LAN/BLE 验证。固定证据：`apps/android-mcp/build/windows/exe-soak-2h.json`；日志：`exe-soak-2h.log` |
+| 实际 EXE 服务 | 已核对 PID **56384** 及程序路径，真实监听 **0.0.0.0:8790**；局域网、loopback `/health` 均 **200** 且匹配版本，未知路由 **404**。实际浏览器显示“操作台已连接”“QDD-Passport-326E”，手机未投屏/未配对提示清楚，没有真实手机画面 |
+| 官方 MCP 连接实际控制板 | 只读 **PASS**：列出 **20** 个工具、STATUS **5/5**、最大 **872ms**，没有输入。证据：`apps/android-mcp/build/mcp-overnight-final-status.json`。不代表高频连接或控制通过 |
+| EXE 的 MCP 请求格式 | **PASS**：批量 `tools/list` POST 返回 **400**，准确提示 `Send one MCP request per HTTP POST.`；同一官方 SDK 会话随后成功列出 **20** 个工具，没有输入。证据：`apps/android-mcp/build/mcp-overnight-wire.json` |
+| 手机离线时的 MCP 行为 | **2,576ms** 返回预期错误，`isError=true`、图片 **0**，服务 health 仍 **200**。证据：`apps/android-mcp/build/mcp-overnight-phone-offline.json`。仅证明错误处理通过，不是手机截图通过 |
+| APK 构建/安装 | 构建、签名及完整 host 检查 **PASS**，其中生命周期 **9** 项、授权 **16** 项。已拉取安装后的 base APK，SHA-256 与当前构建一致。证据：`apps/android-screen/build/overnight-apk-{build,tests}.log`、`build/manifest.json`、`build/overnight-installed-hash.json` |
+| ESP 构建/渲染门禁 | 完整固件门禁与归档校验 **PASS**。主机渲染覆盖实际字体/布局、引导跳过、配对反馈、扫描反馈及静止刷新；不变二维码刷新为 **0** 次 flush。24KiB LVGL 池剩余 **6,816B**、最大块 **6,432B**、峰值使用 **17,112B**。ESP 静态工具仍有已记录的平台跳过项；上方零跳过仅指电脑测试。证据：`apps/esp/build/overnight-final-gate.log`、`adversarial-esp-static-final.log`、`adversarial-ui-final.log` |
+| ESP 烧录/启动 | COM6，MAC **4c:11:ae:31:32:6c**，仅向已有 `ota_0` 的 **0x20000** 写入 App，写入哈希校验通过。保留 NVS、配对、分区表、bootloader、OTA 元数据、PHY 及 assets。**30 秒**启动观察无 fault/OOM，但出现 **reason 8** 断开后重连，不能当作全程无断连。证据：`apps/esp/build/new-com6-overnight-{flash-plan.json,flash.log,startup.json}` |
+| USB 中立压力 | 相同目标 20ms / 最多四条未确认 / 1200ms 时限，**25 秒**、**800/800**、最大 **32ms**，**PASS**。此前 v30 对照为 **798/798**、同样最大 **32ms**，均未发送真实输入。证据：`apps/esp/build/usb-neutral-stress-overnight.json` |
+| 控制板下载页/API | HTTP **200**、暗色卡片页面、内嵌 APK **53,730B** 且当前 SHA-256 匹配。证据：`apps/android-mcp/build/board-overnight-http.json`。该电脑侧检查不代表手机完成下载或安装 |
+
+十五分钟长测共采集 **32** 次进程内存样本。**63,141ms** 预热样本的 private bytes / working set
+为 **99,082,240 / 123,211,776B**，结束时为 **189,009,920 / 162,271,232B**，
+增量 **89,927,680 / 39,059,456B**。约 **873 秒** private bytes 回落到 **105,164,800B**，
+约 **903 秒** 又出现新峰；目前不据此定性内存泄漏，也不宣称内存已有稳定上界。
+十五分钟固定报告 SHA-256 为
+`ab564cf3664a8061150d5fbe18a8b7941e28d0c25b379fdfffe071c39cd6d267`。
+
+随后两小时观察已完成，报告时间 **2026-10-17T18:19:45.980Z**，保留 **241** 次内存采样。
+**61,083ms** 预热样本的 private bytes / working set 为 **78,479,360 / 102,002,688B**，
+**7,201,402ms** 结束时为 **298,536,960 / 203,026,432B**，增量 **220,057,600 / 101,023,744B**。
+结束值也是采样峰值，中间有回落。功能与清理通过，但该增长不能证明长期上界或资源稳定，
+也不能将全部增长归因于后续已确认的 SDK stream 残留缺陷。两小时固定报告 SHA-256 为
+`5e1fb9bca2ad2db178cb511b1fa3e6e5bbe433b80777860a8dd3e0f50e887172`。
+
+当前 EXE：`apps/android-mcp/build/windows/设备操作台.exe`，buildId
+`ba710a04fbdc29d19fd2`，**94,434,816B**，SHA-256
+`de46ef950dc349f1550f6798f77f3a41c7ec48e7a731c05c2dcf0d030cb8d8ec`。
+当前 APK：`apps/android-screen/build/qdd-android-screen-debug.apk`，**53,730B**，SHA-256
+`857e803d51f2bba359b85ee3b4898274040c1aff436f9e6fba3ee7f643294940`。
+当前固件归档/合并镜像 SHA-256：
+`4d6e8d68f2c50ec7669d48d057bbdf8919db7740a6e28c39eabe9624233c3220`；
+App **1,665,280B**，SHA-256 `d281ec238dd13c8e59dcd74d188014759a75203f0a6e3bf6fed6cf2de6ee0027`；
+ELF SHA-256 `852803b7b82c58bfde5fcaa0d75f977e1f685c7e702a80f3977944c7c53fc9a9`。
+归档里的 factory 合并镜像**没有**覆盖烧录到设备已有的 OTA 布局。
+
+真机局域网压力在原有目标间隔 **20ms**、最多 **四条** 未确认请求、ACK 时限 **1200ms** 下仍 **FAIL**：
+
+- PING：总计 **13.751 秒**，发出 **261** 条命令（260 条 PING、1 条清理 RELEASE），收到 **259** 条
+  PING 回复。100256 在 **12,541ms** 超时、等待 **1,226ms**；最终收到的最大 RTT 为 **1,468ms**，
+  **13,051ms** 出现 peer END。证据：`apps/android-mcp/build/tcp-neutral-stress-overnight.json`、
+  `npcap-overnight-stress-tcp-headers.json`；同期 UART
+  `apps/esp/build/tcp-overnight-stress-diagnostics.json` 为 **40 秒 / 70** 样本，无 fault/OOM，
+  采样可用内部堆最低 **36,912B**。
+- 此次首个失败与 v34 初始收包缺口不同：约 **11,598ms** 时，UART 已累计接收
+  **5,439B = 259 × 21**、socket 接受整写 **38,332B = 259 × 148**，
+  其中 100256–100258 均在电脑时限前写出，ESP TCP ACK 也已确认这些命令。
+  但对应回复首次出现在电脑为 **12,679 / 12,847 / 12,852ms**，因此首个超时包括应用整写成功后的
+  回包交付延迟。随后 100259 另有入站缺口，重传后 ESP ACK 仍未推进。
+  最终 TCP 为外部/安全关闭原因 **1**，与所有权看门狗收尾一致；该窗口无线事件计数未变。
+  socket 整写不证明无线送达，也不能唯一定位根因。
+- STATUS-only 加低频 ICMP：总计 **6.689 秒**，发送 **130**、最终收到 **130**，仍 **FAIL**：
+  STATUS 100126 等待 **1,215ms**，在 **6,378ms** 超时；最终最大 RTT **1,473ms**。
+  ICMP **25 包 / 23 成功**，成功 RTT **15–437ms**，另两次状态 **11010** 超时，首次与 STATUS
+  缺口重叠。仅说明非控制协议也存在延迟，不能唯一定位 AP、电脑或 ESP 的原因；
+  低频诊断不属于等价控制压力通过。证据：`apps/android-mcp/build/tcp-status-stress-overnight-icmp.json`、
+  `icmp-overnight-probe.json`、`npcap-overnight-status-icmp-tcp-headers.json`；同期 UART
+  `apps/esp/build/tcp-overnight-status-icmp-diagnostics.json` 为 **40 秒 / 71** 样本、无 fault/OOM，
+  采样可用内部堆最低 **37,100B**；抓包 **45 秒**。
+
+APK 安装后 `pidof` 仍未发现手机 App 进程。在用户最新明确授权后再次尝试 ADB 打开 App，
+仍被自动审核拒绝，返回 `blocked by policy`，没有换接口绕过；未验证新 MediaProjection 会话。
+控制 ACK **1200ms**、WebSocket **1500ms**、PING **300ms**、固件看门狗 **1500ms** 均不变，
+没有重放输入、整片擦除或 Git 发布。
+
+Build：**PASS**；Host tests：**PASS**；Device tests：**FAIL**——产物安装、USB 中立压力、HTTP 及
+短时只读 MCP 通过，但真机高频局域网压力失败。Unverified：恢复手机投屏、真实 BLE 配对、
+非零输入、全部实物 UI 流程、完整端到端控制。
+软件与模拟设备通过不能替代上述检查，也不能宣称成品已经稳定完成；已结束两小时观察的内存增长边界如上保留。
+
+## v34 远控排队修复——软件检查通过，高频局域网传输仍 FAIL
+
+2026-10-17：红测 `apps/android-mcp/build/remote-status-barrier-red.log` 确认电脑侧存在截止时间问题：
+独占 STATUS 等待约 **908ms**，随后合法的 MOVE ACK 等待约 **914ms**，两者排队累计超过原有
+**1500ms** WebSocket 报告时限，尽管各自 ACK 未超时。现在控制中的 STATUS 优先读取当前连接
+近期已经确认的状态，不再插入阻塞输入的线路查询。快路仅在连接 ready/open、没有传输故障、
+控制轮次一致、回复顺序有效且单调时钟年龄不超过原 ACK 时限时生效；新 ARM 一经预约，
+便在其准备 PING 前禁用旧快照。状态过期或不可用时仍走普通 STATUS 请求。
+另有 `remote-status-arm-reservation-red.log`、`remote-status-final-focused-tests.log` 作为证据。
+
+WebSocket 时限仍为 **1500ms**，控制 ACK **1200ms**、PING 间隔 **300ms**、固件看门狗 **1500ms**。
+没有重放输入、放宽时限或修改固件；板子仍运行下方记录的已恢复 **v30 / RX4** App。
+
+| 本轮检查 | 结果与边界 |
+| --- | --- |
+| 电脑门禁 | **PASS**：typecheck/build；主机 **439/439**，零跳过；EXE **15/15** 场景，`realDeviceInput=false`。证据：`apps/android-mcp/build/queue-v34-{typecheck,build,host-tests,exe-tests}.log`、`build/windows/exe-smoke.json` |
+| 最终 EXE / 官方 MCP | buildId **ce2ac5b7b7b36f690738**，已核对 PID **74108**，监听 **0.0.0.0:8790**；`/health` 匹配当前 build/PID，未知路由返回 **404**。官方 SDK 列出 **20** 个工具，真实 `android_hid_status` **5/5** 通过，最大 **366ms**。证据：`apps/android-mcp/build/mcp-v34-final-status.json`。短时间只读检查不代表手机输入通过 |
+| STATUS-only 真机压力 | 不发送 PING、不取得所有权仍 **FAIL**：目标间隔 **20ms**、最多 **四条** 未确认请求、原 **1200ms** 时限；发送 **12**、收到 **8**。STATUS 100008 在 **2,152ms** 超时，等待 **1,212ms**，总计 **3,356ms**。证据：`apps/android-mcp/build/tcp-status-stress-v34.json` |
+| 同期诊断 | Npcap 30 秒，UART 40 秒 / **70** 样本；OOM **0**、`faults=[]`，采样可用内部堆最低 **39,104B**。证据：`apps/android-mcp/build/npcap-v34-status-stress-tcp-headers.json`、`apps/esp/build/tcp-v34-status-stress-diagnostics.json` |
+
+最后可见的 ESP 回复为约 **1116ms** 的 STATUS 100007，TCP ACK 为 `2330855664`，
+接收窗口仍有 **5576B**。后续 STATUS 字节重传，该抓取窗口中没有再收到 ESP 包；
+电脑约 **3357ms** 发出 FIN。没有 PING 租约也复现接收缺口，因此不能将此前失败唯一归因于租约到期，
+但无线、驱动或网络中的具体根因仍未唯一定位。
+
+UART 窗口随后记录到真实的信标超时：首次样本在 **19,984ms**（事件年龄 148ms），
+**22,781ms** 样本出现 Wi-Fi 断开 **reason 200**、`up=0`；**26,250ms** 已自动重连，
+信道 **6**、RSSI **−63dBm**，此前为信道 **11**、约 **−76/−74dBm**。
+这些后续事件均晚于初始 STATUS 失败，不能倒推为初始缺口的唯一原因。
+最终 TCP 关闭原因 **2 / NETWORK** 属于后续网络失效，与 v31/v32 的外部/安全关闭不同。
+没有证据表明是 App 代码主动断网；保留既有全信道扫描、按信号选择的连接逻辑，
+没有继续修改缓冲、RTO、看门狗或选网设置。
+
+当前 EXE：`apps/android-mcp/build/windows/设备操作台.exe`，**94,431,232B**，
+SHA-256 `7c6827a15e9e24e4df2608bc4b41e1339a056a9edf673fd51fe9783f4a321ebf`。
+最后只读 ADB `pidof cn.qdd.screenbridge` 仍返回 exit 1、没有进程。
+手机仍需手动打开 App 并确认系统投屏授权；此前 ADB 打开/配置命令被审核拒绝，返回
+`blocked by policy`，没有换接口绕过。下方 v33 手机诊断仍是当前验收边界。
+
+Build：**PASS**；Host tests：**PASS**；Device tests：**PARTIAL——最终只读 MCP PASS，
+高频 STATUS-only 传输 FAIL**。Unverified：恢复投屏、真实 BLE 配对、非零输入及完整端到端控制。
+模拟设备的排队回归通过不能替代上述真机检查，不能宣称远控成品已稳定完成。
+
+## v31–v33 对抗检查——只读 MCP 通过，实际控制所需的传输压力仍 FAIL
+
+2026-10-17：已修复一个确认的所有权问题：其他调用者取消正在等待的只读 STATUS，
+不再发送 RELEASE/PAUSE，也不会松开当前操作者按住的键。被取消请求的迟到回复不能改变当前控制轮次。
+定向回归及 EXE 中两名官方 SDK 客户端的场景覆盖了取消后原操作者继续输入。
+
+从未尝试控制的 bridge 现在直接打开 STATUS 观察连接，不发送 PING、不取得所有权、
+不启动心跳，也不进行输入清理。默认只读等待上限为 3000ms，显式配置的更短时限仍生效。
+首次尝试控制会关闭观察 socket，在新 socket 上完成原有握手；控制 ACK 仍为 1200ms，
+板端看门狗仍为 1500ms，输入不重放。从未控制的只读查询不受手机停止投屏或画面尺寸变化影响；
+这不代表没有有效画面时也允许控制。
+
+| 本轮检查 | 结果与边界 |
+| --- | --- |
+| 电脑门禁 | **PASS**：typecheck/build；完整主机用例 **429/429**，零跳过；EXE **14/14** 场景，`realDeviceInput=false`。日志：`apps/android-mcp/build/observation-v33-{typecheck,build,host-tests,exe-tests}.log` |
+| 真实官方 MCP 只读连接 | **PASS**：手机投屏 App 已停止时，`android_hid_status` **60/60**，最大 **1,182ms**，运行窗口约 74 秒；首个请求发出至最后结果为 72,533ms。证据：`apps/android-mcp/build/mcp-v33-observation-status.json`。仅覆盖只读连接，不代表真实输入通过 |
+| 同期 UART 与包头观察 | UART 90 秒、**158** 个样本，OOM **0**、`faults=[]`，采样可用内部堆最低 **27,000B**；TCP epoch 为 1，完成整写 **60** 次。证据：`apps/esp/build/tcp-v33-diagnostics.json`、`apps/android-mcp/build/npcap-v33-tcp-headers.json`。整写仅证明 socket 接受字节，不独立证明无线送达 |
+| v31 RX4 中立压力 | **FAIL**：目标间隔 20ms、最多四条未确认 PING、时限 1200ms；发送 **23**、收到 **18**。PING 100018 在 **3,582ms** 超时，4,133ms 收到对端 END。证据：`apps/android-mcp/build/tcp-neutral-stress-v31.json`，以及对应的 `npcap-v31-stress-tcp-headers.json` / `apps/esp/build/tcp-v31-stress-diagnostics.json` |
+| v32 RX6 对照实验 | 相同配置压力下仍 **FAIL**：发送 **69**、收到 **64**；PING 100064 在 **6,262ms** 超时，当时等待 1,211ms；6,824ms 收到对端 END。OOM **0**。证据：`apps/android-mcp/build/tcp-neutral-stress-v32.json` 及对应 v32 压力包头/UART 文件。两段失败窗口不能证明故障率改善；RX6 不采纳，已回退 |
+| 当前电脑服务 | EXE 监听 **0.0.0.0:8790**；`/health` 为 `status=ok`，未知路由为 404。最终核对 PID **10512**，buildId **67726d3e76d3841d47dc** |
+
+RX6 实验版通过完整固件门禁及归档校验，仅向 COM6 已有 `ota_0` 的 `0x20000` 烧录 App，
+保留 NVS 及此前记录的其他区域。真机失败后，只回退实验的两处源码修改，
+重新刷回已验证的 **v30 App**，写入哈希校验通过；恢复启动观察 30 秒，OOM 0、`faults=[]`。
+证据：`apps/esp/build/rx-v32-build.log`、`new-com6-v32-flash.log`、
+`restore-v30-after-rx-v32.log`、`restored-v30-startup.json`。
+恢复后的 `sdkconfig.defaults` blob 为 `b2a409b760906a9bdbda4e8e807fb6904a8daefe`，
+传输契约 blob 为 `2f228ff5f27c2ada6051056029ef9c33d2019d80`，与实验前完全一致。
+v32 归档仅保留用于追溯：合并镜像 `15be676d9b191b2a2eb43c4c5c8d622dd50a2b5a44aaf0a1f00692c3c2f65576`，
+App `f7971729e7d98eb450a3e5f07ea0fd931f5f5eb4c6e8f380a4b214a53f084ca5`，
+ELF `8019c322ddd43c2312e9810930e8fd87bfca03456c0bb3ea61e0c9425fb37eab`。
+当前设备内的 v30 身份仍以下方记录为准。
+
+一加 ADB `dcf4e720` 已恢复；只读核对已安装 APK 哈希仍为
+`7cff0c5e1f3d00fdb645d1dad64a08cd9b692c7bdbb2eef203c136db06931812`，
+Wi-Fi 地址为 `192.168.101.46`。但 Android 记录 App 在 **23:08:13.816（Asia/Shanghai）**
+被系统停止，reason **13 / OTHER KILLS BY SYSTEM**、subreason **2040**；尚未证明是 App 崩溃。
+检查时没有 App 进程或 MediaProjection 授权，`/health` 拒绝连接，MCP 截图尝试返回错误且没有图片。
+证据：`apps/android-mcp/build/phone-v33-readonly-diagnostic.json`、`mcp-v33-phone-readonly.json`。
+ADB 打开/配置命令被自动审核拒绝，仅返回 `blocked by policy`，没有换其他接口重试；
+仍等待用户在手机打开 App 并授权投屏。未使用 USB/ADB 业务输入或截图回退。
+
+当前 EXE：`apps/android-mcp/build/windows/设备操作台.exe`，**94,430,208B**，
+SHA-256 `226963e6d5cc64e7ec394797591a67be4bdad4a1d84209e631c97c155117afaf`。
+
+Build：**PASS**；Host tests：**PASS**；Device tests：**PARTIAL——只读 MCP 连接 PASS，
+高频中立传输压力 FAIL**。Unverified：恢复手机投屏、真实 BLE 配对、非零输入及完整端到端控制。
+只读观察通过不覆盖压力失败，不能宣称远控成品已稳定完成。
+
+## v30 TCP 定时粒度——已刷入，MCP 连续查询仍 FAIL
+
+2026-10-17：本轮固件仅将全局 TCP 定时粒度设为 125ms；初始 RTO 仍为 1000ms，
+电脑 ACK 时限仍为 1200ms，控制器看门狗仍为 1500ms。该配置也作用于 HTTP 等 TCP 连接，
+存在全局定时处理开销的取舍，不保证改善丢包或所有连接延迟。
+完整固件门禁、归档校验及 COM6 `ota_0` App-only 烧录 **PASS**：
+向 `0x20000` 写入 1,660,224 字节并校验，保留此前记录的 NVS、分区表及其他区域。
+证据：`apps/esp/build/tcp-v30-build.log`、`new-com6-v30-flash-plan.json` 及同轮烧录日志。
+
+- 启动观察：30 秒、10 条只读回复、OOM 0、`faults=[]`。初始 DHCP 重试期间记录一次 Wi-Fi 断开，reason 为 8；仅该事件不能证明 RF 故障。证据：`apps/esp/build/new-com6-v30-startup.json`。
+- 官方 MCP：前两个样本成功，sample 2 在 4,507ms 后返回 `ESP32 STATUS acknowledgement timed out`，**FAIL**。证据：`apps/android-mcp/build/mcp-v30-new-board-status.json`。
+- 只读诊断：90 秒、158 个样本，UART 请求最大 78ms，OOM 0、socket 失败写入 0、`faults=[]`；采样可用内部堆最低 26,196 字节，SDK 自启动历史低水位 19,552 字节。最终事件计数仍仅有启动时的一次断开，无新增断开。证据：`apps/esp/build/tcp-v30-diagnostics.json`。串口响应和内存余量正常不能替代 LAN/MCP 验收。
+- APK 来源绑定下载：PASS，HTTP 200、49,634 字节、2,187ms，SHA-256 仍为 `7cff0c5e1f3d00fdb645d1dad64a08cd9b692c7bdbb2eef203c136db06931812`；证据 `apps/android-mcp/build/new-board-v30-download.json`。
+- 实时画面只读观察：标准档 SSE 连续 20 秒收到 287 帧、21,110,826 字节、0 次 unavailable；这是该画面窗口通过，不代表控制链路通过。当前 EXE 在 8790 端口运行。
+- 极速档有界对照：从标准档切换极速档成功；官方 MCP sample 0 成功，sample 1 在 3,305ms 后 PING ACK 超时，仍 **FAIL**；finally 恢复标准档成功。证据：`apps/android-mcp/build/profile-v30-turbo-ab.json`、`mcp-v30-turbo-status.json`。降低预览画质未让本轮连续查询通过，削弱“只需降画质即可修复”的解释；有限对照仍不能唯一排除负载影响，也不确定全部断连根因。未运行 BLE 配对或非零输入。
+- Device tests：**PARTIAL，MCP 连续查询 FAIL**。实际 BLE 配对、非零输入及最终端到端控制仍 **NOT RUN**；本轮不得宣称连接稳定或成品完成。
+
+固件归档/合并镜像 SHA-256：`3c87ab62d614ae68c09bd10d9444e2e77c9808a1cca3cc96857b98194428b9dc`。
+App SHA-256：`088b47c4aa89769926bd506c65862a577bcf89e4edc0b7d9b19c6950f76adfd9`（1,660,224 字节）。
+ELF SHA-256：`66a12d4643e7a728bb78254e58e53feb67d8daaa3f1c8ecdf30d7206117bbc23`。
+
+## v29 电脑冷握手心跳修复与包头观察——离线 PASS，真机结果仍有失败
+
+电脑 `serial.ts` 在首次握手 PING 发出前启动中立心跳，慢 RELEASE/PAUSE 回复期间也续租，
+握手完成前继续拒绝实时输入；原有至多四个待确认心跳、失败清理和旧连接/迟到 ACK 守卫保留。
+两条旧实现红测复现租约空窗，新实现定向 **55/55 PASS**；typecheck/build **PASS**，
+完整电脑用例 **419/419 PASS**，最终 EXE **13/13 离线场景 PASS**。
+日志：`apps/android-mcp/build/handshake-v29-typecheck.log`、`handshake-v29-build.log`、
+`handshake-v29-host-tests.log`、`handshake-v29-exe-tests.log`。
+打包场景使用本地模拟手机/控制板，明确 `realDeviceInput=false`，不算真机控制验收。
+
+- 官方 MCP 真机查询仍 **FAIL**：sample 0 在 4,247ms 后 PING ACK 超时；证据 `apps/android-mcp/build/mcp-v29-new-board-status.json`。
+- 独立原始 TCP 追踪仍 **FAIL**：前 10 个样本成功，sample 10 PING ACK 超时；证据 `apps/android-mcp/build/tcp-v29-neutral-wire.json`。
+- 另一轮与包头抓取并行的原始追踪 **30/30 PASS**：单连接持续约 36.6 秒，Node 事件循环最大延迟 34ms；证据 `apps/android-mcp/build/tcp-v29-capture-wire.json`。该独立通过窗口不覆盖上述失败。
+- 普通权限、非混杂、精确 WLAN 与目标/端口过滤的 30 秒包头观察得到 365 个包。发现 **9 次 PC→ESP 重叠序列区间重发**，包含合并重分段；不能仅按序号和长度完全相等查找。例：PING 36 首发后约 532ms、1,043ms 两次重发，之后 ACK 批量到达。入站数据至 Node 回调最大约 5.9ms，未见零窗口或 RST；本轮主要秒级等待发生在 Node 读取前。证据 `apps/android-mcp/build/npcap-v29-tcp-headers.json`，仅保存包头字段，无载荷或 pcap 文件。
+- 该抓取与 `tcp-v29-diagnostics.json` 的 UART 窗口**不重叠**，不能作同期串口归因。主机 WLAN 包头证明 PC 栈重发尝试，不能单独证明空口实际发送、RF 丢包、ESP 已收到，或唯一确定去程/回程故障。
+
+电脑 EXE buildId：`b5f42c55d15153b3a302`；SHA-256：`4c0f43a7cee36e0710b7abbedcd38e2ab39ad99e32584e3276a4faf53137735c`（94,428,160 字节）。
+
+## v28 有界 TCP 诊断——已刷入，连续局域网查询仍 FAIL
+
+2026-10-17：初始 TCP RTO 改为 1000ms，并新增 32 字节累计 socket 诊断；
+电脑 ACK 时限 1200ms、控制器看门狗 1500ms 不变。诊断不缓存命令、重发输入或解析私有无线包。
+本轮完整固件门禁及归档校验 **PASS**，定向 Wi-Fi 后端宿主测试 **17 组 PASS**。
+COM6 仅向既有 `ota_0` 的 `0x20000` 写入 1,660,224 字节 App，写入校验通过，
+保留 bootloader、原分区表、otadata、NVS、PHY、assets 和另一 OTA 槽；未全擦。
+证据：`apps/esp/build/tcp-v28-build-final.log`、`new-com6-v28-flash-plan.json` 及同轮烧录日志。
+
+| 本轮真机检查 | 结果与边界 |
+| --- | --- |
+| 启动观察 | 30 秒、10 条只读回复，OOM 0、`faults=[]`；证据 `apps/esp/build/new-com6-v28-startup.json`。这是该窗口的观察，不是长期稳定性证明 |
+| 只读诊断 | 90 秒、158 个样本、UART 请求最大 78ms，OOM 0、`faults=[]`；采样可用内部堆最低 **23,344** 字节，SDK 自启动历史低水位为 **16,836** 字节，两者不可混称。证据 `apps/esp/build/tcp-v28-diagnostics.json` |
+| 控制板 APK 下载 | PASS：HTTP 200、49,634 字节、3,240ms，SHA-256 仍为 `7cff0c5e1f3d00fdb645d1dad64a08cd9b692c7bdbb2eef203c136db06931812`；证据 `apps/android-mcp/build/new-board-v28-download.json`。不代表手机已安装或投屏初始化成功 |
+| 官方 MCP 中立状态查询 | FAIL：前两个样本成功，sample 2 出现 `ESP32 PING acknowledgement timed out`，耗时 5,200ms；证据 `apps/android-mcp/build/mcp-v28-new-board-status.json` |
+| 来源绑定的原始 TCP 追踪 | FAIL：sample 0 在 2,076ms 收到对端 END，未完成 STATUS；本地来源为 `192.168.100.160`，Node 事件循环最大延迟 22ms。证据 `apps/android-mcp/build/tcp-v28-neutral-wire.json` |
+| 来源绑定 ICMP 对照 | 控制板 `192.168.101.75` 收到 17/20，丢包 15%，平均 239ms、最大 1,061ms；网关 10/10、平均 22ms，手机 10/10、平均 114ms。这组有限样本支持控制板链路仍有丢包/延迟，不能单独确定 RF、路由器或 TCP 根因 |
+
+新诊断在失败窗口记录到 TCP 接收累计值停止增加，而串口仍及时响应；
+socket 失败写入计数始终为 0。整写成功只证明 lwIP 接受字节，不证明无线送达；
+历史关闭原因/errno 保留到后续连接，必须结合轮次和计数增量判断，不能把旧值当作新故障。
+另已发现电脑冷握手完成到周期心跳启动之间的空窗，正在定向修复和复验；
+该修复尚未完成真机验收，也不能据此将所有链路失败归因于同一问题。
+
+Build：**PASS**；Host tests：**PASS**；Device tests：**PARTIAL，连续 LAN 查询 FAIL**。
+真实 BLE 配对、非零输入及最终端到端成品验收仍 **NOT RUN**；不得描述为已完成或稳定。
+v27 及更早的成功和失败记录均保留在下方。
+
+固件归档/合并镜像 SHA-256：`e7b9c1858d6004d0be1fea42cdd619415e97c600210a4f75bdd5d10dac758036`。
+App SHA-256：`8e614c846cab586f1468f9cfd4f824b80514d65397dea04508a3fddb2ae103b2`（1,660,224 字节）。
+ELF SHA-256：`905d00a988c92d12ad497e73fd3178e4d0a5cc364d2700565d7dbd3766b18666`。
+
+## v27 内存预算调整——观察内 OOM 消失，LAN 查询仍未通过
+
+关闭两项 Wi-Fi IRAM 速度优化后，匹配 ELF 比较确认共享 SRAM 实际回收 **19,456 字节**，
+未把 SDK 单项节省估算直接相加；无线缓冲、NimBLE、任务栈、UI 和安全时限不变。
+固件门禁、归档校验及 COM6 App-only 烧录 PASS，向原 OTA 槽 `0x20000` 写入 1,659,824 字节，保留数据。
+
+- 启动观察：30 秒内部堆最低 42,588 字节、OOM 为 0；APK 下载与 MCP 查询并行的另一个 30 秒诊断窗口内，最低堆 19,684 字节、OOM 为 0、`faults=[]`，未见 Wi-Fi 断开或重启。证据：`apps/esp/build/new-com6-v27-startup.json`、`new-com6-v27-lan-diag.json`。这些窗口内的内存耗尽已消失，不代表所有链路问题已解决。
+- APK 下载：49,634 字节、SHA-256 仍为 `7cff0c5e1f3d00fdb645d1dad64a08cd9b692c7bdbb2eef203c136db06931812`，2,248ms，PASS。证据：`apps/android-mcp/build/new-board-v27-download.json`。
+- 官方 MCP 中立查询：前 17 次成功，18 个样本中的 sample 17 出现 PING ACK 超时，FAIL。证据：`apps/android-mcp/build/mcp-v27-new-board-status.json`。
+- 新的来源绑定线路追踪：20 次 STATUS 回复成功；随后 PING 95 在 23,015ms 发送、24,455ms 收到 ACK，耗时 1,440ms，ACK 96–98 在 1,369ms 收包空窗后集中到达。Node 事件循环最大延迟仅 23ms，控制板未在客户端关闭前主动断开。证据：`apps/android-mcp/build/tcp-v27-neutral-wire2.json`。现象符合 TCP 队头阻塞/重传延迟，但尚未确定丢包方向。
+- Device tests：PARTIAL，连续 LAN **查询**仍 FAIL。用户明确选择“先验证电脑连接”，BLE 配对及非零输入按该范围偏好为 **NOT RUN**，不是输入功能已测失败。
+- 后续：v28 全局初始 TCP RTO 1000ms 和 32 字节有界诊断正在构建，尚未经设备验证；电脑 ACK 1200ms 与固件看门狗 1500ms 保持不变。
+
+固件归档/合并镜像 SHA-256：`eaaa7d7305a954cb47811bfbd169dfd45b3b5c87526cd3cc3b963514432ba233`。
+App SHA-256：`6dec0fd45c58249ec59411b81e2f182e8418194199a61ccd1c019fbe33584eb4`（1,659,824 字节）。
+ELF SHA-256：`e04c97669536264f32885bcd3e09602436de23db1a01b5f19a6d73a439414953`。
+
+## v26 新控制器与明确局域网来源地址——部分验收
+
+2026-10-17：设置页发现新控制器但没有新鲜手机注册时，保留原投屏地址和 UUID。
+主动查找/选择局域网设备会选择 Wi-Fi，本页明确选择 USB 时保留 USB；后台发现保留已保存的 USB。
+编辑版本号避免迟到的发现结果覆盖正在编辑的字段。复制 IP:端口、全角冒号或扫码下载地址时，
+页面和 API 统一规范化：地址内端口优先，下载端口 3334 纠正为控制端口 3333，裸局域网主机名保持兼容。
+
+实际未绑定连接曾选中 Mihomo TUN 来源 198.18.0.1。TCP 现仅解析主机名一次，验证私网 IPv4 后，
+绑定最长匹配子网的本机地址；手机 HTTP 和控制板登记使用各自拥有的来源绑定连接池，
+地址变化时替换，关闭时释放。回环和无匹配子网的路由地址保留原行为。
+未修改代理/安全软件、HID 时限或动作重试，也没有自动回退 USB。
+
+- Build / Host tests：电脑 typecheck/build PASS；串口/TCP/LAN 定向 59/59、HTTP/投屏/登记定向 57/57 PASS，电脑完整用例 417/417 PASS；EXE 的 13 个离线场景 PASS，含复制端口持久化及 BLE 未就绪时官方 MCP 状态查询，零真实输入。日志：`apps/android-mcp/build/lan-v26-host-tests.log`、`exe-v26-lan-tests.log`。
+- 固件 Build / 烧录：门禁及归档校验 PASS；COM6 既有 `ota_0` 仅向 `0x20000` 写入 1,660,800 字节 App，保留原分区表、bootloader、otadata、NVS、PHY 和 assets，未全擦，也未向原 OTA 地址刷合并镜像。方案：`apps/esp/build/new-com6-v26-flash-plan.json`。
+- 启动观察：30 秒内 11 条只读回复、`faults=[]`，只代表该启动窗口，不代表长期稳定。证据：`apps/esp/build/new-com6-v26-startup.json`。
+- 手机 MCP 真机：发现 20 个工具，连续三次 1080×2400 原图 JPEG 截图 PASS，`realDeviceInput=false`。证据：`apps/android-mcp/build/mcp-v26-phone-readonly.json`。
+- 新控制器 LAN：已纠正为同一局域网 `192.168.101.75:3333`；官方 MCP 首次状态成功后，sample 1 出现 PING ACK 超时，FAIL。证据：`apps/android-mcp/build/mcp-v26-new-board-status.json`。来源地址修复尚未解决连续状态查询。
+- 内存证据：UART 诊断仍正常回复，内部堆最低仅 312 字节，分配失败计数 295→297。元组顺序为 `[次数,申请大小,能力标记]`，实际失败申请为 **1700 字节**，**6144（0x1800）是 caps**，不能误称 6144 字节申请。证据支持内存压力，尚未识别每次失败的调用者。记录：`apps/esp/build/new-com6-v26-lan-diag.json`。
+- APK 传输：明确绑定本机来源后，从新板下载 PASS，HTTP 200、49,634 字节、2,973ms，SHA-256 与下方一致，v2/v3 签名检查 PASS；没有修改 APK 源码。证据：`apps/android-mcp/build/new-board-v26-download.json`。
+- Device tests：PARTIAL，连续 LAN 查询仍 FAIL，真实输入 NOT RUN。新控制器尚未 BLE 配对，手机 App 还需选择新控制器；电脑登记不代表手机已经安装。完整配对、实体按键流程及非零输入仍未验收。v27 内存调整的实际结果见上方记录。
+
+EXE buildId：`3ff7c5d09cd457ec3fbf`；SHA-256：`ce6e48761abead97a359f04294bc1a2af65ce72312ea7aef498076f2ea418945`（94,429,696 字节）。
+固件归档/合并镜像 SHA-256：`07e676807906e7f6f0bd68df27f22fa2921eebfdac86f097b340b3b0f21e4e14`。
+App SHA-256：`d7636d16ed21b8ebde611d4581679002eaf284ed15cc45dbd88072e5e5a7a3e2`；ELF SHA-256：`1617e8b930efddd48a5f87d7e8e52bddfa2f6e6ed0906bfb85f5c58f19e7b494`。
+APK SHA-256：`7cff0c5e1f3d00fdb645d1dad64a08cd9b692c7bdbb2eef203c136db06931812`。
 
 ## v25 冷启动诊断保护——已刷入，冷态诊断观察通过
 

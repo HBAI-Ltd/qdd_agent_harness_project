@@ -185,8 +185,10 @@ static void guide_refresh(const qdd_ui_view_t *view, qdd_ble_status_t ble, int c
     if (s_kind != GUIDE) guide_create();
     if (s_guide_step != view->onboarding_step) { s_guide_step = view->onboarding_step; lv_obj_invalidate(lv_screen_active()); }
     char value[64]; snprintf(value, sizeof(value), "连接助手 %u/6", view->onboarding_step); text(&s_header, value); battery(charge);
-    text(&s_title, view->title); text(&s_detail, view->detail); text(&s_next, view->next); text(&s_notice, view->notice);
+    text(&s_title, view->title);
     if (view->show_qr) {
+        // Write only the final QR copy: setting generic text before overriding
+        // it would invalidate an unchanged page on every presentation tick.
         text(&s_detail, "扫码或浏览器打开地址下载"); char url[64]; snprintf(url, sizeof(url), "http://%s:3334/", s_wifi.ip);
         if (strcmp(url, s_qr_url) != 0 && lv_qrcode_update(s_qrcode, url, (uint32_t)strlen(url)) == LV_RESULT_OK) strcpy(s_qr_url, url);
         lv_obj_remove_flag(s_qrcode, LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(s_card, LV_OBJ_FLAG_HIDDEN);
@@ -194,6 +196,7 @@ static void guide_refresh(const qdd_ui_view_t *view, qdd_ble_status_t ble, int c
         lv_obj_set_pos(s_next.object, 14, 249); lv_obj_set_width(s_next.object, 196);
         text(&s_next, "手机/电脑/ESP同一局域网"); text(&s_hint, ""); text(&s_notice, "");
     } else {
+        text(&s_detail, view->detail); text(&s_next, view->next); text(&s_notice, view->notice);
         lv_obj_add_flag(s_qrcode, LV_OBJ_FLAG_HIDDEN); lv_obj_remove_flag(s_card, LV_OBJ_FLAG_HIDDEN);
         lv_obj_set_y(s_value.object, 131); lv_obj_set_pos(s_next.object, 14, 228); lv_obj_set_width(s_next.object, 196);
         bool passkey = view->onboarding_step == 4 && view->show_passkey;
@@ -225,7 +228,8 @@ void qdd_ui_refresh(const qdd_hid_state_t *state, qdd_ble_status_t ble, bool com
     }
     const qdd_onboarding_view_t onboarding = qdd_onboarding_view();
     const qdd_ui_onboarding_t progress = {.require_full = s_require_onboarding, .wifi_connected = s_wifi.connected, .downloaded = onboarding.downloaded,
-        .phone_seen = onboarding.phone_seen, .phone_fresh = onboarding.phone_fresh, .projecting = onboarding.phone_projecting,
+        .phone_seen = onboarding.phone_seen, .phone_fresh = onboarding.phone_fresh, .pc_fresh = onboarding.pc_fresh,
+        .projecting = onboarding.phone_projecting,
         .skip_app = s_skip_app, .skip_bluetooth = s_skip_bluetooth, .completed = s_onboarding_complete};
     const qdd_ui_view_t view = qdd_ui_onboarding_model(state, computer_live, ble.pairing_open, ble.passkey_visible, ble.passkey, now, feedback, feedback_ms, &progress);
     if (view.onboarding_step == 6) s_onboarding_complete = true;
@@ -242,9 +246,15 @@ void qdd_ui_refresh(const qdd_hid_state_t *state, qdd_ble_status_t ble, bool com
     if (s_accent != view.accent) { s_accent = view.accent; lv_obj_set_style_text_color(s_title.object, lv_color_hex(s_accent), 0); }
 }
 static bool ssid_display(char *output, size_t capacity, const char *ssid, unsigned number,
-                         const uint8_t bssid[6]) {
+                         const uint8_t bssid[6], int content_width) {
     // The selected bytes stay intact in the model. Unsupported or invalid SSIDs
     // get an explicit stable identifier, never missing-glyph boxes or false text.
+    char prefix[16]; snprintf(prefix, sizeof(prefix), "%u. ", number);
+    lv_point_t prefix_size, ellipsis_size;
+    lv_text_get_size(&prefix_size, prefix, &qdd_cjk_14, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    lv_text_get_size(&ellipsis_size, "...", &qdd_cjk_14, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    const int full_width = content_width - prefix_size.x;
+    const int abbreviated_width = full_width - ellipsis_size.x;
     size_t offset = 0, kept = 0;
     unsigned width = 0;
     while (ssid[offset] && offset < 32) {
@@ -265,10 +275,11 @@ static bool ssid_display(char *output, size_t capacity, const char *ssid, unsign
         if (codepoint < 0x20 || !lv_font_get_glyph_dsc(&qdd_cjk_14, &glyph, codepoint, 0) || glyph.is_placeholder) goto fallback;
         width += glyph.adv_w;
         offset += count;
-        if (width <= 108) kept = offset;
+        if (abbreviated_width > 0 && width <= (unsigned)abbreviated_width) kept = offset;
     }
     if (!offset) goto fallback;
-    snprintf(output, capacity, "%u. %.*s%s", number, (int)kept, ssid, kept < offset ? "..." : "");
+    if (full_width > 0 && width <= (unsigned)full_width) kept = offset;
+    snprintf(output, capacity, "%s%.*s%s", prefix, (int)kept, ssid, kept < offset ? "..." : "");
     return true;
 fallback:
     snprintf(output, capacity, "%u. 网络 %02X%02X", number, bssid[4], bssid[5]);
@@ -403,7 +414,7 @@ void qdd_ui_wifi(const qdd_setup_model_t *setup, qdd_wifi_view_t wifi) {
         text(&s_header, title); text(&s_detail, value); text(&s_value, "");
     } else if (keyboard || setup->page == QDD_SETUP_ACTIONS) {
         if (keyboard) snprintf(title, sizeof(title), "输入密码 %u/4", qdd_setup_keyboard_page(setup) + 1); else strcpy(title, "完成输入");
-        text(&s_header, title); ssid_display(value, sizeof(value), setup->credentials.ssid, 1, empty_bssid); text(&s_detail, value);
+        text(&s_header, title); ssid_display(value, sizeof(value), setup->credentials.ssid, 1, empty_bssid, 196); text(&s_detail, value);
         snprintf(value, sizeof(value), "密码 %.*s %u/64", length > 8 ? 8 : (int)length, "********", length); text(&s_value, value);
         if (keyboard) {
             text(&s_hint, setup->choosing_column ? "上下选字 · 确认输入" : "上下选行 · 确认选字");
@@ -436,7 +447,7 @@ void qdd_ui_wifi(const qdd_setup_model_t *setup, qdd_wifi_view_t wifi) {
         text(&s_header, "手机蓝牙"); text(&s_detail, "在手机蓝牙中选择"); text(&s_value, qdd_ble_name());
     } else {
         text(&s_header, setup->page == QDD_SETUP_CONNECTING ? "正在连接" : "未能连接");
-        ssid_display(value, sizeof(value), setup->credentials.ssid, 1, empty_bssid); text(&s_detail, value);
+        ssid_display(value, sizeof(value), setup->credentials.ssid, 1, empty_bssid, 196); text(&s_detail, value);
         text(&s_value, setup->page == QDD_SETUP_CONNECTING ? "等待网络回应" : ""); text(&s_notice, setup->error ? setup->error : "");
     }
     text(&s_hint, "上下选择 · 确认进入");
@@ -456,7 +467,7 @@ void qdd_ui_wifi(const qdd_setup_model_t *setup, qdd_wifi_view_t wifi) {
         else if (setup->page == QDD_SETUP_LIST) {
             if (index < wifi.count) {
                 qdd_wifi_ap_t ap;
-                if (qdd_wifi_ap((uint8_t)index, wifi.scan_revision, &ap)) ssid_display(value, sizeof(value), ap.ssid, index + 1, ap.bssid);
+                if (qdd_wifi_ap((uint8_t)index, wifi.scan_revision, &ap)) ssid_display(value, sizeof(value), ap.ssid, index + 1, ap.bssid, 192);
                 else strcpy(value, "正在更新网络");
             } else strcpy(value, "重新查找网络");
         } else strcpy(value, setup->page == QDD_SETUP_ERROR ? "重新输入密码" : "开启手机配对");

@@ -246,10 +246,14 @@ Windows x64 使用仓库固定的 Node 24.15.0 打包：
 npm run build:exe --workspace @qdd/android-mcp
 npm run test:exe --workspace @qdd/android-mcp
 node apps/android-mcp/tools/soak-exe.mjs
+# 可选的 15 分钟资源观察（默认 120 秒）。
+node apps/android-mcp/tools/soak-exe.mjs --duration-seconds 900
 ```
 
 EXE 检查从中文/空格路径和空 PATH 启动，验证首次设置、重复启动、同进程重载、
 HTTP/stdio 官方 MCP 连接及资源校验。持续压力使用本机假手机/假 ESP，不能代替真机验收。
+可选参数 `--duration-seconds` 允许 120–7200 秒，并记录独立测试 EXE 的私有内存、工作集和退出清理；
+这些本机 fixture 结果不等于真实设备性能。
 测试使用 mock 设备，并通过官方 MCP 客户端验证 stdio 与本机 HTTP；JPEG 接收会校验
 尺寸、分段长度、扫描段与完整结尾，保留 PNG 测试适配。当前真机结果与待验项目见下方验收记录。
 保留的 `tools/preview.ps1` 仅供可选只读 USB/scrcpy

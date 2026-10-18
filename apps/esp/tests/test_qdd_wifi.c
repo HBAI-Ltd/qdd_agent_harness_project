@@ -356,6 +356,7 @@ static void reset(void) {
     s_config_attempts = 0;
     atomic_store(&s_accept_ip, false);
     s_listener = s_client = -1;
+    s_client_activity_ms = 0;
     atomic_uint *diagnostic_counters[] = {&s_diag_connects, &s_diag_disconnects, &s_diag_beacons,
         &s_diag_reason, &s_diag_disconnect_ms, &s_diag_beacon_ms, &s_diag_alloc_failures,
         &s_diag_alloc_size, &s_diag_alloc_caps, &s_diag_tx_ok, &s_diag_tx_fail, &s_diag_tx_ms};
@@ -366,6 +367,7 @@ static void reset(void) {
     atomic_store(&s_diag_tx_hook_error, ESP_ERR_INVALID_STATE);
     s_diag_heap_hook_installed = false;
     atomic_flag_clear(&s_diag_busy);
+    memset(&s_diag_tcp, 0, sizeof(s_diag_tcp));
 }
 
 static void connected(void) {
@@ -412,7 +414,7 @@ static void test_event_epoch_fail_closed(void) {
         assert(m.recv_calls == 0 && m.close_calls[11] == 1);
         assert(qdd_wifi_tcp_epoch() == 51 && !qdd_wifi_write("ack", 3));
         assert(m.send_calls == 0 && m.close_calls[11] == 1);
-        qdd_wifi_poll(1000);
+        qdd_wifi_poll(1000, false);
         assert(m.close_calls[10] == 1 && m.close_calls[11] == 1);
         assert(s_seen_network_epoch == atomic_load(&s_network_epoch));
         assert(qdd_wifi_view().connected == (variant < 2));
@@ -421,7 +423,7 @@ static void test_event_epoch_fail_closed(void) {
             assert(strcmp(qdd_wifi_view().ip, variant == 0 ? "192.168.1.10" : "192.168.1.99") == 0);
             assert(m.socket_calls == 1 && m.bound_address == atomic_load(&s_address));
             m.next_accepted = 21;
-            qdd_wifi_poll(1001);
+            qdd_wifi_poll(1001, false);
             assert(qdd_wifi_tcp_live() && qdd_wifi_tcp_epoch() == 52);
             assert(m.send_calls == 0 && m.recv_calls == 0); // No implicit protocol/HID action.
         } else {
@@ -491,28 +493,28 @@ static void test_socket_io_failures(void) {
 static void test_listener_and_single_peer(void) {
     connected();
     m.next_accepted = 12;
-    qdd_wifi_poll(1000);
+    qdd_wifi_poll(1000, false);
     assert(m.close_calls[12] == 1 && s_client == 11 && qdd_wifi_tcp_epoch() == 50);
-    assert(m.nonblock_calls == 0 && m.sdk_calls[SDK_POWER] == 0);
+    assert(m.nonblock_calls == 1 && m.sdk_calls[SDK_POWER] == 0);
     const uint32_t rejected[] = {0x08080808u, 0u, 0xa9fe0102u, 0xe0000001u};
     for (size_t i = 0; i < sizeof(rejected) / sizeof(rejected[0]); i++) {
         connected();
         s_client = -1;
         m.next_accepted = 12;
         m.peer_address = address(rejected[i]);
-        qdd_wifi_poll(1000);
+        qdd_wifi_poll(1000, false);
         assert(m.close_calls[12] == 1 && s_client == -1 && qdd_wifi_tcp_epoch() == 50);
     }
     connected();
     s_client = -1;
     m.next_accepted = 12;
     m.fail_nonblock_fd = 12;
-    qdd_wifi_poll(1000);
+    qdd_wifi_poll(1000, false);
     assert(m.close_calls[12] == 1 && s_client == -1);
     connected();
     s_client = -1;
     m.next_accepted = 12;
-    qdd_wifi_poll(1000);
+    qdd_wifi_poll(1000, false);
     assert(s_client == 12 && qdd_wifi_tcp_epoch() == 51 && m.last_power == WIFI_PS_NONE);
     const unsigned power_calls = m.sdk_calls[SDK_POWER];
     qdd_wifi_close_client();
@@ -526,15 +528,149 @@ static void test_listener_and_single_peer(void) {
         m.fail_nonblock_fd = fault == 1 ? 20 : -1;
         m.bind_failure = fault == 2;
         m.listen_failure = fault == 3;
-        qdd_wifi_poll(1000);
+        qdd_wifi_poll(1000, false);
         assert(m.socket_calls == 1 && s_listener == -1);
         assert(m.close_calls[20] == (fault == 0 ? 0u : 1u));
     }
     connected();
     s_client = s_listener = -1;
     atomic_store(&s_address, address(0x08080808u));
-    qdd_wifi_poll(1000);
+    qdd_wifi_poll(1000, false);
     assert(m.socket_calls == 0 && s_listener == -1);
+}
+
+static void test_idle_observer_replaced_by_valid_peer(void) {
+    connected();
+    qdd_wifi_close_client();
+    m.next_accepted = 12;
+    qdd_wifi_poll(1000, false);
+    assert(s_client == 12);
+    const uint32_t accepted_epoch = qdd_wifi_tcp_epoch();
+    m.next_accepted = 13;
+    qdd_wifi_poll(2501, false);
+    assert(s_client == 13 && m.close_calls[12] == 1 && m.close_calls[13] == 0);
+    assert(qdd_wifi_tcp_epoch() == accepted_epoch + 2);
+    assert(s_client_activity_ms == 2501);
+    assert(m.recv_calls == 0 && m.send_calls == 0); // No handshake or HID input is synthesized.
+    assert(m.nvs_erase_calls == 0 && m.bond_marker == 0xa1b2c3d4u);
+}
+
+static void observer_accepted_at(uint64_t now_ms) {
+    connected();
+    qdd_wifi_close_client();
+    m.next_accepted = 12;
+    qdd_wifi_poll(now_ms, false);
+    assert(s_client == 12 && s_client_activity_ms == now_ms);
+}
+
+static void test_observer_admission_protects_owner_fresh_and_invalid(void) {
+    const uint64_t protected_times[] = {0, 999, 1000, 2499, 2500};
+    for (size_t i = 0; i < sizeof(protected_times) / sizeof(protected_times[0]); i++) {
+        observer_accepted_at(1000);
+        const uint32_t epoch = qdd_wifi_tcp_epoch();
+        m.next_accepted = 13;
+        qdd_wifi_poll(protected_times[i], false);
+        assert(s_client == 12 && m.close_calls[12] == 0 && m.close_calls[13] == 1);
+        assert(qdd_wifi_tcp_epoch() == epoch && s_client_activity_ms == 1000);
+    }
+    observer_accepted_at(1000);
+    const uint32_t owned_epoch = qdd_wifi_tcp_epoch();
+    m.next_accepted = 13;
+    qdd_wifi_poll(100000, true); // A paused/unarmed TCP owner still owns the slot.
+    assert(s_client == 12 && m.close_calls[12] == 0 && m.close_calls[13] == 1);
+    assert(qdd_wifi_tcp_epoch() == owned_epoch && s_client_activity_ms == 1000);
+
+    const uint32_t rejected[] = {0x08080808u, 0u, 0xa9fe0102u, 0xe0000001u};
+    for (size_t i = 0; i < sizeof(rejected) / sizeof(rejected[0]); i++) {
+        observer_accepted_at(1000);
+        const uint32_t epoch = qdd_wifi_tcp_epoch();
+        const unsigned nonblocks = m.nonblock_calls;
+        m.next_accepted = 13;
+        m.peer_address = address(rejected[i]);
+        qdd_wifi_poll(2501, false);
+        assert(s_client == 12 && m.close_calls[12] == 0 && m.close_calls[13] == 1);
+        assert(qdd_wifi_tcp_epoch() == epoch && s_client_activity_ms == 1000);
+        assert(m.nonblock_calls == nonblocks); // Invalid peers do not reach socket admission.
+    }
+    observer_accepted_at(1000);
+    const uint32_t failed_epoch = qdd_wifi_tcp_epoch();
+    m.next_accepted = 13;
+    m.fail_nonblock_fd = 13;
+    qdd_wifi_poll(2501, false);
+    assert(s_client == 12 && m.close_calls[12] == 0 && m.close_calls[13] == 1);
+    assert(qdd_wifi_tcp_epoch() == failed_epoch && s_client_activity_ms == 1000);
+}
+
+static void test_observer_activity_is_per_client_and_rx_only(void) {
+    uint8_t bytes[16];
+    observer_accepted_at(1000);
+    m.now_us = 2400000;
+    m.recv_result = 3;
+    assert(qdd_wifi_read(bytes, sizeof(bytes)) == 3 && s_client_activity_ms == 2400);
+    m.next_accepted = 13;
+    qdd_wifi_poll(3900, false);
+    assert(s_client == 12 && m.close_calls[13] == 1); // Successful RX extends freshness.
+    m.next_accepted = 14;
+    qdd_wifi_poll(3901, false);
+    assert(s_client == 14 && m.close_calls[12] == 1 && s_client_activity_ms == 3901);
+
+    qdd_wifi_close_client();
+    m.next_accepted = 15;
+    qdd_wifi_poll(5000, false);
+    assert(s_diag_tcp.rx_ms == 2400 && s_client_activity_ms == 5000);
+    m.next_accepted = 16;
+    qdd_wifi_poll(6500, false);
+    assert(s_client == 15 && m.close_calls[16] == 1); // The old client's RX age cannot evict a new one.
+    m.next_accepted = 17;
+    qdd_wifi_poll(6501, false);
+    assert(s_client == 17 && m.close_calls[15] == 1);
+
+    observer_accepted_at(1000);
+    m.now_us = 2400000;
+    assert(qdd_wifi_read(bytes, sizeof(bytes)) == 0 && s_client_activity_ms == 1000);
+    m.recv_error = EWOULDBLOCK;
+    assert(qdd_wifi_read(bytes, sizeof(bytes)) == 0 && s_client_activity_ms == 1000);
+    assert(qdd_wifi_write("ack", 3) && s_client_activity_ms == 1000);
+    m.next_accepted = 13;
+    qdd_wifi_poll(2499, false);
+    assert(s_client == 12 && s_client_activity_ms == 1000);
+    m.next_accepted = 14;
+    qdd_wifi_poll(2501, false);
+    assert(s_client == 14 && m.close_calls[12] == 1); // Neither TX nor rejected peers refresh RX activity.
+
+    observer_accepted_at(1000);
+    const uint32_t epoch = qdd_wifi_tcp_epoch();
+    qdd_wifi_poll(100000, false);
+    assert(s_client == 12 && qdd_wifi_tcp_epoch() == epoch && m.close_calls[12] == 0);
+    // Idle alone never closes an observer; a validated new peer must actually arrive.
+}
+
+static void test_observer_zero_and_64bit_activity_boundaries(void) {
+    observer_accepted_at(0);
+    m.next_accepted = 13;
+    qdd_wifi_poll(QDD_HEARTBEAT_MS, false);
+    assert(s_client == 12 && m.close_calls[13] == 1); // A timestamp of zero is valid.
+    m.next_accepted = 14;
+    qdd_wifi_poll(QDD_HEARTBEAT_MS + 1u, false);
+    assert(s_client == 14 && m.close_calls[12] == 1);
+
+    const uint64_t accepted_at = (uint64_t)UINT32_MAX - 100u;
+    const uint64_t received_at = accepted_at + 200u;
+    observer_accepted_at(accepted_at);
+    uint8_t bytes[16];
+    m.now_us = (int64_t)(received_at * 1000u);
+    m.recv_result = 2;
+    assert(qdd_wifi_read(bytes, sizeof(bytes)) == 2);
+    assert(s_client_activity_ms == received_at && s_diag_tcp.rx_ms == (uint32_t)received_at);
+    m.next_accepted = 13;
+    qdd_wifi_poll(received_at - 1u, false);
+    assert(s_client == 12 && m.close_calls[13] == 1); // No unsigned underflow on a regressed clock.
+    m.next_accepted = 14;
+    qdd_wifi_poll(received_at + QDD_HEARTBEAT_MS, false);
+    assert(s_client == 12 && m.close_calls[14] == 1);
+    m.next_accepted = 15;
+    qdd_wifi_poll(received_at + QDD_HEARTBEAT_MS + 1u, false);
+    assert(s_client == 15 && m.close_calls[12] == 1);
 }
 
 static qdd_wifi_credentials_t credentials(void) {
@@ -645,10 +781,10 @@ static void test_stack_cleanup_and_scanning(void) {
     assert(qdd_wifi_scan() == ESP_OK && s_started && qdd_wifi_view().scanning);
     assert(!s_reconnect && m.sdk_calls[SDK_SCAN] == 0); // Worker performs asynchronous scan.
     m.scan_result = ESP_ERR_WIFI_STATE;
-    qdd_wifi_poll(1000);
-    qdd_wifi_poll(5999);
+    qdd_wifi_poll(1000, false);
+    qdd_wifi_poll(5999, false);
     assert(qdd_wifi_view().scanning && m.sdk_calls[SDK_SCAN] == 2);
-    qdd_wifi_poll(6000);
+    qdd_wifi_poll(6000, false);
     assert(!qdd_wifi_view().scanning && qdd_wifi_view().failed);
     assert(m.sdk_calls[SDK_CONNECT] == 0);
 
@@ -656,7 +792,7 @@ static void test_stack_cleanup_and_scanning(void) {
     s_view.configured = s_view.connecting = true;
     s_profile_ready = true;
     assert(qdd_wifi_scan() == ESP_OK && m.sdk_calls[SDK_DISCONNECT] == 1);
-    qdd_wifi_poll(1000);
+    qdd_wifi_poll(1000, false);
     assert(m.sdk_calls[SDK_SCAN] == 1 && qdd_wifi_view().scanning);
     m.record_count = 4;
     strcpy((char *)m.records[0].ssid, "weak");
@@ -670,7 +806,7 @@ static void test_stack_cleanup_and_scanning(void) {
     m.records[2].rssi = -20;
     m.records[3].rssi = -10; // Hidden/empty SSID omitted explicitly.
     event(NULL, WIFI_EVENT, WIFI_EVENT_SCAN_DONE, NULL);
-    qdd_wifi_poll(1100);
+    qdd_wifi_poll(1100, false);
     const qdd_wifi_view_t view = qdd_wifi_view();
     assert(!view.scanning && !view.failed && view.count == 2);
     qdd_wifi_ap_t strongest, weakest;
@@ -682,21 +818,21 @@ static void test_stack_cleanup_and_scanning(void) {
     assert(m.sdk_calls[SDK_SCAN_CLEAR] == 1 && m.sdk_calls[SDK_CONNECT] == 0);
     assert(m.records_freed == m.record_count);
     qdd_wifi_allow_reconnect(true);
-    qdd_wifi_poll(1200);
+    qdd_wifi_poll(1200, false);
     assert(m.sdk_calls[SDK_CONNECT] == 1 && qdd_wifi_view().connecting);
-    qdd_wifi_poll(13200);
+    qdd_wifi_poll(13200, false);
     assert(m.sdk_calls[SDK_DISCONNECT] == 2 && !qdd_wifi_view().failed);
-    qdd_wifi_poll(13699);
+    qdd_wifi_poll(13699, false);
     assert(m.sdk_calls[SDK_CONNECT] == 1);
-    qdd_wifi_poll(13700);
+    qdd_wifi_poll(13700, false);
     assert(m.sdk_calls[SDK_CONNECT] == 2 && qdd_wifi_view().connecting);
 }
 
 static void complete_scan(void) {
     assert(qdd_wifi_scan() == ESP_OK);
-    qdd_wifi_poll(1000);
+    qdd_wifi_poll(1000, false);
     event(NULL, WIFI_EVENT, WIFI_EVENT_SCAN_DONE, NULL);
-    qdd_wifi_poll(1100);
+    qdd_wifi_poll(1100, false);
 }
 
 static void test_scan_distinct_capacity_and_revision(void) {
@@ -798,39 +934,39 @@ static void test_requested_network_change_is_not_a_failure(void) {
     assert(qdd_wifi_save(&credentials) == ESP_OK);
     const wifi_event_sta_disconnected_t leaving = {.reason = WIFI_REASON_ASSOC_LEAVE};
     event(NULL, WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, (void *)&leaving);
-    qdd_wifi_poll(1000);
+    qdd_wifi_poll(1000, false);
     assert(!qdd_wifi_view().failed && qdd_wifi_view().connecting);
     assert(m.sdk_calls[SDK_CONNECT] == 1 && m.close_calls[11] == 1);
     inject_got_ip(0xc0a80114u);
-    qdd_wifi_poll(1005);
+    qdd_wifi_poll(1005, false);
     assert(qdd_wifi_view().connected && !qdd_wifi_view().failed);
     assert(!qdd_wifi_tcp_live()); // New network does not inherit the controller.
     event(NULL, WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, (void *)&leaving);
-    qdd_wifi_poll(1010);
+    qdd_wifi_poll(1010, false);
     assert(!qdd_wifi_view().failed && qdd_wifi_view().connecting);
     assert(m.sdk_calls[SDK_CONNECT] == 1); // Real AP loss uses reconnect backoff.
 
     connected();
     assert(qdd_wifi_save(&credentials) == ESP_OK);
     event(NULL, WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, (void *)&leaving);
-    qdd_wifi_poll(1000);
+    qdd_wifi_poll(1000, false);
     // A transient authentication failure stays in the initial retry run.
     const wifi_event_sta_disconnected_t authentication = {.reason = 15};
     event(NULL, WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, (void *)&authentication);
-    qdd_wifi_poll(1010);
+    qdd_wifi_poll(1010, false);
     assert(!qdd_wifi_view().failed && qdd_wifi_view().connecting);
     assert(m.sdk_calls[SDK_CONNECT] == 1);
-    qdd_wifi_poll(1509);
+    qdd_wifi_poll(1509, false);
     assert(m.sdk_calls[SDK_CONNECT] == 1);
-    qdd_wifi_poll(1510);
+    qdd_wifi_poll(1510, false);
     assert(m.sdk_calls[SDK_CONNECT] == 2);
     connected();
     assert(qdd_wifi_save(&credentials) == ESP_OK);
-    qdd_wifi_poll(1000);
+    qdd_wifi_poll(1000, false);
     inject_got_ip(0xc0a80114u); // Even if the SDK emits no leave event, clear the intent.
-    qdd_wifi_poll(1005);
+    qdd_wifi_poll(1005, false);
     event(NULL, WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, (void *)&leaving);
-    qdd_wifi_poll(1010);
+    qdd_wifi_poll(1010, false);
     assert(!qdd_wifi_view().failed && qdd_wifi_view().connecting);
     assert(m.sdk_calls[SDK_CONNECT] == 1);
 }
@@ -842,19 +978,19 @@ static void test_failed_configuration_cannot_reconnect_old_profile(void) {
     assert(qdd_wifi_save(&credentials) == ESP_FAIL);
     const wifi_event_sta_disconnected_t leaving = {.reason = WIFI_REASON_ASSOC_LEAVE};
     event(NULL, WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, (void *)&leaving);
-    qdd_wifi_poll(1000);
+    qdd_wifi_poll(1000, false);
     assert(qdd_wifi_view().failed && !qdd_wifi_view().connecting);
     assert(m.sdk_calls[SDK_CONNECT] == 0);
     qdd_wifi_allow_reconnect(true); // Returning home must not bypass a failed apply.
-    qdd_wifi_poll(31000);
+    qdd_wifi_poll(31000, false);
     assert(m.sdk_calls[SDK_CONNECT] == 0);
     inject_got_ip(0xc0a8010au); // A delayed old association is never a controller.
-    qdd_wifi_poll(31010);
+    qdd_wifi_poll(31010, false);
     assert(!qdd_wifi_view().connected && !qdd_wifi_tcp_live());
     m.config_result = ESP_OK;
     assert(qdd_wifi_retry() == ESP_OK);
     event(NULL, WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, (void *)&leaving);
-    qdd_wifi_poll(32000);
+    qdd_wifi_poll(32000, false);
     assert(qdd_wifi_view().connecting && !qdd_wifi_view().failed);
     assert(m.sdk_calls[SDK_CONNECT] == 1);
 }
@@ -866,38 +1002,38 @@ static void test_initial_retry_budget_and_recovery(void) {
     assert(m.station_config.sta.scan_method == WIFI_ALL_CHANNEL_SCAN);
     assert(m.station_config.sta.sort_method == WIFI_CONNECT_AP_BY_SIGNAL);
     assert(!m.station_config.sta.bssid_set);
-    qdd_wifi_poll(1000);
+    qdd_wifi_poll(1000, false);
     const wifi_event_sta_disconnected_t failure = {.reason = 15};
     const uint64_t failures[] = {1010, 1520, 2530, 4540};
     const uint64_t retries[] = {1510, 2520, 4530};
     for (unsigned i = 0; i < 4; i++) {
         assert(m.sdk_calls[SDK_CONNECT] == i + 1);
         event(NULL, WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, (void *)&failure);
-        qdd_wifi_poll(failures[i]);
+        qdd_wifi_poll(failures[i], false);
         assert(qdd_wifi_view().connecting == (i < 3));
         assert(qdd_wifi_view().failed == (i == 3));
         if (i < 3) {
-            qdd_wifi_poll(retries[i] - 1);
+            qdd_wifi_poll(retries[i] - 1, false);
             assert(m.sdk_calls[SDK_CONNECT] == i + 1);
-            qdd_wifi_poll(retries[i]);
+            qdd_wifi_poll(retries[i], false);
         }
     }
     qdd_wifi_allow_reconnect(true);
-    qdd_wifi_poll(100000);
+    qdd_wifi_poll(100000, false);
     assert(m.sdk_calls[SDK_CONNECT] == 4 && qdd_wifi_view().failed);
     assert(m.profile_present && m.nvs_erase_calls == 0 && m.nvs_set_calls == 1);
     assert(qdd_wifi_retry() == ESP_OK);
-    qdd_wifi_poll(100010);
+    qdd_wifi_poll(100010, false);
     inject_got_ip(0xc0a80114u);
-    qdd_wifi_poll(100020);
+    qdd_wifi_poll(100020, false);
     assert(qdd_wifi_view().connected && !qdd_wifi_view().failed);
     // A previously connected network keeps recovering beyond the initial budget.
     for (unsigned i = 0; i < 6; i++) {
         const uint64_t now = 110000u + i * 40000u;
         event(NULL, WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, (void *)&failure);
-        qdd_wifi_poll(now);
+        qdd_wifi_poll(now, false);
         assert(qdd_wifi_view().connecting && !qdd_wifi_view().failed);
-        qdd_wifi_poll(now + 30000u);
+        qdd_wifi_poll(now + 30000u, false);
     }
     assert(m.sdk_calls[SDK_CONNECT] == 11 && m.nvs_erase_calls == 0);
 }
@@ -907,19 +1043,19 @@ static void test_immediate_failure_uses_short_retry(void) {
     const qdd_wifi_credentials_t credentials = {.ssid = "retry-network", .password = "12345678"};
     assert(qdd_wifi_save(&credentials) == ESP_OK);
     m.connect_result = ESP_FAIL;
-    qdd_wifi_poll(1000);
+    qdd_wifi_poll(1000, false);
     assert(m.sdk_calls[SDK_CONNECT] == 1 && qdd_wifi_view().connecting && !qdd_wifi_view().failed);
-    qdd_wifi_poll(1499);
+    qdd_wifi_poll(1499, false);
     assert(m.sdk_calls[SDK_CONNECT] == 1);
-    qdd_wifi_poll(1500);
+    qdd_wifi_poll(1500, false);
     assert(m.sdk_calls[SDK_CONNECT] == 2 && !qdd_wifi_view().failed);
     m.connect_result = ESP_OK;
-    qdd_wifi_poll(2499);
+    qdd_wifi_poll(2499, false);
     assert(m.sdk_calls[SDK_CONNECT] == 2);
-    qdd_wifi_poll(2500);
+    qdd_wifi_poll(2500, false);
     assert(m.sdk_calls[SDK_CONNECT] == 3 && qdd_wifi_view().connecting);
     inject_got_ip(0xc0a80114u);
-    qdd_wifi_poll(2510);
+    qdd_wifi_poll(2510, false);
     assert(qdd_wifi_view().connected && !qdd_wifi_view().failed);
 }
 
@@ -930,26 +1066,26 @@ static void test_pending_configuration_and_stale_ip(void) {
     assert(qdd_wifi_save(&credentials) == ESP_OK);
     assert(qdd_wifi_view().connecting && !qdd_wifi_view().failed && !s_profile_ready);
     inject_got_ip(0xc0a80114u); // An old DHCP event before joining is ignored.
-    qdd_wifi_poll(1000);
+    qdd_wifi_poll(1000, false);
     assert(!qdd_wifi_view().connected && m.sdk_calls[SDK_CONNECT] == 0);
     assert(m.sdk_calls[SDK_CONFIG] == 2 && qdd_wifi_view().connecting);
     m.config_result = ESP_OK;
-    qdd_wifi_poll(1249);
+    qdd_wifi_poll(1249, false);
     assert(m.sdk_calls[SDK_CONFIG] == 2);
-    qdd_wifi_poll(1250);
+    qdd_wifi_poll(1250, false);
     assert(m.sdk_calls[SDK_CONFIG] == 3 && m.sdk_calls[SDK_CONNECT] == 1);
     assert(s_profile_ready && !qdd_wifi_view().failed);
     ip_event_got_ip_t wrong = {.esp_netif = NULL, .ip_info.ip.addr = address(0xc0a80114u)};
     event(NULL, IP_EVENT, IP_EVENT_STA_GOT_IP, &wrong);
-    qdd_wifi_poll(1260);
+    qdd_wifi_poll(1260, false);
     assert(!qdd_wifi_view().connected && m.socket_calls == 0);
     strcpy((char *)m.associated_ap.ssid, "old-network");
     wrong.esp_netif = s_netif;
     event(NULL, IP_EVENT, IP_EVENT_STA_GOT_IP, &wrong);
-    qdd_wifi_poll(1270);
+    qdd_wifi_poll(1270, false);
     assert(!qdd_wifi_view().connected && m.socket_calls == 0);
     inject_got_ip(0xc0a80114u);
-    qdd_wifi_poll(1280);
+    qdd_wifi_poll(1280, false);
     assert(qdd_wifi_view().connected && m.socket_calls == 1);
     assert(m.nvs_set_calls == 1 && m.nvs_erase_calls == 0);
 }
@@ -1039,9 +1175,14 @@ static void test_diagnostics_stale_cache_api_failures_and_maximum(void) {
     m.ap_result = m.rssi_result = m.channel_result = m.ps_result = m.ip_result = INT_MIN;
     atomic_store(&s_diag_tx_hook_error, INT_MIN); atomic_store(&s_diag_heap_hook_error, INT_MIN);
     m.heap_free = m.heap_minimum = m.heap_largest = UINT_MAX;
+    s_tcp_epoch = UINT_MAX;
+    s_diag_tcp.rx_bytes = s_diag_tcp.tx_bytes = s_diag_tcp.tx_ok = s_diag_tcp.tx_fail = UINT_MAX;
+    s_diag_tcp.last_errno = INT_MIN;
+    s_diag_tcp.close_reason = TCP_CLOSE_SEND;
     const size_t length = qdd_wifi_diagnostics(json, sizeof(json));
     assert(length > 0 && length <= QDD_WIFI_DIAGNOSTICS_MAX);
     assert(strstr(json, "4294967295") && strstr(json, "-2147483648"));
+    assert(strstr(json, "\"tcp\":[4294967295,4294967295,4294967295,4294967295,4294967295,2147483647,2147483647,-2147483648,5]"));
     reset();
     m.tx_hook_result = m.heap_hook_result = ESP_FAIL;
     assert(qdd_wifi_scan() == ESP_OK && s_started); // Diagnostic failure cannot disable Wi-Fi.
@@ -1049,7 +1190,93 @@ static void test_diagnostics_stale_cache_api_failures_and_maximum(void) {
     assert(strstr(json, "\"tx\":[-1,0,0,-1]") && strstr(json, "\"memHook\":-1"));
 }
 
+static void assert_tcp_diagnostics(const char *expected) {
+    char json[QDD_WIFI_DIAGNOSTICS_MAX + 1];
+    const unsigned sends = m.send_calls, reads = m.recv_calls;
+    const uint32_t epoch = s_tcp_epoch;
+    assert(qdd_wifi_diagnostics(json, sizeof(json)) > 0);
+    assert(strstr(json, expected));
+    assert(m.send_calls == sends && m.recv_calls == reads && s_tcp_epoch == epoch);
+    assert(!strstr(json, "ack") && !strstr(json, "RRRR"));
+}
+
+static void test_tcp_diagnostics_cumulative_io_and_close(void) {
+    connected();
+    assert(sizeof(s_diag_tcp) == 32); // Fixed BSS only; no packet or acknowledgement buffer.
+    assert_tcp_diagnostics("\"tcp\":[50,0,0,0,0,-1,-1,0,0]");
+    uint8_t bytes[16];
+    m.now_us = 100000; m.recv_result = 4;
+    assert(qdd_wifi_read(bytes, sizeof(bytes)) == 4);
+    m.now_us = 110000;
+    assert(qdd_wifi_write("ack", 3));
+    m.now_us = 160000; m.recv_result = -1; m.recv_error = EAGAIN;
+    assert(qdd_wifi_read(bytes, sizeof(bytes)) == 0 && qdd_wifi_tcp_live());
+    assert_tcp_diagnostics("\"tcp\":[50,4,3,1,0,60,50,0,0]");
+
+    m.now_us = 180000; m.send_result = 1; m.send_error = ECONNRESET;
+    assert(!qdd_wifi_write("ack", 3)); // Positive short write has no errno.
+    assert_tcp_diagnostics("\"tcp\":[51,4,4,1,1,80,0,0,5]");
+    const unsigned sends = m.send_calls;
+    assert(!qdd_wifi_write("ack", 3));
+    assert(m.send_calls == sends); // Diagnostic counters do not introduce retries.
+    assert(s_diag_tcp.tx_fail == 1 && s_diag_tcp.close_reason == TCP_CLOSE_SEND);
+
+    m.next_accepted = 12; qdd_wifi_poll(180, false);
+    assert(qdd_wifi_tcp_live() && s_tcp_epoch == 52);
+    m.now_us = 200000; m.send_result = -2;
+    assert(qdd_wifi_write("ack", 3));
+    m.now_us = 210000; m.recv_result = 2;
+    assert(qdd_wifi_read(bytes, sizeof(bytes)) == 2);
+    m.now_us = 220000;
+    assert_tcp_diagnostics("\"tcp\":[52,6,7,2,1,10,20,0,5]");
+
+    m.now_us = 230000; m.recv_result = -1; m.recv_error = ECONNRESET;
+    assert(qdd_wifi_read(bytes, sizeof(bytes)) == 0 && !qdd_wifi_tcp_live());
+    assert(s_diag_tcp.last_errno == ECONNRESET && s_diag_tcp.close_reason == TCP_CLOSE_RECV);
+    m.next_accepted = 13; qdd_wifi_poll(230, false);
+    assert(qdd_wifi_tcp_live() && s_tcp_epoch == 54);
+    m.send_error = EAGAIN;
+    assert(qdd_wifi_write("ack", 3)); // Successful send does not copy stale errno.
+    m.recv_error = EAGAIN;
+    assert(qdd_wifi_read(bytes, sizeof(bytes)) == 0);
+    assert(s_diag_tcp.last_errno == ECONNRESET && s_diag_tcp.close_reason == TCP_CLOSE_RECV);
+    qdd_wifi_close_client();
+    assert(s_diag_tcp.close_reason == TCP_CLOSE_EXTERNAL && s_diag_tcp.last_errno == ECONNRESET);
+    qdd_wifi_close_client();
+    assert(s_tcp_epoch == 55 && s_diag_tcp.close_reason == TCP_CLOSE_EXTERNAL);
+}
+
+static void test_tcp_diagnostics_failure_reasons_and_bounds(void) {
+    uint8_t bytes[16];
+    connected();
+    m.recv_result = 0;
+    assert(qdd_wifi_read(bytes, sizeof(bytes)) == 0);
+    assert(s_diag_tcp.close_reason == TCP_CLOSE_EOF && !s_diag_tcp.rx_bytes);
+    connected();
+    event(NULL, IP_EVENT, IP_EVENT_STA_LOST_IP, NULL);
+    assert(qdd_wifi_read(bytes, sizeof(bytes)) == 0);
+    assert(s_diag_tcp.close_reason == TCP_CLOSE_NETWORK && m.recv_calls == 0);
+    const ssize_t results[] = {0, 2, -1};
+    for (size_t i = 0; i < sizeof(results) / sizeof(results[0]); i++) {
+        connected();
+        m.now_us = 900000; m.send_result = results[i]; m.send_error = EAGAIN;
+        assert(!qdd_wifi_write("ack", 3));
+        assert(s_diag_tcp.tx_ok == 0 && s_diag_tcp.tx_fail == 1);
+        assert(s_diag_tcp.tx_bytes == (results[i] > 0 ? (unsigned)results[i] : 0));
+        assert(s_diag_tcp.last_errno == (results[i] < 0 ? EAGAIN : 0));
+        assert(s_diag_tcp.tx_ms == 900 && s_diag_tcp.close_reason == TCP_CLOSE_SEND);
+        assert(m.send_calls == 1 && m.close_calls[11] == 1);
+        m.now_us = 950000;
+        assert_tcp_diagnostics(results[i] == 2 ? "\"tcp\":[51,0,2,0,1,-1,50,0,5]" :
+            results[i] == 0 ? "\"tcp\":[51,0,0,0,1,-1,50,0,5]" : "\"tcp\":[51,0,0,0,1,-1,50,");
+    }
+}
+
 int main(void) {
+    test_idle_observer_replaced_by_valid_peer();
+    test_observer_admission_protects_owner_fresh_and_invalid();
+    test_observer_activity_is_per_client_and_rx_only();
+    test_observer_zero_and_64bit_activity_boundaries();
     test_event_epoch_fail_closed();
     test_socket_io_failures();
     test_listener_and_single_peer();
@@ -1065,7 +1292,9 @@ int main(void) {
     test_diagnostics_without_started_wifi();
     test_diagnostics_numeric_callbacks_and_bounds();
     test_diagnostics_stale_cache_api_failures_and_maximum();
+    test_tcp_diagnostics_cumulative_io_and_close();
+    test_tcp_diagnostics_failure_reasons_and_bounds();
     assert(m.critical_depth == 0);
-    puts("QDD actual Wi-Fi backend event epochs, socket faults, single-peer, NVS isolation and cleanup tests: PASS");
+    puts("QDD actual Wi-Fi backend owner-free observer recovery, event epochs, socket faults, NVS isolation and cleanup tests: PASS");
     return 0;
 }

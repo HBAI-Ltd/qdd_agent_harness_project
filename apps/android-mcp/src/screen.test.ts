@@ -6,6 +6,7 @@ import { deflateSync } from "node:zlib";
 import { MAX_SCREEN_FRAME_BYTES, readJpegDimensions, ScreenClient, ScreenError } from "./screen.js";
 import type { PreviewProfile, ScreenClientOptions } from "./screen.js";
 import { JPEG_FIXTURE } from "./fixtures/jpeg.js";
+import { MockAgent } from "undici";
 
 function chunk(type: string, data: Buffer): Buffer {
   const output = Buffer.alloc(data.length + 12);
@@ -53,6 +54,41 @@ function mockClient(response: (url: string, options?: RequestInit) => Response |
     fetch: async (url, init) => { requests.push({ url: String(url), options: init }); return response(String(url), init); }, ...options });
   return { client, requests };
 }
+
+test("health, original capture, quality and continuous preview share the current matching LAN source", async (context) => {
+  const agents: MockAgent[] = [];
+  let destroyed = 0;
+  const jpegHeaders = { "Content-Type": "image/jpeg", "Content-Length": String(JPEG_FIXTURE.length),
+    "X-Frame-Id": "bound-preview", "X-Frame-Age-Ms": "0", "X-Device-Id": DEVICE_A,
+    "X-Captured-At": "2026-10-17T06:00:00.000Z" };
+  const multipart = Buffer.concat([Buffer.from(`--qdd-frame\r\n${Object.entries(jpegHeaders).map(([key, value]) => `${key}: ${value}`).join("\r\n")}\r\n\r\n`), JPEG_FIXTURE, Buffer.from("\r\n")]);
+  const { client, requests } = mockClient((url) => {
+    if (url.endsWith("/health")) return health();
+    if (url.endsWith("/preview/profile")) return Response.json({ profile: "standard" });
+    if (url.endsWith("/stream.mjpg")) return new Response(multipart, { headers: { "Content-Type": "multipart/x-mixed-replace; boundary=qdd-frame" } });
+    return frame();
+  }, {
+    networkInterfaces: () => ({ Mihomo: [{ address: "198.18.0.1", family: "IPv4", internal: false, netmask: "255.255.0.0" }],
+      "Wi-Fi": [{ address: "192.168.1.10", family: "IPv4", internal: false, netmask: "255.255.255.0" }] }),
+    dispatcherFactory: (options) => {
+      assert.deepEqual(options.connect, { localAddress: "192.168.1.10" });
+      const agent = new MockAgent(); agent.disableNetConnect(); agents.push(agent);
+      context.mock.method(agent, "destroy", () => { destroyed++; return agent.close(); });
+      return agent;
+    },
+  });
+  const video = client.stream(new AbortController().signal);
+  try {
+    await client.listDevices(); await client.capture(); await client.getPreviewProfile();
+    assert.equal((await video.next()).value?.sourceFrameId, "bound-preview");
+    assert.equal(agents.length, 1);
+    assert.deepEqual(requests.map(({ url }) => new URL(url).pathname), ["/health", "/frame.jpg", "/preview/profile", "/stream.mjpg"]);
+    for (const request of requests) assert.equal(request.options?.dispatcher, agents[0]);
+  } finally { await video.return(undefined); await client.close(); }
+  assert.equal(destroyed, 1);
+  await assert.rejects(client.capture(), hasCode("SCREEN_UNREACHABLE"));
+  assert.equal(agents.length, 1, "Closing the screen owner must prevent a queued or later request from reopening its pool.");
+});
 
 test("LAN capture needs no credentials, uses the explicit endpoint and binds the App UUID", async () => {
   const { client, requests } = mockClient();

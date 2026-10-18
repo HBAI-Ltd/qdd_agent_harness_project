@@ -1,6 +1,8 @@
 import { performance } from "node:perf_hooks";
 import { readPngDimensions } from "./adb.js";
 import type { AdbCapture, AdbDevice } from "./adb.js";
+import { LanHttpClient } from "./lan-http.js";
+import type { LanHttpOptions } from "./lan-http.js";
 
 export const PHONE_SCREEN_PORT = 8791;
 export const MAX_SCREEN_FRAME_AGE_MS = 3000;
@@ -33,13 +35,12 @@ export interface ScreenCapture extends AdbCapture {
   previewProfile?: PreviewProfile;
 }
 
-export interface ScreenClientOptions {
+export interface ScreenClientOptions extends LanHttpOptions {
   endpoint: string;
   deviceId?: string;
   timeoutMs?: number;
   maxBuffer?: number;
   maxFrameAgeMs?: number;
-  fetch?: typeof globalThis.fetch;
 }
 
 export type ScreenErrorCode = "SCREEN_INVALID_ENDPOINT" | "SCREEN_DEVICE_MISMATCH"
@@ -121,7 +122,7 @@ export class ScreenClient {
   private readonly timeoutMs: number;
   private readonly maxBuffer: number;
   private readonly maxFrameAgeMs: number;
-  private readonly fetcher: typeof globalThis.fetch;
+  private readonly http: LanHttpClient;
   private tail: Promise<void> = Promise.resolve();
   private profileTail: Promise<void> = Promise.resolve();
 
@@ -135,8 +136,10 @@ export class ScreenClient {
     if (!Number.isSafeInteger(this.timeoutMs) || this.timeoutMs <= 0 || this.timeoutMs > 2_147_483_647) throw new RangeError("投屏 timeoutMs 必须是有效的正整数。");
     if (!Number.isSafeInteger(this.maxBuffer) || this.maxBuffer <= 0 || this.maxBuffer > MAX_SCREEN_FRAME_BYTES) throw new RangeError("投屏 maxBuffer 必须是 1 到 32 MiB 之间的整数。");
     if (!Number.isSafeInteger(this.maxFrameAgeMs) || this.maxFrameAgeMs < 0 || this.maxFrameAgeMs > MAX_SCREEN_FRAME_AGE_MS) throw new RangeError("投屏帧时效上限不得超过 3000 ms。");
-    this.fetcher = options.fetch ?? globalThis.fetch;
+    this.http = new LanHttpClient(this.endpoint, options);
   }
+
+  close(): Promise<void> { return this.http.close(); }
 
   listDevices(): Promise<AdbDevice[]> {
     return this.request("/health", async (response, signal) => {
@@ -228,7 +231,7 @@ export class ScreenClient {
     const deadline = (ms: number) => { clearTimeout(timer); timer = setTimeout(cancel, ms); };
     deadline(this.timeoutMs);
     try {
-      const response = await this.fetcher(`${this.endpoint}/stream.mjpg`, {
+      const response = await this.http.fetch(`${this.endpoint}/stream.mjpg`, {
         signal: controller.signal, redirect: "error", cache: "no-store",
       });
       if (response.status !== 200 || response.redirected ||
@@ -294,7 +297,7 @@ export class ScreenClient {
     const request = async (): Promise<T> => {
       let response: Response;
       try {
-        response = await this.fetcher(`${this.endpoint}${path}`, {
+        response = await this.http.fetch(`${this.endpoint}${path}`, {
           method,
           ...(body === undefined ? {} : { headers: { "Content-Type": "application/json" }, body }),
           signal: controller.signal, redirect: "error", cache: "no-store",

@@ -120,10 +120,76 @@ static void test_completed_guide_preserves_real_status(void) {
     assert(guide.onboarding_step == 1 && guide.stage == QDD_UI_WIFI);
 }
 
+static void test_pc_registration_is_visible_without_a_control_lease(void) {
+    qdd_hid_state_t state = {.connected = true, .encrypted = true, .authenticated = true,
+        .bonded = true, .ready = true};
+    qdd_ui_onboarding_t progress = {.require_full = true, .wifi_connected = true,
+        .phone_seen = true, .phone_fresh = true, .projecting = true};
+    const qdd_hid_state_t before = state;
+    // The operation console registers before control: observation sends no PING.
+    progress.pc_fresh = true;
+    qdd_ui_view_t guide = qdd_ui_onboarding_model(&state, false, false, false, 0,
+        2000, "", 0, &progress);
+    assert(guide.computer_online && strcmp(guide.computer, "电脑已连接") == 0);
+    assert(guide.onboarding_step == 6 && guide.stage == QDD_UI_ENABLED);
+    assert(memcmp(&before, &state, sizeof(state)) == 0);
+    const qdd_command_t move = {.id = 1, .op = QDD_MOVE, .args = {1, 0, 0, 0}};
+    assert(strcmp(qdd_hid_execute(&state, &move, 2000, report, NULL), "HEARTBEAT_EXPIRED") == 0);
+    assert(!state.armed && !state.heartbeat_seen); // Presentation never grants input.
+    progress.completed = true;
+    progress.pc_fresh = false;
+    guide = qdd_ui_onboarding_model(&state, false, false, false, 0, 2000, "", 0, &progress);
+    assert(!guide.computer_online && guide.stage == QDD_UI_COMPUTER);
+    progress.pc_fresh = true;
+    state.locked = true;
+    guide = qdd_ui_onboarding_model(&state, false, false, false, 0, 2000, "", 0, &progress);
+    assert(guide.computer_online && guide.stage == QDD_UI_LOCKED && !guide.onboarding_step);
+    state.locked = false;
+    progress.completed = false;
+    progress.phone_seen = progress.phone_fresh = progress.projecting = false;
+    guide = qdd_ui_onboarding_model(&state, false, false, false, 0, 2000, "", 0, &progress);
+    assert(guide.onboarding_step == 2 && guide.show_qr); // PC alone does not fake phone setup.
+}
+
+static void test_completed_guide_reports_projection_loss_without_restarting_setup(void) {
+    qdd_hid_state_t state = {.connected = true, .encrypted = true, .authenticated = true,
+        .bonded = true, .ready = true};
+    qdd_ui_onboarding_t progress = {.require_full = true, .wifi_connected = true,
+        .phone_seen = true, .phone_fresh = true, .pc_fresh = true, .projecting = false, .completed = true};
+    const qdd_hid_state_t before = state;
+    qdd_ui_view_t guide = qdd_ui_onboarding_model(&state, false, false, false, 0,
+        2000, "", 0, &progress);
+    assert(guide.onboarding_step == 6 && !guide.show_qr && !guide.can_skip);
+    assert(guide.wait_projection && guide.stage != QDD_UI_ENABLED);
+    assert(strcmp(guide.title, "分享手机画面") == 0);
+    progress.phone_fresh = false;
+    guide = qdd_ui_onboarding_model(&state, false, false, false, 0, 2000, "", 0, &progress);
+    assert(guide.onboarding_step == 6 && guide.wait_projection);
+    assert(strcmp(guide.title, "打开手机投屏") == 0);
+    progress.phone_fresh = progress.projecting = true;
+    guide = qdd_ui_onboarding_model(&state, false, false, false, 0, 2000, "", 0, &progress);
+    assert(guide.onboarding_step == 6 && guide.stage == QDD_UI_ENABLED && !guide.wait_projection);
+    assert(memcmp(&before, &state, sizeof(state)) == 0);
+    progress.projecting = false;
+    progress.skip_app = true;
+    guide = qdd_ui_onboarding_model(&state, false, false, false, 0, 2000, "", 0, &progress);
+    assert(!guide.wait_projection); // The explicit skip remains a presentation choice.
+    progress.skip_app = false;
+    state.locked = true;
+    guide = qdd_ui_onboarding_model(&state, false, false, false, 0, 2000, "", 0, &progress);
+    assert(guide.stage == QDD_UI_LOCKED && !guide.wait_projection);
+    state.locked = false;
+    progress.pc_fresh = false;
+    guide = qdd_ui_onboarding_model(&state, false, false, false, 0, 2000, "", 0, &progress);
+    assert(guide.stage == QDD_UI_COMPUTER && !guide.wait_projection);
+}
+
 int main(void) {
     test_pairing_settings_feedback();
     test_guide_actions_and_skip_safety();
     test_completed_guide_preserves_real_status();
+    test_pc_registration_is_visible_without_a_control_lease();
+    test_completed_guide_reports_projection_loss_without_restarting_setup();
     qdd_hid_state_t state = {0};
     assert(view(&state, false).stage == QDD_UI_COMPUTER);
     assert(strcmp(view(&state, true).computer, "电脑未连接") == 0);

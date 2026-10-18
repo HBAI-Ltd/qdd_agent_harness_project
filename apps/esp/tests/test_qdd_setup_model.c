@@ -84,6 +84,16 @@ static void test_short_press_menu_navigation(void) {
     assert(model.page == QDD_SETUP_LIST); password_is_clear(&model);
 }
 
+static void test_settings_download_is_display_only(void) {
+    qdd_setup_model_t model = {0}; qdd_setup_menu(&model);
+    for (unsigned i = 0; i < 4; i++) assert(key(&model, QDD_SETUP_DOWN) == QDD_SETUP_NONE);
+    assert(model.selection == 4);
+    // This settings item must only show the download page, never exit, scan,
+    // pair, save credentials or reset the controller.
+    assert(key(&model, QDD_SETUP_OK) == QDD_SETUP_NONE);
+    assert(model.page != QDD_SETUP_MENU && model.page != QDD_SETUP_HOME && model.page != QDD_SETUP_RESET);
+}
+
 static void test_first_connection_intro(void) {
     qdd_setup_model_t model = {0};
     select_network(&model, false);
@@ -430,6 +440,7 @@ static void test_clear_entire_password_returns_to_keyboard(void) {
 }
 
 int main(void) {
+    test_settings_download_is_display_only();
     test_list();
     test_all_sixty_four_networks_and_actions_are_reachable();
     test_short_press_menu_navigation();

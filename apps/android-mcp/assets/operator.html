@@ -27,7 +27,7 @@
         <div class="screen-heading"><div class="screen-heading-main"><div class="screen-title-row"><h2>实时画面</h2><label class="profile-label" for="screen-profile">画质<select id="screen-profile" aria-describedby="screen-profile-state" disabled><option value="turbo">极速（灰度）</option><option value="fast">快速</option><option value="standard" selected>标准</option><option value="original">原画</option></select></label></div><p id="frame-info">打开手机上的设备投屏，点“开始投屏”</p><span id="capture-state" class="capture-state" role="status">等待手机画面</span><span id="screen-profile-state" class="profile-state" role="status">标准画质 · AI 截图保留原画</span></div><button id="capture-button" class="button button-small" disabled>重新连接画面</button></div>
         <div id="screen-stage" class="screen-stage">
           <div id="screen-empty" class="screen-empty"><span class="phone-outline" aria-hidden="true"></span><strong>等待手机画面</strong><p>手机和电脑连同一个 Wi-Fi。在手机上打开设备投屏，点“开始投屏”。</p></div>
-          <img id="phone-screen" alt="手机实时画面；点击画面操作，Esc 退出" draggable="false" tabindex="0" hidden>
+          <img id="phone-screen" alt="手机实时画面；点击画面操作，Esc 退出" role="button" aria-label="操作手机实时画面：点击、回车或空格进入，Esc 退出" aria-keyshortcuts="Enter Space" draggable="false" tabindex="0" hidden>
           <span id="screen-state" class="screen-state" hidden>等待手机画面</span>
         </div>
         <div class="screen-footer"><span id="coordinate-info">点击画面操作，Esc 退出</span></div>

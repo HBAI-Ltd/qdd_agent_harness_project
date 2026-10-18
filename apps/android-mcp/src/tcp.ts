@@ -1,6 +1,8 @@
 import { lookup } from "node:dns";
 import { EventEmitter } from "node:events";
 import { isIP, Socket } from "node:net";
+import { networkInterfaces } from "node:os";
+import { matchingLanAddress } from "./lan.js";
 import { SerialHidBridge } from "./serial.js";
 import type { SerialTransport } from "./serial.js";
 
@@ -13,6 +15,8 @@ export interface TcpBridgeOptions {
   heartbeatMs?: number;
   connectTimeoutMs?: number;
   socketFactory?: () => Socket;
+  networkInterfaces?: typeof networkInterfaces;
+  resolveHost?: (hostname: string) => Promise<string>;
 }
 
 function privateIpv4(address: string): boolean {
@@ -83,20 +87,23 @@ class TcpTransport extends EventEmitter implements SerialTransport {
       socket.setKeepAlive(true, 1000);
       finish();
     });
-    try {
-      socket.connect({ host: this.options.host, port: this.options.port, family: 4, autoSelectFamily: false,
-        lookup: (hostname, _options, done) => {
-          lookup(hostname, { family: 4 }, (error, address) => {
-            if (error) done(error, "", 4);
-            else if (!privateIpv4(address)) done(new Error("ESP_HOST 解析到的不是局域网 IPv4 地址，请检查控制板地址。"), "", 4);
-            else done(null, address, 4);
-          });
-        },
+    // Resolve once, validate and connect to that literal address. Selecting the
+    // on-link source avoids virtual adapters claiming the default route; DNS
+    // must not run again after that selection against a different destination.
+    const resolved = isIP(this.options.host) === 4 ? Promise.resolve(this.options.host)
+      : this.options.resolveHost ? Promise.resolve().then(() => this.options.resolveHost!(this.options.host))
+        : new Promise<string>((resolve, reject) => lookup(this.options.host, { family: 4 }, (error, address) => error ? reject(error) : resolve(address)));
+    void resolved.then((address) => {
+      if (settled) return;
+      if (!privateIpv4(address)) throw new Error("ESP_HOST 解析到的不是局域网 IPv4 地址，请检查控制板地址。");
+      const localAddress = matchingLanAddress(address, (this.options.networkInterfaces ?? networkInterfaces)());
+      socket.connect({ host: address, port: this.options.port, family: 4, autoSelectFamily: false,
+        ...(localAddress ? { localAddress } : {}),
       });
-    } catch (error) {
+    }).catch((error: unknown) => {
       finish(error instanceof Error ? error : new Error(String(error)));
       socket.destroy();
-    }
+    });
   }
 
   write(data: string, callback: (error?: Error | null) => void): unknown {

@@ -37,6 +37,7 @@ typedef struct {
     bool downloaded;
     bool phone_seen;
     bool phone_fresh;
+    bool pc_fresh;
     bool projecting;
     bool skip_app;
     bool skip_bluetooth;

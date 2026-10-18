@@ -4,6 +4,7 @@ import { once } from "node:events";
 import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 import { boardSetupOrigin, startBoardRegistration } from "./onboarding.js";
+import { MockAgent } from "undici";
 
 test("onboarding accepts only explicit private board HTTP origins", () => {
   assert.equal(boardSetupOrigin("http://192.168.101.147:3334/"), "http://192.168.101.147:3334");
@@ -32,6 +33,36 @@ test("registration sends only PC port, retries offline, and close aborts the own
   assert.equal(aborted, true);
   await delay(30);
   assert.equal(calls.length, 2);
+});
+
+test("board registration binds the board subnet, refreshes changed source and destroys owned agents on close", async (context) => {
+  let source = "192.168.100.160", calls = 0;
+  let destroyed = 0;
+  const selected: string[] = [], agents: MockAgent[] = [];
+  const registration = startBoardRegistration("http://192.168.100.167:3334", 8790, {
+    intervalMs: 10,
+    networkInterfaces: () => ({ Mihomo: [{ address: "198.18.0.1", family: "IPv4", internal: false, netmask: "255.255.0.0" }],
+      "Wi-Fi": [{ address: source, family: "IPv4", internal: false, netmask: "255.255.254.0" }] }),
+    dispatcherFactory: (options) => {
+      assert.deepEqual(options.connect, { localAddress: source }); selected.push(source);
+      const agent = new MockAgent(); agent.disableNetConnect(); agents.push(agent);
+      context.mock.method(agent, "destroy", () => { destroyed++; return agent.close(); });
+      return agent;
+    },
+    fetch: async (url, options) => {
+      assert.equal(String(url), "http://192.168.100.167:3334/api/pc");
+      assert.equal(options?.dispatcher, agents.at(-1));
+      assert.equal(options?.method, "POST"); assert.equal(options?.redirect, "error");
+      assert.deepEqual(JSON.parse(String(options?.body)), { port: 8790 });
+      calls++; source = "192.168.100.161";
+      return Response.json({ ok: true });
+    },
+  });
+  try { for (let i = 0; calls < 2 && i < 50; i++) await delay(10); assert.ok(calls >= 2); }
+  finally { await registration.close(); await registration.close(); }
+  assert.deepEqual(selected, ["192.168.100.160", "192.168.100.161"]);
+  assert.equal(destroyed, 2);
+  const ended = calls; await delay(30); assert.equal(calls, ended);
 });
 
 test("actual HTTP registration handles an unfinished body and shuts down without leaking its timer", async () => {

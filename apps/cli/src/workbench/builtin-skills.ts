@@ -9,10 +9,10 @@ const definitions = [
   {
     id: "55c30541-587c-4d2a-b538-3bc71b6c3ded",
     name: "android-operator",
-    description: "Android HID 通用操作：定位与点击分离，截图核验光标，重新校准后点击，验证实际结果。",
-    files: ["android-operator/SKILL-v2.md", "android-operator/PROMPT.md", "android-operator/CAPABILITIES.md"],
-    steps: ["确认设备分辨率、指针增益和校准状态。", "移动定位后重新截图，确认控件可点及光标落点。", "点击前独立校准，原地点击，随后截图核验实际结果。", "滑动、读取屏幕和输入文字遵循完整操作说明；连续定位失败时停止并报告。"],
-    tools: ["android_screenshot", "android_mouse_move", "android_mouse_click", "android_hid_status", "android_control"],
+    description: "Android HID 通用操作：设备画像与页面状态识别，点击前整屏/局部双图确认，定位点击分离，失败分类与证据核验。",
+    files: ["android-operator/SKILL-v2.md", "android-operator/METHODOLOGY.md", "android-operator/PROMPT.md", "android-operator/CAPABILITIES.md"],
+    steps: ["重建设备画像，实测增益、线性区间、指针可见性与系统遮挡，先认页面锚点。", "只移动定位，检查新整屏与目标局部图；模拟十字不代表真实指针到位。", "确认校准和定位依据后原地点击，等待页面稳定并核验计数/文案，保存前后证据。", "失败先分链路、未武装、定位或状态；明确未派发才重新执行，非幂等结果不确定只回读；中文沿用 QDD 输入法。"],
+    tools: ["android_screenshot", "android_preview_tap", "android_mouse_move", "android_mouse_click", "android_hid_status", "android_control"],
   },
   {
     id: "de711339-f80e-4603-9032-cdf057823d82",

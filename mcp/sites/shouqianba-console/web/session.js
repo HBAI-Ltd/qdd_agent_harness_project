@@ -7,6 +7,6 @@ export async function localApi(path,body,fetcher=fetch){
   const bootstrap=await fetcher('/',{credentials:'same-origin',cache:'no-store'});
   if(bootstrap.ok){response=await fetcher(path,options);data=await response.json();}
  }
- if(!response.ok){const error=new Error(data.message||'请求失败');error.code=data.code;throw error;}
+ if(!response.ok){const upstream=/^[A-Za-z0-9]{1,32}$/.test(data.upstreamCode||'')?data.upstreamCode:null;const error=new Error((data.message||'请求失败')+(upstream?'（收钱吧错误码：'+upstream+'）':''));error.code=data.code;throw error;}
  return data;
 }

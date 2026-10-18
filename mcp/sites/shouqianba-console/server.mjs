@@ -2,17 +2,27 @@ import http from 'node:http';
 import {readFile,mkdir} from 'node:fs/promises';
 import {fileURLToPath} from 'node:url';
 import {timingSafeEqual} from 'node:crypto';
+import {networkInterfaces,hostname} from 'node:os';
 import {localKey} from './lib/local-key.mjs';
 import {Runtime} from './lib/runtime.mjs';
 import {ServiceError} from './lib/cloud.mjs';
+import {NativeCloudClient} from './lib/native-cloud.mjs';
+import {SessionKeeper} from './lib/session-keeper.mjs';
+import {recordMaintenance} from './lib/maintenance-log.mjs';
+import {readVault} from './lib/vault.mjs';
 import {mcpMessage} from './lib/mcp.mjs';
 
 const root=process.env.SQB_STATE_DIR||fileURLToPath(new URL('../../.local/shouqianba/',import.meta.url));
 const port=Number(process.env.SQB_PORT||8788);
+const listenAddress=process.env.SQB_HOST||'127.0.0.1';
+const mcpHosts=new Set([`${hostname()}:${port}`,...Object.values(networkInterfaces()).flat().filter(x=>x.family==='IPv4').map(x=>`${x.address}:${port}`)]);
 await mkdir(root,{recursive:true});
 const mcpKey=await localKey(root+'/mcp-key');
 const browserKey=await localKey(root+'/browser-key');
-const runtime=await new Runtime({vault:root+'/session.dpapi'}).init();
+const nativeProfile=await readVault(root+'/native-profile.dpapi');
+const nativeClient=nativeProfile?new NativeCloudClient({profile:nativeProfile}):null;
+const runtime=await new Runtime({vault:root+'/session.dpapi',nativeClient,nativeDevice:nativeProfile?.device}).init();
+const keeper=new SessionKeeper({runtime,record:entry=>recordMaintenance(root+'/keepalive-history.json',entry)});runtime.keepaliveStatus=()=>keeper.status();
 const equal=(a,b)=>typeof a==='string'&&Buffer.byteLength(a)===Buffer.byteLength(b)&&timingSafeEqual(Buffer.from(a),Buffer.from(b));
 const json=(res,status,value)=>{res.writeHead(status,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'});res.end(JSON.stringify(value));};
 async function readJson(req,objectOnly=true){
@@ -24,7 +34,8 @@ let authBusy=false;
 export const server=http.createServer(async(req,res)=>{
  try{
   const origins=[`http://127.0.0.1:${port}`,`http://localhost:${port}`];
-  if(!origins.map(x=>new URL(x).host).includes(req.headers.host))throw new ServiceError('BAD_HOST','主机不被允许',403);
+  const remoteMcp=listenAddress==='0.0.0.0'&&req.url?.split('?')[0]==='/mcp'&&mcpHosts.has(req.headers.host);
+  if(!origins.map(x=>new URL(x).host).includes(req.headers.host)&&!remoteMcp)throw new ServiceError('BAD_HOST','主机不被允许',403);
   if(req.headers.origin&&!origins.includes(req.headers.origin))throw new ServiceError('BAD_ORIGIN','跨站请求不被允许',403);
   const url=new URL(req.url,origins[0]);
   if((url.pathname.startsWith('/api/')||url.pathname==='/mcp')&&req.headers['sec-fetch-site']==='cross-site')throw new ServiceError('CROSS_SITE','跨站请求不被允许',403);
@@ -60,10 +71,11 @@ export const server=http.createServer(async(req,res)=>{
   const file=staticFiles[url.pathname];
   if(!file||!['GET','HEAD'].includes(req.method))throw new ServiceError('NOT_FOUND','页面不存在',404);
   const data=await readFile(new URL('web/'+file[0],import.meta.url));
-  if(url.pathname==='/'||url.pathname==='/lab')res.setHeader('Set-Cookie',`sqb_local=${browserKey}; HttpOnly; SameSite=Strict; Path=/`);
+  if(url.pathname==='/'||url.pathname==='/lab')res.setHeader('Set-Cookie',`sqb_local=${browserKey}; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000`);
   res.writeHead(200,{'Content-Type':file[1],'Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer','X-Frame-Options':'DENY'});res.end(req.method==='HEAD'?undefined:data);
- }catch(e){if(!res.headersSent)json(res,e.status||500,{code:e.code||'SERVICE_ERROR',message:e.code?e.message:'本地服务请求失败，请稍后重试'});else res.end();}
+ }catch(e){if(!res.headersSent)json(res,e.status||500,{code:e.code||'SERVICE_ERROR',message:e.code?e.message:'本地服务请求失败，请稍后重试',...(/^[A-Za-z0-9]{1,32}$/.test(e.upstreamCode||'')?{upstreamCode:e.upstreamCode}:{})});else res.end();}
 });
 server.requestTimeout=60000;server.headersTimeout=15000;
-server.listen(port,'127.0.0.1',()=>console.log(`收钱吧经营台 http://127.0.0.1:${port}`));
+server.listen(port,listenAddress,()=>{console.log(`收钱吧经营台 http://${listenAddress}:${port}`);void keeper.start();});
+server.on('close',()=>keeper.stop());
 server.on('error',e=>{console.error(e.code==='EADDRINUSE'?'收钱吧端口已被占用':'本地服务启动失败');process.exitCode=1;});

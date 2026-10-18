@@ -20,7 +20,7 @@ export async function openWorkbench(loaded: LoadedConfig, feishu = new FeishuCli
   const { paths, config } = loaded;
   return {
     skills: new SkillStore(paths),
-    connectors: new ConnectorStore(paths, await SecretBox.open(paths), feishu),
+    connectors: new ConnectorStore(paths, await SecretBox.open(paths), feishu, config.mcpServers),
     browser: config.browser.enabled ? new BrowserService(loaded) : undefined,
   };
 }

@@ -14,7 +14,14 @@ const terminal=status=>['done','failed','cancelled','interrupted'].includes(stat
 export async function createRuntime(vaultPath,dependencies={}){
   const read=dependencies.readVault||readVault,write=dependencies.writeVault||writeVault,now=dependencies.now||Date.now;
   const makeCloud=dependencies.createCloud||((session,config,ptzState)=>new HikCloud(session,config,fetch,ptzState));
-  let state=await read(vaultPath),nextSms=0,saving=Promise.resolve(),loginBusy=false,phase='ready',generation=0;
+  let state;
+  try{state=await read(vaultPath);}catch(error){
+    // A new installation may expose the local console and MCP before cloud setup.
+    // Decryption, permissions and malformed existing vault failures remain fatal.
+    if(error.code!=='ENOENT')throw error;
+    state={session:{headers:{}},config:{}};
+  }
+  let nextSms=0,saving=Promise.resolve(),loginBusy=false,phase='ready',generation=0;
   let cameras=[],loadedAt=0,loading,previewSequence=0,currentPreview,previewTail=Promise.resolve(),captureTail=Promise.resolve(),lifecycleTail=Promise.resolve();
   const leases=new Map(),ptzState=new Map(),captureOwners=new Map(),media=dependencies.mediaOptions||{};
   const captures=dependencies.captures||(media.captureRoot?new CaptureManager({root:media.captureRoot,ffmpeg:media.ffmpeg,baseUrl:media.baseUrl}):null);
@@ -23,6 +30,9 @@ export async function createRuntime(vaultPath,dependencies={}){
   const saveValue=value=>{const snapshot=structuredClone(value);saving=saving.catch(()=>{}).then(()=>write(vaultPath,snapshot));return saving;};
   const save=()=>saveValue(state);
   const connected=()=>!!state.session?.headers?.Authorization;
+  const configured=()=>typeof state.config?.loginAuthorization==='string'&&!!state.config.loginAuthorization.trim();
+  const configurationMessage='海康客户端登录配置缺失。请填写 mcp/.local/haik-client-config.json，运行 node mcp/scripts/initialize-haik.mjs，再重启海康服务。';
+  const loginConfigured=()=>{if(!configured())throw new CloudError('LOGIN_CONFIG_MISSING',configurationMessage,409);};
   const cloud=(session=state.session)=>makeCloud(session,state.config,ptzState);
   const guard=context=>{if(context!==generation)throw changed();if(phase!=='ready')throw new CloudError('SHUTTING_DOWN','本地服务正在切换账号或关闭',503);};
   const authorized=()=>{if(!connected()||state.expired)throw new CloudError('LOGIN_REQUIRED','请先登录海康互联账号',401);};
@@ -99,6 +109,7 @@ export async function createRuntime(vaultPath,dependencies={}){
     });
   }
   async function status(){
+    if(!connected()&&!configured())return {connected:false,configured:false,configurationRequired:true,message:configurationMessage,local:true,mcpPath:'/mcp'};
     if(!connected()||state.expired||phase==='closing'||phase==='closed'||phase==='expiring')return {connected:false,...(state.expired?{expired:true}:{}),...(ptzBlocked()?{stopRequired:true}:{}),local:true};
     if(phase!=='ready')return {connected:true,account:'海康互联',local:true,switching:true,mcpPath:'/mcp'};
     const context=generation,session=state.session;
@@ -175,6 +186,7 @@ export async function createRuntime(vaultPath,dependencies={}){
     if(!body||typeof body!=='object'||Array.isArray(body))throw new CloudError('INVALID_BODY','请求格式无效',400);
     validateAction(name,body);
     if(name==='status')return status();
+    if(name==='login'||name==='send_code')loginConfigured();
     if(name==='stop'){const result=body.cameraId?await cloud().stop(body.cameraId,body.direction):await stopAll();if(state.expired&&!ptzBlocked()){state.session={headers:{}};await save();}return result;}
     if(name==='login'){
       if(loginBusy||phase!=='ready')throw new CloudError('LOGIN_BUSY','登录或关闭正在进行，请稍后重试',409);

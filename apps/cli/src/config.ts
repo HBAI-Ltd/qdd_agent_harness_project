@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import type { HarnessConfig, ModelCatalog } from "@qdd/shared";
 import { chatOptions, modelConfigs } from "./agent/chat-options.js";
+import { parseMediaOrigins } from "./guard.js";
 
 export { modelConfigs } from "./agent/chat-options.js";
 
@@ -28,6 +29,7 @@ export const DEFAULT_CONFIG: HarnessConfig = {
     "fonts.googleapis.com",
     "fonts.gstatic.com",
   ],
+  mediaOrigins: [],
   mcpServers: {},
   datasets: { refreshIntervalSec: 0 },
 };
@@ -115,11 +117,21 @@ export async function loadConfig(root = process.cwd()): Promise<LoadedConfig> {
     mcpServers: user.mcpServers ?? {},
     datasets: { ...DEFAULT_CONFIG.datasets, ...user.datasets },
     browser: { ...DEFAULT_CONFIG.browser, ...user.browser },
+    mediaOrigins: parseMediaOrigins(user.mediaOrigins === undefined ? [] : user.mediaOrigins),
   };
   for (const [name, server] of Object.entries(config.mcpServers)) {
     if (typeof server.url !== "string" || !/^https?:\/\//.test(server.url)) {
       throw new Error(`MCP 服务 ${name} 缺少 http(s) url（只支持 Streamable HTTP）`);
     }
+    for (const field of ["bearerTokenEnv", "bearerTokenFile"] as const) {
+      if (server[field] !== undefined && (typeof server[field] !== "string" || !server[field].trim())) {
+        throw new Error(`MCP 服务 ${name} 的 ${field} 必须是非空字符串`);
+      }
+    }
+    if (server.bearerTokenEnv !== undefined && server.bearerTokenFile !== undefined) {
+      throw new Error(`MCP 服务 ${name} 的 bearerTokenEnv 与 bearerTokenFile 只能配置一个`);
+    }
+    if (server.bearerTokenFile !== undefined) server.bearerTokenFile = path.resolve(root, server.bearerTokenFile);
   }
 
   const env = process.env;

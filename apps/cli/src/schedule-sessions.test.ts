@@ -10,7 +10,7 @@ import { loadConfig } from "./config.js";
 import { DataSources } from "./datasource/registry.js";
 import { startGateway } from "./gateway/server.js";
 import { SessionHub } from "./sessions.js";
-import { ensureWorkspace } from "./web/site.js";
+import { ensureWorkspace, readPages } from "./web/site.js";
 
 const TOKEN = "schedule-isolation-test-token";
 const KINDS = ["meta.json", "events.jsonl", "messages.json"] as const;
@@ -95,6 +95,84 @@ async function collectSse<T>(api: (url: string, init?: RequestInit) => Promise<R
   })();
   return { events, stop: async () => { controller.abort(); await reading; } };
 }
+
+test("定时发布不记录任务提示词，已有页面保留 wish，新页面 wish 为空", { timeout: 15000 }, async (t) => {
+  const prompts: string[] = [];
+  const f = await fixture(t, async (messages) => {
+    const last = messages.at(-1)!;
+    if (last.role === "user") {
+      prompts.push(String(last.content));
+      return tool("write_file", { path: "index.html", content: "<p>检查完成</p>" });
+    }
+    return tool("finish", { title: "检查结果", summary: "检查完成", tools: [], useAgent: false, gaps: [] });
+  });
+  const originalWish = "创建检查页面";
+  const ordinary = await f.gateway.hub.create(originalWish);
+  const ordinaryResult = await f.gateway.hub.wait(ordinary.id);
+  assert.equal(ordinaryResult.status, "idle");
+  assert.ok(ordinaryResult.slug);
+  assert.equal((await readPages(f.loaded.paths)).find((page) => page.slug === ordinaryResult.slug)?.wish, originalWish);
+
+  for (const slug of [ordinaryResult.slug, undefined]) {
+    const prompt = slug ? "定时刷新已有检查页面" : "定时创建检查页面";
+    const schedule = await f.gateway.scheduler.create({ name: "检查任务", cron: "0 8 * * *", prompt, ...(slug ? { slug } : {}) });
+    const manualId = await f.gateway.scheduler.runNow(schedule.id);
+    await until(async () => (await f.gateway.scheduler.get(schedule.id)).lastRun?.sessionId === manualId ? true : undefined);
+    const manual = await f.gateway.hub.detail(manualId);
+    assert.equal(manual.status, "idle");
+    assert.ok(manual.slug);
+    const expectedWish = slug ? originalWish : "";
+    const published = manual.events.find((event) => event.type === "published");
+    assert.ok(published?.type === "published");
+    assert.equal(published.page.wish, expectedWish);
+    assert.equal((await readPages(f.loaded.paths)).find((page) => page.slug === manual.slug)?.wish, expectedWish);
+    assert.ok(prompts.some((text) => text.includes(prompt)));
+
+    await f.gateway.scheduler.update(schedule.id, { slug: manual.slug });
+    const stored = JSON.parse(await readFile(f.loaded.paths.schedules, "utf8")) as { schedules: Schedule[] };
+    stored.schedules.find((entry) => entry.id === schedule.id)!.nextRunAt = new Date(Date.now() - 60_000).toISOString();
+    await writeFile(f.loaded.paths.schedules, JSON.stringify(stored));
+    await f.gateway.scheduler.tick();
+    const dueId = await until(async () => {
+      const run = (await f.gateway.scheduler.get(schedule.id)).lastRun;
+      return run?.sessionId && run.sessionId !== manualId ? run.sessionId : undefined;
+    });
+    assert.equal((await f.gateway.hub.detail(dueId)).status, "idle");
+    const refreshed = (await readPages(f.loaded.paths)).find((page) => page.slug === manual.slug);
+    assert.equal(refreshed?.wish, expectedWish);
+    assert.equal(refreshed?.version, published.page.version + 1);
+  }
+
+  const update = await f.gateway.hub.create("手动修改检查页面", { slug: ordinaryResult.slug });
+  assert.equal((await f.gateway.hub.wait(update.id)).status, "idle");
+  assert.equal((await readPages(f.loaded.paths)).find((page) => page.slug === ordinaryResult.slug)?.wish, `${originalWish} → 手动修改检查页面`);
+});
+
+test("重启遗留的授权请求返回 404，取消接口返回持久化终态且 SSE 可回放中断", { timeout: 10000 }, async (t) => {
+  const f = await fixture(t);
+  const id = randomUUID();
+  const at = "2026-10-17T01:00:00Z";
+  const meta: SessionMeta = {
+    id, title: "等待授权时重启", summary: "", slug: null, status: "waiting",
+    createdAt: at, updatedAt: at,
+    origin: { kind: "schedule", scheduleId: randomUUID(), scheduleName: "测试任务" },
+  };
+  await writeFile(path.join(f.loaded.paths.scheduleSessions, `${id}.meta.json`), JSON.stringify(meta));
+  await writeFile(path.join(f.loaded.paths.scheduleSessions, `${id}.events.jsonl`), JSON.stringify({
+    type: "approval_required", requestId: "expired", tool: "save_skill", source: "builtin", args: {}, at,
+  }) + "\n");
+  const approval = await f.post(`/api/sessions/${id}/approvals/expired`, { approved: true });
+  assert.equal(approval.status, 404);
+  assert.match((await approval.json() as { error: string }).error, /授权请求不存在或已过期/);
+  const cancellation = await f.post(`/api/sessions/${id}/cancel`, {});
+  assert.equal(cancellation.status, 202);
+  assert.equal((await cancellation.json() as SessionMeta).status, "error");
+  const stream = await collectSse<SessionEvent>(f.api, `/api/sessions/${id}/events?since=1`);
+  t.after(stream.stop);
+  await until(async () => stream.events.some((event) => event.type === "status" && event.status === "error") ? true : undefined);
+  assert.ok(stream.events.some((event) => event.type === "error" && event.message.includes("中断")));
+  assert.equal(JSON.parse(await readFile(path.join(f.loaded.paths.scheduleSessions, `${id}.meta.json`), "utf8")).status, "error");
+});
 
 test("立即运行与到期任务分目录保存，不进入会话列表或全局会话更新；重启后仍能查看和续聊", { timeout: 15000 }, async (t) => {
   const seen: ChatMessage[][] = [];

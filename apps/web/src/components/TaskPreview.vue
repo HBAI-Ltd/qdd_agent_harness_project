@@ -24,7 +24,7 @@ const renderError = ref("");
 let readyTimer: ReturnType<typeof setTimeout> | undefined;
 const bridge = createTaskPageBridge({
   getWindow: () => frame.value?.contentWindow ?? null,
-  getOrigin: () => documentUrl.value ? new URL(documentUrl.value).origin : "",
+  getOrigin: () => (documentUrl.value ? new URL(documentUrl.value).origin : ""),
   getSlug: () => props.page.slug,
   isOpaque: () => sameOrigin.value,
   getContext: () => props.context ?? { theme: "light", locale: "zh-CN" },
@@ -34,8 +34,13 @@ const bridge = createTaskPageBridge({
       loading.value = false;
       renderError.value = "";
     }
-    if (message.type === "page:error" && message.payload && typeof message.payload === "object"
-      && !Array.isArray(message.payload) && typeof message.payload.message === "string") {
+    if (
+      message.type === "page:error" &&
+      message.payload &&
+      typeof message.payload === "object" &&
+      !Array.isArray(message.payload) &&
+      typeof message.payload.message === "string"
+    ) {
       renderError.value = message.payload.message.slice(0, 500);
     }
     emit("message", message);
@@ -47,9 +52,12 @@ const sameOrigin = computed(() => {
 });
 // Cross-origin pages keep their gateway origin so the injected SDK and cookie work.
 // A same-origin page must stay opaque to prevent its scripts accessing the shell.
-const sandbox = computed(() => sameOrigin.value
-  ? "allow-scripts"
-  : "allow-scripts allow-same-origin");
+// External pages open normally in a new tab while this frame keeps its isolation.
+const sandbox = computed(() =>
+  sameOrigin.value
+    ? "allow-scripts allow-popups allow-popups-to-escape-sandbox"
+    : "allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox",
+);
 
 function reload() {
   clearTimeout(readyTimer);
@@ -61,9 +69,15 @@ function reload() {
   try {
     const gateway = new URL(props.gatewayUrl, window.location.origin);
     const pageUrl = new URL(props.page.url, `${gateway.origin}/`);
-    if (!/^https?:$/.test(gateway.protocol) || gateway.username || gateway.password
-      || pageUrl.origin !== gateway.origin || pageUrl.username || pageUrl.password
-      || !pageUrl.pathname.startsWith(`/pages/${encodeURIComponent(props.page.slug)}/`)) {
+    if (
+      !/^https?:$/.test(gateway.protocol) ||
+      gateway.username ||
+      gateway.password ||
+      pageUrl.origin !== gateway.origin ||
+      pageUrl.username ||
+      pageUrl.password ||
+      !pageUrl.pathname.startsWith(`/pages/${encodeURIComponent(props.page.slug)}/`)
+    ) {
       throw new Error("Invalid page URL");
     }
     // Use the gateway URL unchanged: its page token establishes the page cookie.
@@ -98,8 +112,16 @@ function frameLoaded() {
   }, 8000);
 }
 
-function receiveMessage(event: MessageEvent<unknown>) { bridge.receive(event); }
-watch(() => props.context, (context) => { bridge.postMessage("host:context", context ?? null); }, { deep: true });
+function receiveMessage(event: MessageEvent<unknown>) {
+  bridge.receive(event);
+}
+watch(
+  () => props.context,
+  (context) => {
+    bridge.postMessage("host:context", context ?? null);
+  },
+  { deep: true },
+);
 onMounted(() => window.addEventListener("message", receiveMessage));
 onBeforeUnmount(() => {
   window.removeEventListener("message", receiveMessage);
@@ -108,11 +130,7 @@ onBeforeUnmount(() => {
 });
 defineExpose({ postMessage: bridge.postMessage });
 
-watch(
-  () => [props.page.slug, props.page.url, props.page.version, props.gatewayUrl],
-  reload,
-  { immediate: true },
-);
+watch(() => [props.page.slug, props.page.url, props.page.version, props.gatewayUrl], reload, { immediate: true });
 </script>
 
 <template>
@@ -122,10 +140,22 @@ watch(
         <AgentIcon name="code" :size="15" />
         <strong>{{ page.title }}</strong>
         <ElTag class="preview-label" type="info" effect="plain" size="small">v{{ page.version }}</ElTag>
-        <ElTag class="preview-kind" :type="page.kind === 'scheduled' ? 'primary' : 'info'" effect="plain" size="small">{{ page.kind === "scheduled" ? "定时任务" : "一次性任务" }}</ElTag>
+        <ElTag class="preview-kind" :type="page.kind === 'scheduled' ? 'primary' : 'info'" effect="plain" size="small">
+          {{ page.kind === "scheduled" ? "定时任务" : "一次性任务" }}
+        </ElTag>
       </div>
       <div class="preview-actions">
-        <ElButton class="preview-reload" text size="small" :loading="pinPending" :disabled="pinDisabled || pinPending" :aria-label="`${page.pinnedAt ? '取消置顶' : '置顶'}：${page.title}`" :aria-pressed="!!page.pinnedAt" @click="emit('pin', !page.pinnedAt)">{{ page.pinnedAt ? "取消置顶" : "置顶页面" }}</ElButton>
+        <ElButton
+          class="preview-reload"
+          text
+          size="small"
+          :loading="pinPending"
+          :disabled="pinDisabled || pinPending"
+          :aria-label="`${page.pinnedAt ? '取消置顶' : '置顶'}：${page.title}`"
+          :aria-pressed="!!page.pinnedAt"
+          @click="emit('pin', !page.pinnedAt)">
+          {{ page.pinnedAt ? "取消置顶" : "置顶页面" }}
+        </ElButton>
         <ElButton class="preview-reload" text size="small" @click="reload">
           <AgentIcon name="refresh" :size="14" />
           重新加载
@@ -133,14 +163,27 @@ watch(
       </div>
     </header>
     <div v-if="page.schedules.length" class="preview-schedules" aria-label="关联定时任务">
-      <span>定时更新：</span><ElButton v-for="schedule in page.schedules" :key="schedule.id" text size="small" :aria-label="`管理定时任务：${schedule.name}，${schedule.enabled ? '已启用' : '已暂停'}`" @click="emit('schedules')">{{ schedule.name }}<ElTag :type="schedule.enabled ? 'success' : 'info'" effect="plain" size="small">{{ schedule.enabled ? "已启用" : "已暂停" }}</ElTag><AgentIcon name="chevron" :size="12" /></ElButton>
+      <span>定时更新：</span>
+      <ElButton
+        v-for="schedule in page.schedules"
+        :key="schedule.id"
+        text
+        size="small"
+        :aria-label="`管理定时任务：${schedule.name}，${schedule.enabled ? '已启用' : '已暂停'}`"
+        @click="emit('schedules')">
+        {{ schedule.name }}
+        <ElTag :type="schedule.enabled ? 'success' : 'info'" effect="plain" size="small">{{ schedule.enabled ? "已启用" : "已暂停" }}</ElTag>
+        <AgentIcon name="chevron" :size="12" />
+      </ElButton>
     </div>
     <div v-if="page.records?.length" class="preview-schedules" aria-label="页面使用的登记表">
-      <span>登记记录：</span><ElButton v-for="name in page.records" :key="name" text size="small" :aria-label="`管理登记记录：${name}`" @click="emit('records', name)">{{ name }}<AgentIcon name="chevron" :size="12" /></ElButton>
+      <span>登记记录：</span>
+      <ElButton v-for="name in page.records" :key="name" text size="small" :aria-label="`管理登记记录：${name}`" @click="emit('records', name)">
+        {{ name }}
+        <AgentIcon name="chevron" :size="12" />
+      </ElButton>
     </div>
-    <p v-if="page.stale" class="preview-notice" role="status">
-      待复核：{{ page.stale }}
-    </p>
+    <p v-if="page.stale" class="preview-notice" role="status">待复核：{{ page.stale }}</p>
     <p v-if="sameOrigin" class="preview-notice" role="status">
       当前网关与前端同源，页面已隔离；实时取数可能受限。请将网关配置到独立端口，并允许此前端源嵌入。
     </p>
@@ -157,11 +200,8 @@ watch(
         :sandbox="sandbox"
         referrerpolicy="no-referrer"
         @load="frameLoaded"
-        @error="loadFailed"
-      />
-      <div v-if="loading" class="preview-loading" role="status">
-        正在渲染任务页面…
-      </div>
+        @error="loadFailed" />
+      <div v-if="loading" class="preview-loading" role="status">正在渲染任务页面…</div>
     </div>
   </section>
 </template>
@@ -194,12 +234,42 @@ watch(
   color: var(--qdd-text);
 }
 
-.preview-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
-.preview-actions :deep(.el-button + .el-button) { margin-left: 0; }
-.preview-kind { flex-shrink: 0; }
-.preview-schedules { display: flex; align-items: center; flex-wrap: wrap; flex-shrink: 0; gap: 6px 10px; padding: 9px 24px; border-bottom: 1px solid var(--qdd-border); color: var(--qdd-muted); font-size: 11px; }
-.preview-schedules .el-button { height: auto; padding: 3px 5px; margin: 0; color: var(--qdd-text); white-space: normal; text-align: left; }
-.preview-schedules :deep(.el-button > span) { gap: 6px; flex-wrap: wrap; overflow-wrap: anywhere; }
+.preview-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.preview-actions :deep(.el-button + .el-button) {
+  margin-left: 0;
+}
+.preview-kind {
+  flex-shrink: 0;
+}
+.preview-schedules {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  flex-shrink: 0;
+  gap: 6px 10px;
+  padding: 9px 24px;
+  border-bottom: 1px solid var(--qdd-border);
+  color: var(--qdd-muted);
+  font-size: 11px;
+}
+.preview-schedules .el-button {
+  height: auto;
+  padding: 3px 5px;
+  margin: 0;
+  color: var(--qdd-text);
+  white-space: normal;
+  text-align: left;
+}
+.preview-schedules :deep(.el-button > span) {
+  gap: 6px;
+  flex-wrap: wrap;
+  overflow-wrap: anywhere;
+}
 
 .preview-heading strong {
   overflow: hidden;
@@ -273,10 +343,23 @@ watch(
 }
 
 @media (max-width: 760px) {
-  .preview-toolbar { flex-wrap: wrap; gap: 10px; padding: 12px 16px; }
-  .preview-heading { flex: 1 1 100%; }
-  .preview-label { display: none; }
-  .preview-schedules { padding: 9px 16px; }
-  .preview-error, .preview-notice { padding: 10px 16px; }
+  .preview-toolbar {
+    flex-wrap: wrap;
+    gap: 10px;
+    padding: 12px 16px;
+  }
+  .preview-heading {
+    flex: 1 1 100%;
+  }
+  .preview-label {
+    display: none;
+  }
+  .preview-schedules {
+    padding: 9px 16px;
+  }
+  .preview-error,
+  .preview-notice {
+    padding: 10px 16px;
+  }
 }
 </style>

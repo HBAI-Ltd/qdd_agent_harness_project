@@ -692,7 +692,26 @@ export function useWorkspace() {
       if (controller.signal.aborted || disposed) return false;
       return true;
     } catch (cause) {
-      if (!controller.signal.aborted && !disposed && selection === selectionVersion.value) error.value = errorMessage(cause);
+      if (!controller.signal.aborted && !disposed && selection === selectionVersion.value) {
+        let message = errorMessage(cause);
+        if (cause instanceof api.GatewayError && cause.status === 404) {
+          try {
+            const detail = await api.getSession(gatewayUrl.value, token.value, id, controller.signal);
+            if (controller.signal.aborted || disposed || selection !== selectionVersion.value) return false;
+            // 用完整历史重建游标，再续传读取快照期间产生的事件。
+            sessionController?.abort();
+            if (sessionController) reconnectingStreams.delete(sessionController);
+            applyResponseMeta(detail);
+            if (activeSession.value?.id === id) activeSession.value = { ...activeSession.value, events: detail.events };
+            resetLiveBlocks(id);
+            sessionController = new AbortController();
+            void followSession(id, sessionController);
+          } catch (refreshError) {
+            message += `；同步会话失败：${errorMessage(refreshError)}`;
+          }
+        }
+        if (!controller.signal.aborted && !disposed && selection === selectionVersion.value) error.value = message;
+      }
       return false;
     } finally {
       actionControllers.delete(controller);

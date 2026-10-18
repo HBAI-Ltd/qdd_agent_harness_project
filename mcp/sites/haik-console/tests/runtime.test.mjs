@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {createRuntime} from '../local/runtime.mjs';
 import {CloudError} from '../lib/hik-cloud.mjs';
 async function fixture(overrides={}){
- const saved=[];const calls=[];const initial={session:{headers:{Authorization:'Bearer old'}},config:{headers:{}}};
+ const saved=[];const calls=[];const initial={session:{headers:{Authorization:'Bearer old'}},config:{headers:{},loginAuthorization:'offline-login-authorization'}};
  const runtime=await createRuntime('unused',{readVault:async()=>structuredClone(initial),writeVault:async(path,state)=>saved.push(state),now:()=>1000,
   createCloud:(session)=>({
    verifySession:async()=>{calls.push('verify');},
@@ -57,7 +57,7 @@ async function mediaFixture(hooks={}){
   async close(id){events.push(['stream-close',id]);if(hooks.streamClose)await hooks.streamClose(id);if(id===undefined)playing.clear();else playing.delete(id);},
   async dispose(){events.push(['stream-dispose']);playing.clear();}
  };
- const initial={session:{headers:{Authorization:'Bearer old'}},config:{headers:{}}};
+ const initial={session:{headers:{Authorization:'Bearer old'}},config:{headers:{},loginAuthorization:'offline-login-authorization'}};
  const runtime=await createRuntime('unused',{readVault:async()=>structuredClone(initial),writeVault:async(path,value)=>{saved.push(structuredClone(value));events.push(['write',value.session?.headers?.Authorization,!!value.pendingLogin]);if(hooks.write)await hooks.write(value);},now:()=>clock,captures,streams,mediaOptions:{baseUrl:'http://127.0.0.1:8787'},
   ...(hooks.snapshotPause?{snapshotPause:async ms=>{clock+=ms;await hooks.snapshotPause(ms);}}:{}),
   ...(hooks.recordings?{recordings:hooks.recordings}:{}),

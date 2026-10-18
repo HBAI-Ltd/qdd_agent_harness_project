@@ -56,7 +56,7 @@ const composerItems = computed<AttachmentItem[]>(() =>
     size: a.size,
     status: a.status,
     ...(a.error ? { error: a.error } : {}),
-    ...(a.ref ? { id: a.ref.id } : {}),
+    ...(a.ref ? { id: a.ref.id, mime: a.ref.mime } : {}),
   })),
 );
 const canSend = computed(
@@ -90,7 +90,7 @@ function refreshChatModels() {
   void loadChatOptions();
 }
 function historyItems(event: SessionEvent): AttachmentItem[] {
-  return event.type === "user" ? (event.attachments ?? []).map((a) => ({ key: a.id, id: a.id, path: a.path, size: a.size })) : [];
+  return event.type === "user" ? (event.attachments ?? []).map((a) => ({ key: a.id, id: a.id, path: a.path, size: a.size, mime: a.mime })) : [];
 }
 function pickFiles(event: Event) {
   const input = event.target as HTMLInputElement;
@@ -367,6 +367,8 @@ onMounted(() => {
                 v-if="historyItems(entry.event).length"
                 class="chat-bubble-attachments"
                 :items="historyItems(entry.event)"
+                :gateway-url="workspace.gatewayUrl.value"
+                :token="workspace.token.value"
                 @open="openAttachment" />
             </div>
             <template v-else>
@@ -540,6 +542,8 @@ onMounted(() => {
         v-if="composerItems.length"
         class="chat-composer-attachments"
         :items="composerItems"
+        :gateway-url="workspace.gatewayUrl.value"
+        :token="workspace.token.value"
         removable
         @remove="attach.removeAttachment"
         @remove-folder="attach.removeFolder"

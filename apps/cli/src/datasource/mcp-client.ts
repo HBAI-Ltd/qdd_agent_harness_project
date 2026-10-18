@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { HARNESS_VERSION, SERVICE_NAME, type JsonObject, type McpServerConfig, type ToolSpec } from "@qdd/shared";
 
 export interface McpTool extends ToolSpec {
@@ -23,6 +24,9 @@ export class McpClient {
     readonly name: string,
     private readonly config: McpServerConfig,
   ) {
+    if (config.bearerTokenEnv !== undefined && config.bearerTokenFile !== undefined) {
+      throw new Error(`MCP 服务 ${name} 的 bearerTokenEnv 与 bearerTokenFile 只能配置一个`);
+    }
     this.headers = { ...config.headers };
     if (config.bearerTokenEnv) {
       const token = process.env[config.bearerTokenEnv];
@@ -33,6 +37,17 @@ export class McpClient {
 
   async start(): Promise<void> {
     this.sessionId = undefined;
+    if (this.config.bearerTokenFile !== undefined) {
+      delete this.headers.Authorization;
+      let token: string;
+      try {
+        token = (await readFile(this.config.bearerTokenFile, "utf8")).trim();
+      } catch {
+        throw new Error(`MCP 服务 ${this.name} 无法读取 bearerTokenFile，请先启动本地服务并检查密钥文件`);
+      }
+      if (!/^[A-Za-z0-9\-._~+/]+=*$/.test(token)) throw new Error(`MCP 服务 ${this.name} 的 bearerTokenFile 为空或格式无效`);
+      this.headers.Authorization = `Bearer ${token}`;
+    }
     await this.rpc("initialize", {
       protocolVersion: PROTOCOL_VERSION,
       capabilities: {},

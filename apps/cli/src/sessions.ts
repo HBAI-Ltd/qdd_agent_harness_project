@@ -44,6 +44,7 @@ export interface SendOptions extends Partial<ChatSelection> {
 export class SessionHub {
   private readonly directories = new Map<string, string>();
   private readonly running = new Map<string, AbortController>();
+  private readonly recoveries = new Map<string, Promise<SessionMeta>>();
   private readonly activeMetas = new Map<string, SessionMeta>();
   /** 页面 → 正在修改它的会话，同一页面同时只允许一个会话修改 */
   private readonly editing = new Map<string, string>();
@@ -94,8 +95,14 @@ export class SessionHub {
         }
         const meta = { summary: "", ...(JSON.parse(raw) as Partial<SessionMeta>) } as SessionMeta;
         this.directories.set(id, directory);
-        // 进程重启后遗留的 running 状态视为中断
-        if (meta.status === "running" && !this.running.has(id)) meta.status = "error";
+        if ((meta.status === "running" || meta.status === "waiting") && !this.running.has(id)) {
+          let recovery = this.recoveries.get(id);
+          if (!recovery) {
+            recovery = this.recoverInterrupted(meta).finally(() => this.recoveries.delete(id));
+            this.recoveries.set(id, recovery);
+          }
+          return recovery;
+        }
         return meta;
       }
       throw new NotFound("会话不存在");
@@ -103,6 +110,16 @@ export class SessionHub {
       if (error instanceof NotFound) throw error;
       throw new NotFound("会话不存在");
     }
+  }
+
+  private async recoverInterrupted(meta: SessionMeta): Promise<SessionMeta> {
+    // 并发详情/列表请求可能读到恢复前的快照，写入终态前重新确认。
+    const current = JSON.parse(await readFile(this.file(meta.id, "meta.json"), "utf8")) as SessionMeta;
+    if ((current.status === "running" || current.status === "waiting") && !this.running.has(meta.id)) {
+      await this.emit(meta.id, { type: "error", message: "服务已重启，本轮执行已中断，请重新发送消息继续。" });
+      await this.setStatus(current, "error");
+    }
+    return { ...current, summary: current.summary ?? "" };
   }
 
   async detail(id: string): Promise<SessionDetail> {
@@ -282,7 +299,7 @@ export class SessionHub {
         this.loaded,
         this.sources,
         chat,
-        { wish: text, sessionId: id, slug: meta.slug ?? undefined, history, skillId, workbench: this.workbench, attachments, attachmentStore: this.attachments },
+        { wish: text, sessionId: id, origin: meta.origin, slug: meta.slug ?? undefined, history, skillId, workbench: this.workbench, attachments, attachmentStore: this.attachments },
         {
           signal: controller.signal,
           onEvent: (e: AgentEvent) => {

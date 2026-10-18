@@ -16,9 +16,9 @@ export default function Dashboard({displayName}:{displayName:string}){
  const clearConnection=()=>{held.current=false;currentId.current='';loadGeneration.current++;setConnected(false);setCameras([]);setSelected('');setScope(value=>value+1);resetPlayer();};
  const load=async()=>{
   const generation=++loadGeneration.current;setLoading(true);
-  try{const status=await api<{connected:boolean;expired?:boolean}>('status');if(generation!==loadGeneration.current)return;setConnected(status.connected);
+  try{const status=await api<{connected:boolean;expired?:boolean;message?:string}>('status');if(generation!==loadGeneration.current)return;setConnected(status.connected);
    if(status.connected){const result=await api<{cameras:CameraInfo[]}>('list');if(generation!==loadGeneration.current)return;if(!Array.isArray(result.cameras))throw Error('设备列表格式无法识别。');setCameras(result.cameras);setSelected(old=>result.cameras.some(item=>item.id===old)?old:result.cameras[0]?.id||'');}
-   else{clearConnection();setLoading(false);if(status.expired)setNotice('云端会话已过期，请重新登录');}
+   else{clearConnection();setLoading(false);if(status.message)setNotice(status.message);else if(status.expired)setNotice('云端会话已过期，请重新登录');}
   }catch(error){if(generation!==loadGeneration.current)return;if((error as {status?:number}).status===401){clearConnection();setLoading(false);}setNotice((error as Error).message);}
   finally{if(generation===loadGeneration.current)setLoading(false);}
  };

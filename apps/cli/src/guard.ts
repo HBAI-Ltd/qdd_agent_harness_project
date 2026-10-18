@@ -71,16 +71,35 @@ export function checkFile(rel: string, content: string, cdnAllowlist: string[]):
   return result;
 }
 
-/** 浏览器侧兜底：即使守卫被绕过，CSP 也会阻止页面联网与提交。 */
-export function pageCsp(cdnAllowlist: string[], frameAncestors: string[] = []): string {
+/** 接受明确的 HTTPS 视频源，或单独的 "*" 全视频源开关；不接受 URL 通配符或 CSP 指令。 */
+export function parseMediaOrigins(value: unknown): string[] {
+  if (!Array.isArray(value)) throw new Error("mediaOrigins 必须是 HTTPS origin 数组或 [\"*\"]");
+  if (value.length === 1 && value[0] === "*") return ["*"];
+  return [...new Set(value.map((entry: unknown, index: number) => {
+    const invalid = () => new Error(`mediaOrigins 第 ${index + 1} 项必须是无路径、凭据或通配符的 HTTPS origin`);
+    if (typeof entry !== "string" || !/^https:\/\/[^\s/?#@\\;'"<>*%]+\/?$/i.test(entry)) throw invalid();
+    let url: URL;
+    try { url = new URL(entry); } catch { throw invalid(); }
+    if (url.protocol !== "https:" || !url.hostname || url.username || url.password || url.pathname !== "/" || url.search || url.hash) throw invalid();
+    return url.origin;
+  }))];
+}
+
+/** 浏览器侧兜底：视频来源按显式配置放行，业务请求及表单仍受守卫限制。 */
+export function pageCsp(cdnAllowlist: string[], frameAncestors: string[] = [], mediaOrigins: string[] = []): string {
   const cdn = cdnAllowlist.map((h) => `https://${h}`).join(" ");
+  const origins = parseMediaOrigins(mediaOrigins);
+  const allMedia = origins.length === 1 && origins[0] === "*";
+  const media = origins.join(" ");
   return [
     "default-src 'self'",
-    `script-src 'self' 'unsafe-inline' ${cdn}`,
+    `script-src 'self' 'unsafe-inline'${media ? " 'wasm-unsafe-eval'" : ""} ${cdn}`.trim(),
     `style-src 'self' 'unsafe-inline' ${cdn}`,
     `font-src 'self' data: ${cdn}`,
     "img-src 'self' data: blob:",
-    "connect-src 'self'",
+    allMedia ? "connect-src 'self' http: https: ws: wss:" : `connect-src 'self' ${media}`.trim(),
+    allMedia ? "media-src 'self' http: https: blob: data:" : `media-src 'self' blob: ${media}`.trim(),
+    "worker-src 'self' blob:",
     "form-action 'none'",
     "frame-src 'self'",
     `frame-ancestors 'self' ${frameAncestors.join(" ")}`.trim(),

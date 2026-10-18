@@ -12,21 +12,25 @@ const qualitySchema={type:'string',enum:['main','sub']};
 const widthSchema={type:'integer',minimum:320,maximum:1920,default:1280};
 const playbackProperties={cameraId,source:sourceSchema,date:dateSchema,recordId:recordIdSchema,startTime:timeSchema,endTime:timeSchema};
 const pagination={offset:{type:'integer',minimum:0,maximum:150000,default:0},limit:{type:'integer',minimum:1,maximum:100,default:50}};
+const read={readOnlyHint:true,idempotentHint:true,openWorldHint:true};
+const localRead={readOnlyHint:true,idempotentHint:true,openWorldHint:false};
+const stream={readOnlyHint:true,idempotentHint:false,openWorldHint:true};
+const change={readOnlyHint:false,destructiveHint:false,idempotentHint:false,openWorldHint:true};
 const TOOLS = [
-  {name: 'tysl_camera_status', description: '检查本地天翼视联服务与登录状态，不返回凭据。', inputSchema: objectSchema()},
-  {name: 'tysl_camera_list', description: '获取本人账号有权访问的天翼视联摄像头列表。', inputSchema: objectSchema()},
-  {name: 'tysl_camera_preview', description: '取得摄像头预览的本地网页或 HLS 地址。', inputSchema: objectSchema({cameraId, quality: {type: 'string', enum: ['main', 'sub']}}, ['cameraId'])},
-  {name: 'tysl_camera_ptz', description: '发送一次短脉冲云台操作，服务端在 finally 中停止。', inputSchema: objectSchema({cameraId, direction: {type: 'string', enum: ['up', 'down', 'left', 'right']}, durationMs: {type: 'integer', minimum: 200, maximum: 1000, default: 350}, speed: {type: 'integer', minimum: 1, maximum: 5, default: 2}}, ['cameraId', 'direction'])},
-  {name: 'tysl_camera_stop', description: '停止指定摄像头云台；省略 cameraId 时停止全部活动云台。', inputSchema: objectSchema({cameraId})},
-  {name:'tysl_camera_capabilities',description:'查询已授权摄像头的实时、云台、SD回放协议能力；支持协议不代表存有录像。',inputSchema:objectSchema({cameraId},['cameraId'])},
-  {name:'tysl_camera_recording_dates',description:'查询摄像头有云录像的日期，时间为北京时间。',inputSchema:objectSchema({cameraId},['cameraId'])},
-  {name:'tysl_camera_recordings',description:'按北京时间日期查询云录像或SD卡录像片段，分页返回片段ID、起止时间和大小，不返回云端签名地址。',inputSchema:objectSchema({cameraId,date:dateSchema,source:sourceSchema,...pagination},['cameraId','date'])},
-  {name:'tysl_camera_playback',description:'播放已查询的历史录像，返回本地HLS和网页链接。云录像需date和recordId；SD可用date与recordId或起止时间。',inputSchema:objectSchema(playbackProperties,['cameraId'])},
-  {name:'tysl_camera_snapshot',description:'从实时视频保存单张JPEG到本地，返回图片绝对路径、下载URL和SHA256。可用图片读取工具继续分析；若pending请查询任务状态。',inputSchema:objectSchema({cameraId,quality:qualitySchema,maxWidth:widthSchema},['cameraId'])},
-  {name:'tysl_camera_capture_start',description:'启动持久化采集任务：按durationSeconds和fps抽取图片，或kind=video保存H264 MP4。立即返回任务ID；用tysl_capture_status分页取文件路径做图片分析。支持实时或选定历史片段，录像固定15fps无音频。',inputSchema:objectSchema({...playbackProperties,mode:{type:'string',enum:['live','playback'],default:'live'},kind:{type:'string',enum:['frames','video'],default:'frames'},durationSeconds:{type:'integer',minimum:1,maximum:3600,default:10,description:'截图最多3600秒、1800帧；video最多600秒'},fps:{type:'number',minimum:0.1,maximum:5,default:1,description:'仅截图采样帧率，每秒帧数'},maxWidth:widthSchema,quality:qualitySchema},['cameraId','durationSeconds'])},
-  {name:'tysl_capture_status',description:'查询采集进度、已保存文件和路径，图片分页默认50张；用offset读取后续帧，任务完成文件仍保留。',inputSchema:objectSchema({jobId:jobIdSchema,...pagination},['jobId'])},
-  {name:'tysl_capture_list',description:'列出当前账号的本地采集/录像任务与持久化目录。可按cameraId筛选，不返回其它账号任务。',inputSchema:objectSchema({cameraId})},
-  {name:'tysl_capture_cancel',description:'停止指定采集任务并保留已生成的图片/视频，不删除文件。',inputSchema:objectSchema({jobId:jobIdSchema},['jobId'])}
+  {name: 'tysl_camera_status', description: '检查本地天翼视联服务与登录状态，不返回凭据。', inputSchema: objectSchema(), annotations:localRead},
+  {name: 'tysl_camera_list', description: '获取本人账号有权访问的天翼视联摄像头列表。', inputSchema: objectSchema(), annotations:read},
+  {name: 'tysl_camera_preview', description: '取得摄像头预览的本地网页或 HLS 地址。', inputSchema: objectSchema({cameraId, quality: {type: 'string', enum: ['main', 'sub']}}, ['cameraId']), annotations:stream},
+  {name: 'tysl_camera_ptz', description: '发送一次短脉冲云台操作，服务端在 finally 中停止。', inputSchema: objectSchema({cameraId, direction: {type: 'string', enum: ['up', 'down', 'left', 'right']}, durationMs: {type: 'integer', minimum: 200, maximum: 1000, default: 350}, speed: {type: 'integer', minimum: 1, maximum: 5, default: 2}}, ['cameraId', 'direction']), annotations:change},
+  {name: 'tysl_camera_stop', description: '停止指定摄像头云台；省略 cameraId 时停止全部活动云台。', inputSchema: objectSchema({cameraId}), annotations:{...change,idempotentHint:true}},
+  {name:'tysl_camera_capabilities',description:'查询已授权摄像头的实时、云台、SD回放协议能力；支持协议不代表存有录像。',inputSchema:objectSchema({cameraId},['cameraId']),annotations:read},
+  {name:'tysl_camera_recording_dates',description:'查询摄像头有云录像的日期，时间为北京时间。',inputSchema:objectSchema({cameraId},['cameraId']),annotations:read},
+  {name:'tysl_camera_recordings',description:'按北京时间日期查询云录像或SD卡录像片段，分页返回片段ID、起止时间和大小，不返回云端签名地址。',inputSchema:objectSchema({cameraId,date:dateSchema,source:sourceSchema,...pagination},['cameraId','date']),annotations:read},
+  {name:'tysl_camera_playback',description:'播放已查询的历史录像，返回本地HLS和网页链接。云录像需date和recordId；SD可用date与recordId或起止时间。',inputSchema:objectSchema(playbackProperties,['cameraId']),annotations:stream},
+  {name:'tysl_camera_snapshot',description:'从实时视频保存单张JPEG到本地，返回图片绝对路径、下载URL和SHA256。可用图片读取工具继续分析；若pending请查询任务状态。',inputSchema:objectSchema({cameraId,quality:qualitySchema,maxWidth:widthSchema},['cameraId']),annotations:change},
+  {name:'tysl_camera_capture_start',description:'启动持久化采集任务：按durationSeconds和fps抽取图片，或kind=video保存H264 MP4。立即返回任务ID；用tysl_capture_status分页取文件路径做图片分析。支持实时或选定历史片段，录像固定15fps无音频。',inputSchema:objectSchema({...playbackProperties,mode:{type:'string',enum:['live','playback'],default:'live'},kind:{type:'string',enum:['frames','video'],default:'frames'},durationSeconds:{type:'integer',minimum:1,maximum:3600,default:10,description:'截图最多3600秒、1800帧；video最多600秒'},fps:{type:'number',minimum:0.1,maximum:5,default:1,description:'仅截图采样帧率，每秒帧数'},maxWidth:widthSchema,quality:qualitySchema},['cameraId','durationSeconds']),annotations:change},
+  {name:'tysl_capture_status',description:'查询采集进度、已保存文件和路径，图片分页默认50张；用offset读取后续帧，任务完成文件仍保留。',inputSchema:objectSchema({jobId:jobIdSchema,...pagination},['jobId']),annotations:localRead},
+  {name:'tysl_capture_list',description:'列出当前账号的本地采集/录像任务与持久化目录。可按cameraId筛选，不返回其它账号任务。',inputSchema:objectSchema({cameraId}),annotations:localRead},
+  {name:'tysl_capture_cancel',description:'停止指定采集任务并保留已生成的图片/视频，不删除文件。',inputSchema:objectSchema({jobId:jobIdSchema},['jobId']),annotations:{...change,idempotentHint:true,openWorldHint:false}}
 ];
 const ACTIONS = {tysl_camera_list:'list',tysl_camera_preview:'preview',tysl_camera_ptz:'ptz',tysl_camera_stop:'stop',tysl_camera_capabilities:'capabilities',tysl_camera_recording_dates:'recording-dates',tysl_camera_recordings:'recordings',tysl_camera_playback:'playback',tysl_camera_snapshot:'snapshot',tysl_camera_capture_start:'capture-start',tysl_capture_status:'capture-status',tysl_capture_list:'capture-list',tysl_capture_cancel:'capture-cancel'};
 const own = (value, key) => Object.prototype.hasOwnProperty.call(value, key);

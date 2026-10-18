@@ -15,7 +15,7 @@ if($haikHealth){
  Write-Host "HAIK: $haikUrl";exit 0
 }
 $nodePath=(Get-Command node -ErrorAction Stop).Source
-if(-not (Test-Path -LiteralPath (Join-Path $localState 'haik-credentials.dpapi'))){throw 'Initialize your client configuration first: node scripts/initialize-haik.mjs'}
+if(-not (Test-Path -LiteralPath (Join-Path $localState 'haik-credentials.dpapi'))){Write-Host 'HAIK client configuration is missing. Starting the local service in setup-required state.'}
 $haikFfmpeg=Join-Path $haikRoot 'tools\node_modules\ffmpeg-static\ffmpeg.exe'
 if($env:HAIK_FFMPEG){$haikFfmpeg=$env:HAIK_FFMPEG}
 if(-not (Test-Path -LiteralPath $haikFfmpeg -PathType Leaf)){throw 'Local FFmpeg is missing. Restore tools\node_modules\ffmpeg-static\ffmpeg.exe.'}

@@ -26,9 +26,11 @@ npm run build
 .\Start-TYSL.ps1
 .\Start-EZVIZ.ps1
 .\Start-Shouqianba.ps1
-# 海康先完成下方的客户端配置初始化
+# 海康取视频和登录前需完成下方的客户端配置初始化
 .\Start-HAIK.ps1
 ```
+
+也可从仓库根目录依次运行 `npm run mcp:setup`、`npm run mcp:build`、`npm run mcp:start`，启动全部四个服务且不自动打开网页；`npm run mcp:stop` 停止全部服务。启动服务不会自动安装连接器；用户需在 QDD 工作台连接器页选择收银或摄像头平台，再点击「验证并安装」。后端只加载用户选择的平台，删除后立即撤销对应工具。已运行的服务会复用。首次启动海康时，即使尚未填写客户端参数，本地网页、状态和 MCP 工具列表仍可用；短信和云端登录会提示先完成配置。
 
 服务仅监听本机；查询设备、视频和经营数据仍需要访问厂商云。三个摄像头服务支持设备列表、预览、云台、录像查询、回放、持久截图与 MP4 采集，实际功能受账号权限与设备能力限制。海康与萤石请使用停止脚本完成云台停止及媒体清理。
 
@@ -50,7 +52,7 @@ node scripts/initialize-haik.mjs
 
 ## MCP 客户端
 
-先启动对应服务，再按 `mcp.client.example.json` 配置客户端。收钱吧的 `args` 必须改为实际绝对路径；stdio 桥接会读取本机生成的密钥，无需把密钥写进配置。其 HTTP 入口要求 Bearer 密钥，不可直接套用摄像头的无密钥 HTTP 示例。
+先启动对应服务，再按 `mcp.client.example.json` 配置通用 MCP 客户端。收钱吧的 `args` 必须改为实际绝对路径；stdio 桥接会读取本机生成的密钥，无需把密钥写进配置。QDD 后端只使用 HTTP，默认配置不预装厂商；在连接器页选择平台后自动使用本地默认地址，收钱吧自动读取 `mcp/.local/shouqianba/mcp-key`。端口等参数可在 `harness.config.json` 的同名厂商配置中覆盖，配置本身不会安装该平台；不能直接复制通用客户端的 stdio 配置。
 
 三个摄像头也分别提供 `local/mcp-stdio.mjs` 桥接；`plugins/` 包含相应本地插件清单及使用技能。端口可用 `HAIK_PORT`、`TYSL_PORT`、`EZVIZ_PORT` 调整并同步修改客户端配置。收钱吧启动脚本默认 8788；自定义端口请设置 `SQB_PORT` 后直接运行 `node --use-env-proxy sites/shouqianba-console/server.mjs`，stdio 端也使用同一个 `SQB_PORT`。
 
@@ -62,6 +64,8 @@ npm run build
 ```
 
 现有测试涵盖协议、参数、登录状态、账号隔离、只读数据口径、路径检查、MCP 和媒体持久化。媒体测试使用 FFmpeg 本地生成的画面，不连接真实摄像头；不会发短信、操作云台或读取真实商户数据。主仓库仍按根目录的命令执行 `npm run typecheck`、`npm run build`。
+
+后端鉴权和摄像头权限回归测试位于 `apps/cli/src/datasource/*.test.ts`。在根目录构建后运行 `node --test apps/cli/dist/datasource/*.test.js`。摄像头的云台、截图及采集会走店长授权；三家已知的非破坏性云台停止可立即执行。
 
 ## 本地数据与许可证
 

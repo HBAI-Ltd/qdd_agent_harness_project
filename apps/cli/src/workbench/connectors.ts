@@ -1,19 +1,21 @@
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import type { ConnectorCatalogEntry, ConnectorPermission, ConnectorStatus, ConnectorView, FeishuConnectorInput } from "@qdd/shared";
+import type { ConnectorCatalogEntry, ConnectorInput, ConnectorPermission, ConnectorStatus, ConnectorView, FeishuConnectorInput, LocalMcpConnectorInput, LocalMcpProvider, McpServerConfig } from "@qdd/shared";
 import type { HarnessPaths } from "../config.js";
+import { McpClient } from "../datasource/mcp-client.js";
 import { writeAtomic } from "../web/site.js";
 import { FeishuClient, FeishuError } from "./feishu.js";
+import { isLocalMcpProvider, LOCAL_MCP_PROVIDERS, localMcpServer } from "./local-mcp.js";
 import type { SecretBox } from "./secrets.js";
 import { InvalidInput, Missing } from "./skills.js";
 
 /** 前端「连接器」页展示的目录；available=false 的类型暂未开放。 */
 export const CONNECTOR_CATALOG: ConnectorCatalogEntry[] = [
-  { type: "pos", name: "收银系统", category: "数据", tags: ["销售", "订单"], available: false, modes: ["mcp"] },
+  { type: "pos", name: "收银系统", category: "数据", tags: ["销售", "订单"], available: true, modes: ["mcp"], providers: [{ id: "shouqianba", name: "收钱吧" }] },
   { type: "erp", name: "进销存 ERP", category: "数据", tags: ["库存", "采购"], available: false, modes: ["mcp"] },
   { type: "feishu", name: "飞书", category: "消息通知", tags: ["飞书", "群机器人", "应用"], available: true, modes: ["webhook", "app"] },
   { type: "wecom", name: "企业微信", category: "消息通知", tags: ["企业微信"], available: false, modes: ["webhook"] },
-  { type: "camera", name: "门店摄像头", category: "设备", tags: ["客流统计", "货架识别"], available: false, modes: ["qrcode"] },
+  { type: "camera", name: "门店摄像头", category: "设备", tags: ["客流统计", "货架识别"], available: true, modes: ["mcp"], providers: (["haik", "tysl", "ezviz"] as const).map((id) => ({ id, name: LOCAL_MCP_PROVIDERS[id].name })) },
   { type: "phone", name: "门店手机 · 助手操控", category: "设备", tags: ["小红书", "抖音", "大众点评"], available: false, modes: ["qrcode"] },
   { type: "delivery", name: "外卖平台", category: "数据", tags: ["外卖订单", "评价"], available: false, modes: ["mcp"] },
 ];
@@ -28,22 +30,33 @@ interface FeishuSecrets {
   appSecret?: string;
 }
 
-interface StoredConnector {
+interface StoredConnectorBase {
   id: string;
-  type: "feishu";
   name: string;
   permission: ConnectorPermission;
   status: ConnectorStatus;
   detail: string;
+  lastVerifiedAt: string | null;
+  createdAt: string;
+}
+
+interface StoredFeishuConnector extends StoredConnectorBase {
+  type: "feishu";
   mode: "webhook" | "app";
   appId?: string;
   receiveId?: string;
   receiveIdType?: (typeof RECEIVE_ID_TYPES)[number];
   /** SecretBox 加密的 FeishuSecrets */
   secrets: string;
-  lastVerifiedAt: string | null;
-  createdAt: string;
 }
+
+interface StoredMcpConnector extends StoredConnectorBase {
+  type: "pos" | "camera";
+  mode: "mcp";
+  provider: LocalMcpProvider;
+}
+
+type StoredConnector = StoredFeishuConnector | StoredMcpConnector;
 
 /** 配置文件中的 MCP 服务，作为只读连接器展示。 */
 export interface McpConnectorInfo {
@@ -59,6 +72,7 @@ export class ConnectorStore {
     private readonly paths: HarnessPaths,
     private readonly box: SecretBox,
     readonly feishu = new FeishuClient(),
+    private readonly mcpServers: Record<string, McpServerConfig> = {},
   ) {}
 
   private async readAll(): Promise<StoredConnector[]> {
@@ -88,7 +102,9 @@ export class ConnectorStore {
   }
 
   async list(mcp: McpConnectorInfo[] = []): Promise<ConnectorView[]> {
-    const servers = mcp.map(
+    const installed = await this.readAll();
+    const installedIds = new Set(installed.map((c) => c.id));
+    const servers = mcp.filter((s) => !isLocalMcpProvider(s.name) && !installedIds.has(`mcp:${s.name}`)).map(
       (s): ConnectorView => ({
         id: `mcp:${s.name}`,
         type: "mcp",
@@ -102,7 +118,11 @@ export class ConnectorStore {
         createdAt: null,
       }),
     );
-    return [...servers, ...(await this.readAll()).map((c) => this.view(c))];
+    return [...servers, ...installed.map((c) => {
+      const view = this.view(c);
+      const runtime = c.mode === "mcp" ? mcp.find((server) => server.name === c.provider) : undefined;
+      return runtime?.error ? { ...view, status: "error" as const, detail: runtime.error } : view;
+    })];
   }
 
   async get(id: string): Promise<ConnectorView> {
@@ -112,10 +132,11 @@ export class ConnectorStore {
   /** 安装：先验证，通过后才保存。 */
   async install(raw: unknown): Promise<ConnectorView> {
     const input = parseInput(raw);
+    if (input.mode === "mcp") return this.installMcp(input);
     const secrets = requireSecrets(input);
     const detail = await this.verifyFeishu(input.mode, secrets, input);
     const now = new Date().toISOString();
-    const connector: StoredConnector = {
+    const connector: StoredFeishuConnector = {
       id: randomUUID(),
       type: "feishu",
       name: input.name?.trim().slice(0, 30) || (input.mode === "webhook" ? "飞书群机器人" : "飞书应用"),
@@ -141,12 +162,18 @@ export class ConnectorStore {
     return this.mutate(async (all) => {
       const c = all.find((x) => x.id === id);
       if (!c) throw new Missing("连接器不存在");
+      if (c.mode === "mcp") {
+        if (Object.keys(body).some((key) => key !== "name")) throw new InvalidInput("MCP 连接器只能修改名称，厂商和权限由安装类型确定");
+        if (body.name !== undefined && (typeof body.name !== "string" || !body.name.trim())) throw new InvalidInput("name 必须是非空字符串");
+        if (typeof body.name === "string") c.name = body.name.trim().slice(0, 30);
+        return this.view(c);
+      }
       if (typeof body.name === "string" && body.name.trim()) c.name = body.name.trim().slice(0, 30);
       if (body.permission !== undefined) c.permission = body.permission as ConnectorPermission;
       if (typeof body.receiveId === "string") {
         if (c.mode !== "app") throw new InvalidInput("只有应用模式需要 receiveId");
         c.receiveId = body.receiveId.trim();
-        c.receiveIdType = (body.receiveIdType as StoredConnector["receiveIdType"]) ?? c.receiveIdType ?? "chat_id";
+        c.receiveIdType = (body.receiveIdType as StoredFeishuConnector["receiveIdType"]) ?? c.receiveIdType ?? "chat_id";
       }
       return this.view(c);
     });
@@ -166,7 +193,9 @@ export class ConnectorStore {
     let status: ConnectorStatus = "connected";
     let detail: string;
     try {
-      detail = await this.verifyFeishu(c.mode, this.box.open<FeishuSecrets>(c.secrets), c);
+      detail = c.mode === "mcp"
+        ? await this.verifyMcp(c.provider)
+        : await this.verifyFeishu(c.mode, this.box.open<FeishuSecrets>(c.secrets), c);
     } catch (error) {
       status = "error";
       detail = (error as Error).message;
@@ -182,6 +211,7 @@ export class ConnectorStore {
   /** 推送一条文本消息。permission=read 的连接器不能推送。 */
   async send(id: string, text: string): Promise<void> {
     const c = await this.stored(id);
+    if (c.mode === "mcp") throw new InvalidInput(`连接器「${c.name}」是数据源，不支持推送消息`);
     if (c.permission === "read") throw new InvalidInput(`连接器「${c.name}」只允许查看，不能推送消息`);
     const secrets = this.box.open<FeishuSecrets>(c.secrets);
     if (c.mode === "webhook") return this.feishu.sendWebhook({ webhookUrl: secrets.webhookUrl!, signSecret: secrets.signSecret }, text);
@@ -192,7 +222,45 @@ export class ConnectorStore {
   /** 返回给 agent / 网关判断权限用的最小信息。 */
   async describe(id: string): Promise<{ id: string; name: string; permission: ConnectorPermission; status: ConnectorStatus }> {
     const c = await this.stored(id);
+    if (c.mode === "mcp") throw new InvalidInput(`连接器「${c.name}」是数据源，不能作为消息通知连接器`);
     return { id: c.id, name: c.name, permission: c.permission, status: c.status };
+  }
+
+  private async installMcp(input: LocalMcpConnectorInput): Promise<ConnectorView> {
+    return this.mutate(async (all) => {
+      const id = `mcp:${input.provider}`;
+      if (all.some((connector) => connector.id === id)) throw new InvalidInput(`「${LOCAL_MCP_PROVIDERS[input.provider].name}」已安装`);
+      const detail = await this.verifyMcp(input.provider);
+      const now = new Date().toISOString();
+      const connector: StoredMcpConnector = {
+        id,
+        type: input.type,
+        mode: "mcp",
+        provider: input.provider,
+        name: input.name?.trim().slice(0, 30) || LOCAL_MCP_PROVIDERS[input.provider].name,
+        permission: input.type === "pos" ? "read" : "confirm",
+        status: "connected",
+        detail,
+        lastVerifiedAt: now,
+        createdAt: now,
+      };
+      all.push(connector);
+      return this.view(connector);
+    });
+  }
+
+  private async verifyMcp(provider: LocalMcpProvider): Promise<string> {
+    let client: McpClient | undefined;
+    try {
+      client = new McpClient(provider, localMcpServer(provider, this.paths.root, this.mcpServers[provider]));
+      await client.start();
+      const tools = await client.listTools();
+      return `MCP 服务已连接（${tools.length} 个工具）；厂商账号请在登录控制台管理`;
+    } catch (error) {
+      throw new InvalidInput(`「${LOCAL_MCP_PROVIDERS[provider].name}」连接失败：${(error as Error).message}`);
+    } finally {
+      await client?.close();
+    }
   }
 
   private async verifyFeishu(mode: "webhook" | "app", secrets: FeishuSecrets, target: { appId?: string | undefined; receiveId?: string | undefined; receiveIdType?: string | undefined }): Promise<string> {
@@ -213,6 +281,20 @@ export class ConnectorStore {
   }
 
   private view(c: StoredConnector): ConnectorView {
+    if (c.mode === "mcp") {
+      return {
+        id: c.id,
+        type: c.type,
+        name: c.name,
+        origin: "installed",
+        permission: c.type === "pos" ? "read" : "confirm",
+        status: c.status,
+        detail: c.detail,
+        config: { mode: "mcp", provider: c.provider, consoleUrl: new URL(localMcpServer(c.provider, this.paths.root, this.mcpServers[c.provider]).url).origin + "/" },
+        lastVerifiedAt: c.lastVerifiedAt,
+        createdAt: c.createdAt,
+      };
+    }
     let secrets: FeishuSecrets = {};
     try {
       secrets = this.box.open<FeishuSecrets>(c.secrets);
@@ -244,8 +326,15 @@ export class ConnectorStore {
   }
 }
 
-function parseInput(raw: unknown): FeishuConnectorInput {
+function parseInput(raw: unknown): ConnectorInput {
   const body = (raw ?? {}) as Record<string, unknown>;
+  if (body.type === "pos" || body.type === "camera") {
+    if (body.mode !== "mcp") throw new InvalidInput("收银系统与门店摄像头的 mode 必须是 mcp");
+    if (!isLocalMcpProvider(body.provider) || LOCAL_MCP_PROVIDERS[body.provider].type !== body.type) throw new InvalidInput("请选择此连接器支持的厂商");
+    if (Object.keys(body).some((key) => !["type", "mode", "provider", "name"].includes(key))) throw new InvalidInput("MCP 连接器只接受类型、厂商和名称；权限由安装类型确定");
+    if (body.name !== undefined && typeof body.name !== "string") throw new InvalidInput("name 必须是字符串");
+    return { type: body.type, mode: "mcp", provider: body.provider, ...(typeof body.name === "string" && body.name.trim() ? { name: body.name.trim() } : {}) };
+  }
   if (body.type !== "feishu") {
     const entry = CONNECTOR_CATALOG.find((c) => c.type === body.type);
     throw new InvalidInput(entry ? `「${entry.name}」暂未开放安装` : "未知连接器类型");

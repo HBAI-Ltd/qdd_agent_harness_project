@@ -19,9 +19,6 @@
   "browser": { "enabled": true, "executablePath": "", "permission": "confirm" },
   "datasets": { "refreshIntervalSec": 300 },
   "cdnAllowlist": ["cdn.jsdelivr.net", "unpkg.com", "cdnjs.cloudflare.com", "fonts.googleapis.com", "fonts.gstatic.com"],
-  "mcpServers": {
-    "haik": { "url": "http://127.0.0.1:8787/mcp", "allowWrite": false },
-    "tysl": { "url": "http://127.0.0.1:8790/mcp", "allowWrite": false },
-    "shouqianba": { "url": "http://127.0.0.1:8788/mcp", "bearerTokenEnv": "SQB_MCP_TOKEN", "allowWrite": false }
-  }
+  "mediaOrigins": [],
+  "mcpServers": {}
 }

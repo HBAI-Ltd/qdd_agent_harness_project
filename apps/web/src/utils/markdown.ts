@@ -1,4 +1,5 @@
 import MarkdownIt from "markdown-it";
+import { mediaKind, safeMediaUrl, type MediaKind } from "./media.ts";
 
 const markdown = new MarkdownIt({
   html: false,
@@ -24,6 +25,52 @@ markdown.renderer.rules.link_open = (tokens, index, options, _env, renderer) => 
   }
   return renderer.renderToken(tokens, index, options);
 };
+
+const renderImage = markdown.renderer.rules.image!;
+markdown.renderer.rules.image = (tokens, index, options, env, renderer) => {
+  const token = tokens[index]!;
+  const src = token.attrGet("src") ?? "";
+  if (env?.mediaLinks && safeMediaUrl(src)) {
+    const label = renderer.renderInlineAsText(token.children ?? [], options, env) || "图片";
+    const enclosingLink = tokens.slice(0, index).findLast((entry) => entry.type === "link_open" || entry.type === "link_close");
+    if (enclosingLink?.type === "link_open") return markdown.utils.escapeHtml(label);
+    return `<a href="${markdown.utils.escapeHtml(src)}" target="_blank" rel="noopener noreferrer">${markdown.utils.escapeHtml(label)}</a>`;
+  }
+  return renderImage(tokens, index, options, env, renderer);
+};
+
+export interface MarkdownMedia {
+  src: string;
+  label: string;
+  kind: MediaKind;
+}
+
+// Parse HTML as opaque tokens for discovery only; the displayed HTML stays disabled.
+const mediaMarkdown = new MarkdownIt({ html: true, linkify: true });
+mediaMarkdown.validateLink = markdown.validateLink;
+
+export function markdownMedia(content: string): MarkdownMedia[] {
+  const result = new Map<string, MarkdownMedia>();
+  for (const block of mediaMarkdown.parse(content, {})) {
+    const tokens = block.children ?? [];
+    for (let index = 0; index < tokens.length; index++) {
+      const token = tokens[index]!;
+      if (token.type !== "image" && token.type !== "link_open") continue;
+      if (token.markup === "linkify" && /\]\(\s*$/.test(tokens[index - 1]?.content ?? "")) continue;
+      const src = token.attrGet(token.type === "image" ? "src" : "href") ?? "";
+      if (!safeMediaUrl(src) || !markdown.validateLink(src)) continue;
+      const kind = mediaKind(src, token.attrGet("title") ?? "") ?? (token.type === "image" ? "image" : undefined);
+      if (!kind) continue;
+      let label = token.content;
+      if (token.type === "link_open") {
+        const close = tokens.findIndex((entry, position) => position > index && entry.type === "link_close");
+        label = markdown.renderer.renderInlineAsText(tokens.slice(index + 1, close), markdown.options, {});
+      }
+      result.set(src, { src, kind, label: label || (kind === "image" ? "图片" : "视频") });
+    }
+  }
+  return [...result.values()];
+}
 
 // Give wide tables their own scroll area instead of widening the conversation.
 markdown.renderer.rules.table_open = () => '<div class="markdown-table-scroll"><table>\n';
@@ -52,6 +99,6 @@ markdown.renderer.rules.task_checkbox = (tokens, index, options, _env, renderer)
   `${renderer.renderToken(tokens, index, options)} `;
 
 /** Render untrusted assistant Markdown; raw HTML is always displayed as text. */
-export function renderMarkdown(content: string): string {
-  return markdown.render(content);
+export function renderMarkdown(content: string, mediaLinks = false): string {
+  return markdown.render(content, { mediaLinks });
 }

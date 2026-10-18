@@ -14,6 +14,7 @@ declare module 'vue' {
     AgentIcon: typeof import('./../components/AgentIcon.vue')['default']
     AttachmentList: typeof import('./../components/AttachmentList.vue')['default']
     CameraLoginDialog: typeof import('./../components/CameraLoginDialog.vue')['default']
+    ChatMedia: typeof import('./../components/ChatMedia.vue')['default']
     DashboardPending: typeof import('./../components/DashboardPending.vue')['default']
     MarkdownContent: typeof import('./../components/MarkdownContent.vue')['default']
     RouterLink: typeof import('vue-router')['RouterLink']

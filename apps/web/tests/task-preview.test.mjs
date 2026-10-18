@@ -110,6 +110,23 @@ function mount(t) {
   };
 }
 
+test("cross-origin preview permits external popups and preserves the gateway origin", (t) => {
+  const f = mount(t);
+  assert.deepEqual(new Set(f.frame().props.sandbox.split(/\s+/)), new Set([
+    "allow-scripts", "allow-same-origin", "allow-popups", "allow-popups-to-escape-sandbox",
+  ]));
+});
+
+test("same-origin preview permits external popups while keeping the frame opaque", async (t) => {
+  const f = mount(t);
+  f.props.gatewayUrl = "https://frontend.example";
+  f.props.page.url = "https://frontend.example/pages/sales-report/index.html";
+  await nextTick();
+  assert.deepEqual(new Set(f.frame().props.sandbox.split(/\s+/)), new Set([
+    "allow-scripts", "allow-popups", "allow-popups-to-escape-sandbox",
+  ]));
+});
+
 test("a pending iframe request stops showing loading and reports a retryable timeout", async (t) => {
   const f = mount(t);
   assert.equal(f.loading(), true);

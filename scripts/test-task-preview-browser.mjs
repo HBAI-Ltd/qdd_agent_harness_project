@@ -30,24 +30,46 @@ assert.ok(chrome, "未找到本机 Chrome/Edge；可通过 CHROME_PATH 指定浏
 let shellOrigin;
 let gatewayOrigin;
 let bundle;
-const requests = { normal: 0, hang: 0, nosdk: 0 };
+const requests = { normal: 0, hang: 0, nosdk: 0, popup: 0, popupSubmitted: 0 };
 const listen = async (server) => {
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   return `http://127.0.0.1:${server.address().port}`;
 };
-const gateway = createServer((req, res) => {
+function serveFixture(req, res) {
+  const pathname = new URL(req.url, "http://localhost").pathname;
+  if (pathname === "/popup") {
+    requests.popup++;
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" }).end(`<!doctype html><title>Local player fixture</title><body>
+      <form action="/popup-submitted" method="get"><button id="popup-submit">Confirm local popup</button></form>
+    </body>`);
+    return true;
+  }
+  if (pathname === "/popup-submitted") {
+    requests.popupSubmitted++;
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" }).end('<!doctype html><body data-submitted="yes">Local popup submitted</body>');
+    return true;
+  }
   const slug = /^\/pages\/([^/]+)\//.exec(req.url)?.[1];
-  if (slug === "hang") { requests.hang++; return; }
+  if (slug === "hang") { requests.hang++; return true; }
   if (slug === "normal" || slug === "nosdk") {
     requests[slug]++;
     const sdk = slug === "normal" ? `<script>window.QDD_PAGE=${JSON.stringify({ slug, token: "page-only-token", hostOrigins: [shellOrigin] })};window.__qddCompute={};</script><script>${SDK_JS}</script>` : "";
-    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" }).end(`<!doctype html><head>${sdk}</head><body>门店销售看板<script>if(window.qdd)window.qdd.host.ready.then(()=>document.body.dataset.ready='yes')</script></body>`);
-    return;
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" }).end(`<!doctype html><head>${sdk}</head><body>门店销售看板
+      <button id="open-popup">Open local player</button><script>
+        if(window.qdd)window.qdd.host.ready.then(()=>document.body.dataset.ready='yes');
+        document.getElementById('open-popup').addEventListener('click',()=>window.open(${JSON.stringify(`${gatewayOrigin}/popup`)},'_blank','noopener,noreferrer'));
+      </script></body>`);
+    return true;
   }
+  return false;
+}
+const gateway = createServer((req, res) => {
+  if (serveFixture(req, res)) return;
   res.writeHead(404).end();
 });
 const shell = createServer((req, res) => {
   if (req.url === "/bundle.js") return res.writeHead(200, { "Content-Type": "text/javascript" }).end(bundle);
+  if (serveFixture(req, res)) return;
   res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" }).end('<!doctype html><div id="app"></div><script src="/bundle.js"></script>');
 });
 let browser;
@@ -57,8 +79,11 @@ try {
   const result = await build({
     stdin: {
       contents: `import {createApp,h,ref} from "vue"; import TaskPreview from "./apps/web/src/components/TaskPreview.vue";
-        const active=ref(new URL(location.href).searchParams.get("slug")||"normal"); window.setPage=(slug)=>active.value=slug;
-        createApp({render:()=>h(TaskPreview,{page:{slug:active.value,title:"销售看板",version:1,kind:"once",schedules:[],pinnedAt:null,stale:null,url:${JSON.stringify(gatewayOrigin)}+"/pages/"+active.value+"/index.html"},gatewayUrl:${JSON.stringify(gatewayOrigin)}})}).mount("#app");`,
+        const params=new URL(location.href).searchParams;
+        const active=ref(params.get("slug")||"normal"); window.setPage=(slug)=>active.value=slug;
+        const gateway=params.get("mode")==="same-origin"?location.origin:${JSON.stringify(gatewayOrigin)};
+        window.__shellIsolationMarker="local-fixture-only";
+        createApp({render:()=>h(TaskPreview,{page:{slug:active.value,title:"销售看板",version:1,kind:"once",schedules:[],pinnedAt:null,stale:null,url:gateway+"/pages/"+active.value+"/index.html"},gatewayUrl:gateway})}).mount("#app");`,
       resolveDir: root, loader: "js",
     },
     bundle: true, write: false, format: "iife", define: { "process.env.NODE_ENV": '"production"' },
@@ -86,6 +111,56 @@ try {
     assert.equal(await frame.$eval("body", (body) => body.dataset.ready), "yes");
   }
   console.log("Normal iframe handshakes: 30/30");
+  const popupModes = [];
+  for (const mode of ["cross-origin", "same-origin"]) {
+    await page.goto(`${shellOrigin}/?slug=normal&mode=${mode}`, { waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => !!document.querySelector("iframe") && !document.querySelector(".preview-loading"), { timeout: 5000 });
+    assert.equal(await page.$(".preview-error"), null);
+    const frameOrigin = mode === "same-origin" ? shellOrigin : gatewayOrigin;
+    const taskFrame = page.frames().find((candidate) => candidate.url().startsWith(`${frameOrigin}/pages/normal/`));
+    assert.ok(taskFrame, `${mode}: actual task iframe should load`);
+    const sandbox = await page.$eval("iframe", (node) => [...node.sandbox]);
+    assert.ok(sandbox.includes("allow-popups"), `${mode}: popups must be enabled`);
+    assert.ok(sandbox.includes("allow-popups-to-escape-sandbox"), `${mode}: independent player must escape sandbox inheritance`);
+    assert.equal(sandbox.includes("allow-same-origin"), mode === "cross-origin");
+    const isolation = async () => taskFrame.evaluate(() => {
+      let parentAccessible = false;
+      let storageAccessible = false;
+      try { parentAccessible = window.parent.__shellIsolationMarker === "local-fixture-only"; } catch {}
+      try { localStorage.setItem("task-preview-fixture", "yes"); localStorage.removeItem("task-preview-fixture"); storageAccessible = true; } catch {}
+      return { origin: window.origin, parentAccessible, storageAccessible, ready: document.body.dataset.ready };
+    });
+    const expectedIsolation = { origin: mode === "same-origin" ? "null" : gatewayOrigin, parentAccessible: false, storageAccessible: mode === "cross-origin", ready: "yes" };
+    assert.deepEqual(await isolation(), expectedIsolation, `${mode}: task iframe must remain isolated`);
+    const targetReady = browser.waitForTarget((target) => target.type() === "page" && target.url() === `${gatewayOrigin}/popup`, { timeout: 5000 });
+    await taskFrame.click("#open-popup");
+    const popup = await (await targetReady).page();
+    assert.ok(popup, `${mode}: a real user click should open a new page`);
+    try {
+      await popup.waitForSelector("#popup-submit", { timeout: 5000 });
+      assert.deepEqual(await popup.evaluate(() => {
+        localStorage.setItem("popup-fixture", "yes");
+        const storage = localStorage.getItem("popup-fixture");
+        localStorage.removeItem("popup-fixture");
+        return { noOpener: window.opener === null, origin: window.origin, storage };
+      }), { noOpener: true, origin: gatewayOrigin, storage: "yes" });
+      // The task sandbox does not grant allow-forms. A real form submission proves
+      // the popup has escaped its restrictions even in the cross-origin mode.
+      const beforeSubmit = requests.popupSubmitted;
+      await Promise.all([
+        popup.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 5000 }),
+        popup.click("#popup-submit"),
+      ]);
+      assert.equal(await popup.$eval("body", (body) => body.dataset.submitted), "yes");
+      assert.equal(requests.popupSubmitted, beforeSubmit + 1);
+      assert.equal(await popup.evaluate(() => window.opener === null), true);
+    } finally {
+      await popup.close();
+    }
+    assert.deepEqual(await isolation(), expectedIsolation, `${mode}: opening an independent player must not relax iframe isolation`);
+    popupModes.push(mode);
+  }
+  console.log("Independent popup clicks and retained iframe isolation: 2/2");
   await page.evaluate(() => window.setPage("hang"));
   await page.waitForSelector(".preview-error", { timeout: 20000 });
   assert.match(await page.$eval(".preview-error", (node) => node.textContent), /加载超时/);
@@ -95,7 +170,7 @@ try {
   assert.match(await page.$eval(".preview-error", (node) => node.textContent), /未建立通信/);
   assert.equal(await page.$(".preview-loading"), null);
   assert.deepEqual(consoleErrors, []);
-  console.log(JSON.stringify({ chrome: await browser.version(), normalHandshakes: 30, pendingNavigationTimeout: "passed", missingSdkTimeout: "passed", consoleErrors, requests }));
+  console.log(JSON.stringify({ chrome: await browser.version(), normalHandshakes: 30, independentPopupModes: popupModes, pendingNavigationTimeout: "passed", missingSdkTimeout: "passed", consoleErrors, requests }));
 } finally {
   await browser?.close();
   shell.closeAllConnections();

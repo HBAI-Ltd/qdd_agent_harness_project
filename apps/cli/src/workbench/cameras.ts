@@ -24,11 +24,12 @@ class CameraServiceError extends Error {
 }
 
 export class CameraLogin {
-  constructor(private readonly config: HarnessConfig) {}
+  constructor(private readonly config: HarnessConfig | (() => Readonly<HarnessConfig["mcpServers"]>)) {}
 
   /** mcpServers 中同名服务的地址；未配置返回 undefined。 */
   private origin(provider: CameraProvider): string | undefined {
-    const url = this.config.mcpServers[provider]?.url;
+    const servers = typeof this.config === "function" ? this.config() : this.config.mcpServers;
+    const url = servers[provider]?.url;
     return url ? new URL(url).origin : undefined;
   }
 

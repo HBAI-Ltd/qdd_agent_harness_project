@@ -11,7 +11,7 @@ import { ElRadioButton, ElRadioGroup } from "element-plus/es/components/radio/in
 import { ElSelect } from "element-plus/es/components/select/index";
 import { ElSkeleton } from "element-plus/es/components/skeleton/index";
 import { ElTag } from "element-plus/es/components/tag/index";
-import type { ConnectorCatalogEntry, ConnectorPermission, ConnectorView, FeishuConnectorInput } from "@qdd/shared";
+import type { ConnectorCatalogEntry, ConnectorPermission, ConnectorView, FeishuConnectorInput, LocalMcpConnectorInput, LocalMcpProvider } from "@qdd/shared";
 import AgentIcon from "@/components/AgentIcon.vue";
 import CameraLoginDialog from "@/components/CameraLoginDialog.vue";
 import * as cameraApi from "@/api/cameras";
@@ -80,6 +80,11 @@ const formOpen = ref(false);
 const editing = ref<ConnectorView>();
 const formBusy = ref(false);
 const formError = ref("");
+const installType = ref("feishu");
+const availableProviders = ref<NonNullable<ConnectorCatalogEntry["providers"]>>([]);
+const selectedProvider = ref<LocalMcpProvider | "">("");
+const mcpForm = computed(() => editing.value ? isMcp(editing.value) : installType.value === "pos" || installType.value === "camera");
+const formTitle = computed(() => editing.value ? `${editing.value.name} · 设置` : `安装${catalog.value.find((entry) => entry.type === installType.value)?.name ?? "连接器"}`);
 const form = reactive({
   name: "",
   mode: "webhook" as "webhook" | "app",
@@ -109,10 +114,22 @@ function configText(connector: ConnectorView, key: string): string {
   return typeof value === "string" ? value : "";
 }
 function modeLabel(connector: ConnectorView): string {
+  if (isMcp(connector)) return "本地 MCP";
   return configText(connector, "mode") === "app" ? "企业自建应用" : "群机器人 Webhook";
 }
-function permissionLabel(permission: ConnectorPermission, origin: ConnectorView["origin"]): string {
-  if (origin !== "installed") return permission === "auto" ? "允许自动写入" : permission === "confirm" ? "写入需确认" : "只查看数据";
+function isMcp(connector: ConnectorView): boolean {
+  return connector.origin === "mcp" || configText(connector, "mode") === "mcp";
+}
+function providerInstalled(provider: LocalMcpProvider): boolean {
+  return connectors.value.some((connector) => connector.id === `mcp:${provider}` || (isMcp(connector) && configText(connector, "provider") === provider));
+}
+function providerName(connector: ConnectorView): string {
+  const provider = configText(connector, "provider");
+  return catalog.value.flatMap((entry) => entry.providers ?? []).find((entry) => entry.id === provider)?.name ?? provider;
+}
+function permissionLabel(connector: ConnectorView): string {
+  const { permission, origin } = connector;
+  if (origin !== "installed" || isMcp(connector)) return permission === "auto" ? "允许自动操作" : permission === "confirm" ? "操作需确认" : "只查看数据";
   return permissions.find((entry) => entry.value === permission)?.label ?? permission;
 }
 function displayDate(value: string | null): string {
@@ -123,14 +140,15 @@ function displayDate(value: string | null): string {
     : date.toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 function canInstall(entry: ConnectorCatalogEntry): boolean {
-  // TODO: Add installation forms for other catalog types when their APIs become available.
-  return entry.available && entry.type === "feishu" && entry.modes.some((mode) => mode === "webhook" || mode === "app");
+  if (!entry.available) return false;
+  if (entry.type === "feishu") return entry.modes.some((mode) => mode === "webhook" || mode === "app");
+  return (entry.type === "pos" || entry.type === "camera") && entry.modes.includes("mcp") && !!entry.providers?.length;
 }
 function sendsVerificationMessage(connector: ConnectorView): boolean {
   return configText(connector, "mode") === "webhook" || !!configText(connector, "receiveId");
 }
 function canSendTest(connector: ConnectorView): boolean {
-  return connector.permission !== "read" && (configText(connector, "mode") === "webhook" || !!configText(connector, "receiveId"));
+  return !isMcp(connector) && connector.permission !== "read" && (configText(connector, "mode") === "webhook" || !!configText(connector, "receiveId"));
 }
 function resetSecrets() {
   form.webhookUrl = "";
@@ -154,6 +172,9 @@ function openInstall(entry: ConnectorCatalogEntry) {
   if (!connected.value || !canInstall(entry)) return;
   stopForm();
   editing.value = undefined;
+  installType.value = entry.type;
+  availableProviders.value = entry.providers ?? [];
+  selectedProvider.value = "";
   availableModes.value = entry.modes;
   Object.assign(form, {
     name: "",
@@ -173,6 +194,8 @@ function openEdit(connector: ConnectorView) {
   if (!connected.value || connector.origin !== "installed") return;
   stopForm();
   editing.value = connector;
+  installType.value = connector.type;
+  selectedProvider.value = "";
   Object.assign(form, {
     name: connector.name,
     permission: connector.permission,
@@ -195,6 +218,11 @@ function openAction(connector: ConnectorView, next: ConnectorAction) {
 }
 function validateForm(): string {
   if (editing.value && !form.name.trim()) return "请填写连接器名称。";
+  if (mcpForm.value) {
+    if (editing.value) return "";
+    if (!selectedProvider.value || !availableProviders.value.some((entry) => entry.id === selectedProvider.value)) return "请选择要接入的平台。";
+    return providerInstalled(selectedProvider.value) ? "这个平台已安装，请在工作空间连接器中管理。" : "";
+  }
   if (!editing.value && form.mode === "webhook") {
     try {
       const url = new URL(form.webhookUrl.trim());
@@ -238,11 +266,21 @@ async function saveConnector() {
         target.id,
         {
           name: form.name.trim(),
-          permission: form.permission,
-          ...(form.mode === "app" ? { receiveId: form.receiveId.trim(), receiveIdType: form.receiveIdType } : {}),
+          ...(!mcpForm.value ? {
+            permission: form.permission,
+            ...(form.mode === "app" ? { receiveId: form.receiveId.trim(), receiveIdType: form.receiveIdType } : {}),
+          } : {}),
         },
         controller.signal,
       );
+    } else if (mcpForm.value) {
+      const input: LocalMcpConnectorInput = {
+        type: installType.value === "pos" ? "pos" : "camera",
+        mode: "mcp",
+        provider: selectedProvider.value as LocalMcpProvider,
+        ...(form.name.trim() ? { name: form.name.trim() } : {}),
+      };
+      await api.installConnector(base, accessToken, input, controller.signal);
     } else {
       const input: FeishuConnectorInput = {
         type: "feishu",
@@ -398,13 +436,22 @@ onBeforeUnmount(() => {
             <div class="connector-tags">
               <ElTag type="info" size="small" effect="plain">{{ originLabels[connector.origin] }}</ElTag>
               <ElTag :type="connector.permission === 'auto' ? 'warning' : 'info'" size="small" effect="plain">
-                {{ permissionLabel(connector.permission, connector.origin) }}
+                {{ permissionLabel(connector) }}
               </ElTag>
               <ElTag v-if="connector.origin === 'installed'" type="info" size="small" effect="plain">{{ modeLabel(connector) }}</ElTag>
             </div>
             <p class="connector-detail">{{ connector.detail }}</p>
             <dl v-if="connector.origin === 'installed'" class="connector-config">
-              <template v-if="configText(connector, 'mode') === 'webhook'">
+              <template v-if="isMcp(connector)">
+                <dt>接入平台</dt>
+                <dd>{{ providerName(connector) }}</dd>
+                <dt>账号登录</dt>
+                <dd>
+                  <a v-if="configText(connector, 'consoleUrl')" :href="configText(connector, 'consoleUrl')" target="_blank" rel="noopener noreferrer">打开登录控制台</a>
+                  <span v-else>控制台地址不可用</span>
+                </dd>
+              </template>
+              <template v-else-if="configText(connector, 'mode') === 'webhook'">
                 <dt>Webhook</dt>
                 <dd>{{ configText(connector, "webhookUrl") || "地址不可用" }}</dd>
                 <dt>签名密钥</dt>
@@ -425,6 +472,7 @@ onBeforeUnmount(() => {
                 <ElButton link type="primary" @click="openEdit(connector)">设置</ElButton>
                 <ElButton link @click="openAction(connector, 'verify')">重新验证</ElButton>
                 <ElButton
+                  v-if="!isMcp(connector)"
                   link
                   :disabled="!canSendTest(connector)"
                   :title="canSendTest(connector) ? '向接收方发送测试消息' : '只查看权限或未设置接收方时不能推送'"
@@ -488,20 +536,41 @@ onBeforeUnmount(() => {
 
     <ElDialog
       v-model="formOpen"
-      :title="editing ? `${editing.name} · 设置` : '安装飞书连接器'"
+      :title="formTitle"
       width="min(620px, calc(100vw - 32px))"
       destroy-on-close>
       <ElAlert v-if="formError" :title="formError" type="error" show-icon :closable="false" />
       <ElAlert
-        v-if="!editing"
+        v-if="!editing && !mcpForm"
         title="安装前会验证连接：群机器人会发送一条验证消息；自建应用设置了接收方时也会发送。只查看权限同样会执行这次安装验证。"
+        type="info"
+        show-icon
+        :closable="false" />
+      <ElAlert
+        v-if="!editing && mcpForm"
+        title="选择平台后，点击“验证并安装”才会接入该平台。请先启动对应本地服务，安装完成后在登录控制台登录账号。"
         type="info"
         show-icon
         :closable="false" />
       <ElForm label-position="top" class="connector-form" :disabled="formBusy" @submit.prevent="saveConnector">
         <ElFormItem label="连接器名称">
-          <ElInput v-model="form.name" maxlength="30" placeholder="例如：门店经营通知群" autocomplete="off" />
+          <ElInput v-model="form.name" maxlength="30" :placeholder="mcpForm ? '选填，例如：门店摄像头' : '例如：门店经营通知群'" autocomplete="off" />
         </ElFormItem>
+        <template v-if="mcpForm">
+          <ElFormItem v-if="!editing" label="接入平台" required>
+            <ElSelect v-model="selectedProvider" aria-label="接入平台" :disabled="formBusy" class="recipient-select">
+              <StringSelectOption
+                v-for="provider in availableProviders"
+                :key="provider.id"
+                :value="provider.id"
+                :label="provider.name + (providerInstalled(provider.id) ? '（已安装）' : '')"
+                :disabled="providerInstalled(provider.id)" />
+            </ElSelect>
+          </ElFormItem>
+          <p class="form-note">{{ installType === 'pos' ? '收银系统只查看经营数据。' : '摄像头数据可查看；云台、截图、采集等操作需要店长确认。' }}</p>
+          <p v-if="editing" class="form-note">这里只修改名称。更换接入平台，请删除后重新安装。</p>
+        </template>
+        <template v-else>
         <ElFormItem label="接入方式">
           <ElTag v-if="editing" type="info" effect="plain">{{ modeLabel(editing) }}</ElTag>
           <ElRadioGroup v-else v-model="form.mode">
@@ -561,6 +630,7 @@ onBeforeUnmount(() => {
         </p>
         <p v-if="form.permission !== 'read'" class="form-note">为定时任务配置此通知接收方，即授权该任务在完成后推送结果，无需每次再次确认。</p>
         <p v-if="editing" class="form-note">这里只修改名称、推送权限与接收方。更换 Webhook 或应用凭据，请删除后重新安装。</p>
+        </template>
       </ElForm>
       <template #footer>
         <ElButton @click="formOpen = false">取消</ElButton>
@@ -578,11 +648,13 @@ onBeforeUnmount(() => {
       <template v-if="actionTarget">
         <p class="action-target">{{ actionTarget.name }}</p>
         <ElAlert v-if="actionError" :title="actionError" type="error" show-icon :closable="false" />
-        <p v-if="action === 'delete'" class="form-note">删除后将停止通过此连接器推送。若有定时任务正在使用，请先修改对应任务的通知设置。</p>
+        <p v-if="action === 'delete'" class="form-note">{{ isMcp(actionTarget) ? '删除后将停止此服务，助手不再通过此连接器访问门店数据或设备。' : '删除后将停止通过此连接器推送。若有定时任务正在使用，请先修改对应任务的通知设置。' }}</p>
         <template v-else-if="action === 'verify'">
           <ElAlert
             :title="
-              sendsVerificationMessage(actionTarget)
+              isMcp(actionTarget)
+                ? '检查本地服务与 MCP 工具是否可用；账号登录请在该平台的登录控制台完成。'
+                : sendsVerificationMessage(actionTarget)
                 ? '重新验证会向机器人或已配置的接收方发送一条验证消息，即使权限是只查看。'
                 : '本次验证应用凭据与机器人信息；尚未配置接收方，不会推送消息。'
             "

@@ -26,7 +26,7 @@ Aidol 创造营参赛项目——钱多多门店人工智能助手：店铺管�
 ### 页面如何取数
 
 - `qdd.tool(name, args)`：页面直连只读数据工具，不经过 agent。agent 发布时必须声明页面用到的工具，网关按页面 token 校验，未声明的一律 403。
-- `qdd.ask(question, context)`：需要 agent 能力时使用（只读工具），页面需声明 `useAgent`。
+- `qdd.ask(question, context, optionsOrOnEvent)`：需要 agent 能力时使用（只读工具），页面需声明 `useAgent`。第三参数可传进度回调，或 `{ images: [{ url, detail? }], onEvent? }`；支持 Base64 data URL 和 HTTPS 图片 URL，沿用当前模型配置（需支持视觉），限制及示例见 [图片问答](docs/api.md#图片问答)。
 - `snapshot_data` 生成的 `data/*.js`：实时数据不可用时的兜底。
 
 ### 连续状态与聚合（零 SQL）
@@ -47,7 +47,7 @@ Aidol 创造营参赛项目——钱多多门店人工智能助手：店铺管�
 - **鉴权**：所有 API 需网关 token；页面只拿到自己的页面级 token（HMAC 派生），无法访问会话、设置或其它工具。
 - **写入沙箱**：agent 只能写当前页面目录下的静态文件；`data/` 只能由 harness 快照生成。
 - **零后端守卫**（`guard.ts`）：拒绝 fetch/XHR/WebSocket/表单提交/eval、SQL 与浏览器 SQL 引擎、云后端、服务端代码、非白名单域名。
-- **草稿 + 原子发布**，失败不留半成品；页面带 CSP，只能连回网关。
+- **草稿 + 原子发布**，失败不留半成品；页面带 CSP，默认只能连回网关，播放器可使用显式配置的视频源。
 - **写入类数据工具**：不开放直接调用；只能在许愿会话里由 agent 发起，并等店长通过 `approval_required` 授权（终端或前端），配置 `allowWrite: true` 才免确认。
 
 ### 工作台：技能、定时任务、连接器
@@ -56,7 +56,7 @@ Aidol 创造营参赛项目——钱多多门店人工智能助手：店铺管�
 - **技能**（`workspace/skills/`）：可复用的做事方法；agent 可从对话中 `save_skill`（需店长确认）、`load_skill`。
 - **定时任务**（`workspace/schedules.json`）：5 段 cron，网关内调度；到点无人值守执行（可绑定技能、在页面上刷新），结论推送到连接器；停机错过的执行会补跑。店长说「每天 9 点…」时 agent 可用 `create_schedule` 直接创建（需店长确认）；定时执行中的推送若需确认会进入工作台待办，可用于「店长确认后再发」。
 - **记录数据集**（`records/<name>`）：试吃报损、临期处置回填、巡检等逐条登记的数据。agent 用 `define_record` 提出结构（需店长确认），页面用 `qdd.records.add/update/remove/list` 读写，网关按结构校验并只允许页面访问代码中用到的记录；修改按 id 覆盖、作废写墓碑，`store__aggregate` 可直接汇总（计数指标 `records`）。
-- **连接器**（`workspace/connectors.json`）：目前开放飞书（群机器人 webhook / 企业自建应用），安装前先验证，凭据加密存储；agent 用 `send_notification` 推送（按连接器权限需店长确认）。
+- **连接器**（`workspace/connectors.json`）：在连接器页由用户选择安装飞书、收银系统（收钱吧）或门店摄像头（海康互联、天翼视联、萤石），默认不安装任何厂商。安装前先验证本地服务；选择保存后立即加载相应工具，删除后撤销，重启后保留用户选择。飞书凭据加密存储；agent 用 `send_notification` 推送（按连接器权限需店长确认）。
 
 ### 浏览器
 
@@ -80,7 +80,35 @@ npm run qdd -- token                                     # 查看网关 token，
 
 另开终端运行 `npm run dev:web`，打开 `http://127.0.0.1:5177`。
 前端默认地址会跟随后端的 `HOST`、`PORT` 配置；若浏览器保留旧地址，在设置中点击「使用配置地址」。
-`gateway.corsOrigins` 必须包含当前前端来源。没有 MCP 服务时，可只保留该网关配置并移除示例 `erp` 项。
+`gateway.corsOrigins` 必须包含当前前端来源。默认 `mcpServers` 为 `{}`。先按 [mcp/README.md](mcp/README.md) 启动所需本地服务，再在工作台连接器页选择平台并点击「验证并安装」。启动 MCP 服务只让它可用，不会自动安装连接器。`mcpServers` 仍可配置自定义 MCP；四个内置厂商的同名配置只覆盖连接地址和鉴权，实际启用取决于用户的安装选择。
+
+安装收钱吧后，后端默认读取 `mcp/.local/shouqianba/mcp-key`；该密钥由本地服务生成，无需复制到表单或 `.env`。自定义 MCP 可用 `bearerTokenFile` 或 `bearerTokenEnv` 指定鉴权来源，两者只能配置一个；文件相对路径基于项目根目录。密钥文件与厂商会话位于 Git 忽略的 `mcp/.local/`，不要提交。安装与账号登录分别进行，商户或摄像头账号仍需在各自本地控制台完成登录。
+
+任务内视频播放器需要跨源取流时，在 `mediaOrigins` 填写视频地址的 HTTPS origin，例如 `"mediaOrigins": ["https://stream.example.com:8443"]`。要允许所有视频来源，显式设置 `"mediaOrigins": ["*"]`：播放器连接允许任意 HTTP、HTTPS、WS、WSS 来源，媒体允许任意 HTTP、HTTPS、blob 和 data 来源。默认仍为空数组，也可继续使用精确来源和端口；`"*"` 必须单独使用，不接受 `https://*.example.com`、签名路径、查询参数、凭据或指令注入。
+
+修改 `mediaOrigins` 后重新加载任务页面即可生效，网关会在每次加载 HTML 时读取最新配置。页面业务代码仍禁止直接 fetch、XHR、WebSocket 和表单提交。播放器可使用 blob 媒体及本地/blob worker；非空 `mediaOrigins` 允许 WASM 解码，不开启 JavaScript eval，也不会把媒体来源加入脚本或 iframe 白名单。
+
+海康 FLV/H.265 播放器与解码器通过 `/assets/camera-player/` 同源提供，包含官方 `ezuikit-flv` 的脚本、样式、WASM 和许可证。无需在任务页面复制临时签名地址或加载其他解码服务。资源及配置热更新测试位于 `apps/cli/src/camera-player-assets.test.ts`；真实浏览器合成视频回归运行 `node scripts/test-camera-player-browser.mjs`。
+
+视频 CSP 专项测试位于 `apps/cli/src/media-csp.test.ts`；构建后运行 `node --test apps/cli/dist/media-csp.test.js`，验证默认隔离、精确来源和端口、注入拒绝及业务请求守卫，不连接摄像头。
+
+### 监控推流播放器
+
+Agent 的白名单播放器规范支持在任务 iframe 内生成监控播放页面，无需嵌入外部播放器站点：
+
+| 格式 | 播放方案 |
+| --- | --- |
+| HTTP-FLV | 已安装的 `ezuikit-flv@2.1.1`，通过同源 `/assets/camera-player/index.js`、`style.css`、`decoder.js` / `decoder.wasm` 提供 |
+| HLS | 优先原生 video；否则使用 `https://cdn.jsdelivr.net/npm/hls.js@1.7.3/dist/hls.min.js`，须保留该 CDN 域名在白名单中 |
+| RTMP / RTMPS / RTSP | 浏览器不能直接播放；页面明确提示提供转流后的 HLS / HTTP-FLV 地址。本项目不新增转流服务，也不通过替换 URL 协议伪造播放地址 |
+
+播放器的内部取流不等于允许页面业务代码直接联网。视频地址通过已授权的 `qdd.tool` 获取，或由用户在页面输入；不要把签名地址写死在页面中，也不要为视频域名授予脚本 CDN 权限。跨源媒体需要配置上述 `mediaOrigins`，并由媒体服务提供 CORS；HLS 清单、分片、密钥和重定向来源都必须允许。HTTPS 页面仍受浏览器混合内容限制。
+
+FLV 使用同源解码器；HLS 使用 `enableWorker: false`，避免被 CSP 拦截的 CDN worker。Agent 规范要求点击播放、失败提示、手动重试、切换/离页释放资源，以及 RTMP 转流提示；不承诺所有编码、有声自动播放或全屏可用。可许愿：“生成监控页面，通过已授权工具获取 HTTP-FLV 或 HLS 地址，在任务 iframe 播放；仅有 RTMP 时提示需要转流。”
+
+规范与守卫回归：[camera-player-prompt.test.ts](apps/cli/src/agent/camera-player-prompt.test.ts)，构建后运行 `node --test apps/cli/dist/agent/camera-player-prompt.test.js apps/cli/dist/media-csp.test.js`。实际 iframe FLV 播放回归运行 `node scripts/test-camera-player-browser.mjs`，需要本机 Chrome/Edge 和 FFmpeg（可通过 `CHROME_PATH` / `FFMPEG_PATH` 指定），仅使用合成视频，不连接真实摄像头。
+
+MCP 鉴权专项测试位于 `apps/cli/src/datasource/mcp-auth.test.ts`；构建后运行 `node --test apps/cli/dist/datasource/mcp-auth.test.js`，验证密钥文件读取、会话重连和环境变量兼容性，不连接厂商服务。
 
 终端也可直接许愿，会话与前端共享：
 

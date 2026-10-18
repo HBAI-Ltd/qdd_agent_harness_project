@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import AgentIcon from "@/components/AgentIcon.vue";
+import ChatMedia from "@/components/ChatMedia.vue";
+import { mediaKind } from "@/utils/media";
 import { formatSize } from "@/composables/useComposer";
 
 export interface AttachmentItem {
@@ -11,10 +13,15 @@ export interface AttachmentItem {
   error?: string;
   /** 已上传的附件 id，可下载 */
   id?: string;
+  mime?: string;
 }
 
-const props = defineProps<{ items: AttachmentItem[]; removable?: boolean }>();
+const props = defineProps<{ items: AttachmentItem[]; removable?: boolean; gatewayUrl?: string; token?: string }>();
 const emit = defineEmits<{ remove: [key: string]; removeFolder: [folder: string]; open: [item: AttachmentItem] }>();
+const media = computed(() => props.items.flatMap((item) => {
+  const kind = mediaKind(item.path, item.mime);
+  return kind && item.id && item.status !== "uploading" && item.status !== "error" ? [{ item, kind }] : [];
+}));
 
 type Group =
   | { kind: "file"; key: string; item: AttachmentItem }
@@ -51,28 +58,32 @@ function fileTitle(item: AttachmentItem): string {
 </script>
 
 <template>
-  <ul v-if="items.length" class="attachment-list">
-    <li v-for="group in groups" :key="group.key" class="attachment-chip" :data-status="group.kind === 'file' ? group.item.status : group.failed ? 'error' : group.uploading ? 'uploading' : 'done'">
-      <template v-if="group.kind === 'file'">
-        <button type="button" class="attachment-main" :title="fileTitle(group.item)" :disabled="!group.item.id" @click="emit('open', group.item)">
-          <AgentIcon name="file" :size="16" />
-          <span class="attachment-name">{{ group.item.path }}</span>
-          <span class="attachment-meta">{{ group.item.status === "uploading" ? "上传中…" : group.item.status === "error" ? (group.item.error || "失败") : formatSize(group.item.size) }}</span>
-        </button>
-        <button v-if="removable" type="button" class="attachment-remove" aria-label="移除附件" @click="emit('remove', group.item.key)"><AgentIcon name="close" :size="12" /></button>
-      </template>
-      <template v-else>
-        <span class="attachment-main" :title="group.name">
-          <AgentIcon name="folder" :size="16" />
-          <span class="attachment-name">{{ group.name }}</span>
-          <span class="attachment-meta">
-            {{ group.count }} 个文件 · {{ formatSize(group.size) }}<template v-if="group.uploading"> · 上传中 {{ group.uploading }}</template><template v-if="group.failed"> · 失败 {{ group.failed }}</template>
+  <div v-if="items.length" class="attachments">
+    <ul class="attachment-list">
+      <li v-for="group in groups" :key="group.key" class="attachment-chip" :data-status="group.kind === 'file' ? group.item.status : group.failed ? 'error' : group.uploading ? 'uploading' : 'done'">
+        <template v-if="group.kind === 'file'">
+          <button type="button" class="attachment-main" :title="fileTitle(group.item)" :disabled="!group.item.id" @click="emit('open', group.item)">
+            <AgentIcon name="file" :size="16" />
+            <span class="attachment-name">{{ group.item.path }}</span>
+            <span class="attachment-meta">{{ group.item.status === "uploading" ? "上传中…" : group.item.status === "error" ? (group.item.error || "失败") : formatSize(group.item.size) }}</span>
+          </button>
+          <button v-if="removable" type="button" class="attachment-remove" aria-label="移除附件" @click="emit('remove', group.item.key)"><AgentIcon name="close" :size="12" /></button>
+        </template>
+        <template v-else>
+          <span class="attachment-main" :title="group.name">
+            <AgentIcon name="folder" :size="16" />
+            <span class="attachment-name">{{ group.name }}</span>
+            <span class="attachment-meta">
+              {{ group.count }} 个文件 · {{ formatSize(group.size) }}<template v-if="group.uploading"> · 上传中 {{ group.uploading }}</template><template v-if="group.failed"> · 失败 {{ group.failed }}</template>
+            </span>
           </span>
-        </span>
-        <button v-if="removable" type="button" class="attachment-remove" aria-label="移除文件夹" @click="emit('removeFolder', group.name)"><AgentIcon name="close" :size="12" /></button>
-      </template>
-    </li>
-  </ul>
+          <button v-if="removable" type="button" class="attachment-remove" aria-label="移除文件夹" @click="emit('removeFolder', group.name)"><AgentIcon name="close" :size="12" /></button>
+        </template>
+      </li>
+    </ul>
+    <ChatMedia v-for="{ item, kind } in media" :key="item.key" :attachment-id="item.id" :label="item.path"
+      :kind="kind" :gateway-url="gatewayUrl" :token="token" />
+  </div>
 </template>
 
 <style scoped>

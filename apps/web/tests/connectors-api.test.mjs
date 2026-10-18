@@ -62,6 +62,18 @@ test("webhook and app installation preserve distinct credentials and permissions
   }
 });
 
+test("local MCP installation sends only the selected platform and preserves managed console metadata", async () => {
+  const managed = { ...connector, id: "mcp:ezviz", type: "camera", config: { mode: "mcp", provider: "ezviz", consoleUrl: "http://127.0.0.1:8791/" } };
+  const calls = fixture(managed, 201);
+  const signal = new AbortController().signal;
+  const camera = { type: "camera", mode: "mcp", provider: "ezviz" };
+  const pos = { type: "pos", mode: "mcp", provider: "shouqianba", name: "门店收银" };
+  assert.deepEqual(await api.installConnector(base, token, camera, signal), managed);
+  await api.installConnector(base, token, pos, signal);
+  assert.deepEqual(calls.map((call) => JSON.parse(call.init.body)), [camera, pos]);
+  assert.ok(calls.every((call) => call.url === base + "/api/connectors" && call.init.method === "POST" && call.init.signal === signal));
+});
+
 test("editing app recipients pairs receiveId and receiveIdType and never sends stored credentials", async () => {
   const calls = fixture(connector);
   const signal = new AbortController().signal;

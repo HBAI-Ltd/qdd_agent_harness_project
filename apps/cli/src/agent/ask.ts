@@ -1,4 +1,4 @@
-import type { JsonObject } from "@qdd/shared";
+import type { AskImage, JsonObject } from "@qdd/shared";
 import type { DataSources } from "../datasource/registry.js";
 import { formatDate } from "../datasource/store.js";
 import type { ChatFn, ChatMessage, LlmTool } from "./llm.js";
@@ -14,6 +14,7 @@ export async function runAsk(
   context: unknown,
   onTool: (text: string) => void,
   signal?: AbortSignal,
+  images: AskImage[] = [],
 ): Promise<string> {
   const readOnly = sources.tools.filter((t) => !t.mutating);
   const tools: LlmTool[] = readOnly.map((t) => ({
@@ -28,6 +29,7 @@ export async function runAsk(
     {
       role: "user",
       content: context === undefined ? question : `${question}\n\n页面提供的上下文：\n${JSON.stringify(context).slice(0, 20_000)}`,
+      ...(images.length ? { images } : {}),
     },
   ];
 

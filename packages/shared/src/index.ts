@@ -18,6 +18,8 @@ export interface McpServerConfig {
   url: string;
   /** 存放 Bearer token 的环境变量名；token 不写进配置文件。 */
   bearerTokenEnv?: string;
+  /** 每次连接时读取的 Bearer token 文件；相对路径基于项目根目录，与 bearerTokenEnv 二选一。 */
+  bearerTokenFile?: string;
   headers?: Record<string, string>;
   /** 只暴露名称匹配的工具（支持 * 通配）；缺省为全部。 */
   allowTools?: string[];
@@ -100,6 +102,8 @@ export interface HarnessConfig {
   };
   /** 页面允许引用的在线包域名。 */
   cdnAllowlist: string[];
+  /** 页面播放器允许连接的 HTTPS origin（可含端口）；["*"] 显式允许所有 HTTP/HTTPS 视频源，默认空。 */
+  mediaOrigins?: string[];
   mcpServers: Record<string, McpServerConfig>;
   datasets: {
     /** 网关后台增量刷新数据集的间隔（秒），0 为不自动刷新。 */
@@ -379,9 +383,16 @@ export interface ApprovalBody {
   approved: boolean;
 }
 
+export interface AskImage {
+  /** Base64 image data URL or an HTTPS URL accessible to the model provider. */
+  url: string;
+  detail?: "auto" | "low" | "high";
+}
+
 export interface AskBody {
   question: string;
   context?: unknown;
+  images?: AskImage[];
 }
 
 export interface ToolInfo extends ToolSpec {
@@ -500,7 +511,9 @@ export interface ScheduleInput {
 
 // ---------------------------------------------------------------- 连接器
 
-export type ConnectorType = "feishu";
+export type ConnectorType = "feishu" | "pos" | "camera";
+
+export type LocalMcpProvider = "haik" | "tysl" | "ezviz" | "shouqianba";
 
 /** read：只查看数据；confirm：写入/推送需店长逐次确认；auto：无需确认。 */
 export type ConnectorPermission = "read" | "confirm" | "auto";
@@ -516,6 +529,8 @@ export interface ConnectorCatalogEntry {
   available: boolean;
   /** 安装方式，如 webhook / app / mcp */
   modes: string[];
+  /** 本地 MCP 接入平台，由用户选择并确认后才安装。 */
+  providers?: { id: LocalMcpProvider; name: string }[];
 }
 
 export interface FeishuConnectorInput {
@@ -533,7 +548,14 @@ export interface FeishuConnectorInput {
   receiveIdType?: "chat_id" | "open_id" | "user_id" | "union_id" | "email";
 }
 
-export type ConnectorInput = FeishuConnectorInput;
+export interface LocalMcpConnectorInput {
+  type: "pos" | "camera";
+  mode: "mcp";
+  provider: LocalMcpProvider;
+  name?: string;
+}
+
+export type ConnectorInput = FeishuConnectorInput | LocalMcpConnectorInput;
 
 /** 返回给前端的连接器：密钥只给是否已设置，不回传明文。 */
 export interface ConnectorView {

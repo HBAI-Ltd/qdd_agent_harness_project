@@ -167,10 +167,12 @@ if not sc:
 | 鼠标按钮**按住** | ✅ 通过 `android_mouse_move(buttons=…)` |
 | 键盘单键/组合 | ✅ `android_key` |
 | 键盘**长按** | ✅ 仅 `android_key_report` + `keycode=0` 释放 |
-| 文本输入 | ✅ `android_type`，**仅 US ASCII**；中文会被拒 |
+| 文本输入 | ✅ `android_type` 支持英文及中文；中文经新版 ESP 加密 BLE 文本通道 + 手机 QDD 输入法输入 |
 | 字符重复 | v2 已明显改善，但仍需**回读输入框校验** |
 
-> 中文输入：`android_type` 拒绝非 ASCII。走「屏内输入法逐字」或「手写笔画」，不要硬试。
+> 中文输入：先确认配套新版 ESP 固件、手机投屏 App 和 QDD 输入法已就绪，用户已启用并选择 QDD 输入法，且目标可编辑输入框已聚焦。直接调用 `android_type({text:"淮北采耳店"})` 或 `android_control({action:"type",text:"淮北采耳店"})`，不再默认改用拼音或手写。非 ASCII 文本须为合法 UTF-8、无 NUL，整串最多 512 字节（不是 512 个汉字）。
+>
+> `textTransfer.status:"accepted"` 只代表手机输入 API 接受，仍须重新截图回读目标输入框；`uncertain`、超时或断线时先观察，禁止自动重发。缺少固件/IME 或焦点时按实际错误处理，不把它判断为“不支持中文”，也不擅自回退到 ADB 或网络远程输入。
 
 ---
 

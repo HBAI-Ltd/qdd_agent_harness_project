@@ -30,6 +30,8 @@ SOURCE_DIRS = {
 FIXTURES = (
     "tests/fixtures/jpeg.mjs", "tests/fixtures/loopback-test-only.pem",
     "tests/fixtures/loopback-test-only.pfx", "tests/fixtures/README.md",
+    "tools/fixtures/operator-text-cases.js",
+    "tools/fixtures/operator-recovery-cases.js",
 )
 SUPPORT_FILES = ("apps/android-mcp/src/fixtures/jpeg.ts", "apps/android-mcp/src/http.ts",
                  "apps/android-mcp/tests/operator.test.mjs", "apps/android-mcp/tests/screen-channel.test.mjs")

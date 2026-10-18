@@ -24,8 +24,8 @@ the port, and saving requires complete SHA-256 verification.
 Boards with an `assets` partition continue to use that resource exclusively.
 An existing corrupt partition fails explicitly. Boards without `assets`, such
 as the current COM5 factory layout, use a verified ZIP embedded in application
-Flash. `tools/prepare_desktop_zip.py` verifies the v50 manifest, ZIP contents and
-extracted EXE identity. The fallback adds 943,153 Flash bytes, reuses the 2 KiB
+Flash. `tools/prepare_desktop_zip.py` verifies the v59 manifest, ZIP contents and
+extracted EXE identity. The fallback embeds the ZIP size recorded in that manifest, reuses the 2 KiB
 read/hash buffer, and does not repartition or load the entire ZIP into RAM.
 The application must still fit the actual target app partition.
 
@@ -116,10 +116,10 @@ From `apps/esp`, use an independently read, MD5-validated target partition
 table and the final Rust build manifest:
 
 ```powershell
-$driverManifest = Get-Content -LiteralPath ../android-mcp-rust/build/windows/v47/manifest.json -Raw | ConvertFrom-Json
-$driverZip = (Resolve-Path -LiteralPath (Join-Path ../android-mcp-rust/build/windows/v47 ([IO.Path]::ChangeExtension($driverManifest.executable, '.zip')))).Path
-python tools/pack_download_assets.py create --zip $driverZip --exe-manifest ../android-mcp-rust/build/windows/v47/manifest.json --partition-table build/target-partition-table.bin --output build/driver-assets.bin
-python tools/pack_download_assets.py verify --exe-manifest ../android-mcp-rust/build/windows/v47/manifest.json --partition-table build/target-partition-table.bin --output build/driver-assets.bin
+$driverManifest = Get-Content -LiteralPath ../android-mcp-rust/build/windows/v59/manifest.json -Raw | ConvertFrom-Json
+$driverZip = (Resolve-Path -LiteralPath (Join-Path ../android-mcp-rust/build/windows/v59 ([IO.Path]::ChangeExtension($driverManifest.executable, '.zip')))).Path
+python tools/pack_download_assets.py create --zip $driverZip --exe-manifest ../android-mcp-rust/build/windows/v59/manifest.json --partition-table build/target-partition-table.bin --output build/driver-assets.bin
+python tools/pack_download_assets.py verify --exe-manifest ../android-mcp-rust/build/windows/v59/manifest.json --partition-table build/target-partition-table.bin --output build/driver-assets.bin
 ```
 
 `create --exe <path>` remains available for v1; `--exe` and `--zip` are mutually

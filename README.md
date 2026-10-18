@@ -1,188 +1,471 @@
-# qdd_agent_harness_project
+# 钱多多 · 门店 AI 智能助手
 
-Aidol 创造营参赛项目——钱多多门店人工智能助手：店铺管理 harness。
+**接上门店的系统和设备，让 AI 帮你看店、算账、出报表。**
 
-监控与经营数据的独立 MCP 连接器位于 [mcp/](mcp/README.md)，包含海康互联、天翼视联、萤石与收钱吧的源码、配置示例及运行说明。
+Aidol 创造营黑客松 **AI 设备联动赛道**参赛项目。钱多多把收银数据、摄像头、浏览器和门店手机连接到同一个 AI 工作台：店长用自然语言提出目标，助手调用工具取数、理解画面、生成经营页面，并把重复流程保存为技能和定时任务。
 
-本仓库包含 **harness**（数据源 + agent + 网关）与 Vue / Element Plus 工作台前端。前端使用 [docs/api.md](docs/api.md) 中的接口，启动和界面说明见 [apps/web/README.md](apps/web/README.md)。
+这个仓库包含实际的工作台、Agent 网关、MCP 连接器、Android 投屏 App、Rust 设备操作台和 ESP32-C3 控制固件。可以先启动纯软件工作台，再按需要接入真实门店系统与硬件。
 
-店长许愿 → agent 通过数据源取数 → 生成**零后端、零 SQL** 的静态页面 → 页面运行时经网关**直连**数据工具，只在需要时调用 agent。
+[参赛交付材料](#参赛交付材料) · [产品开发说明书](docs/product-development.md) · [设备实物](#设备实物与复现清单) · [快速部署](#快速部署) · [图解硬件安装](#手机与硬件接入) · [完整部署指南](docs/deployment.md)
 
-## 架构
+![钱多多：接上门店的系统和设备](docs/assets/hackathon/store-intro.jpg)
 
-| 层 | 位置 | 职责 |
+## 为什么做钱多多
+
+门店已经有收银系统、监控和各种手机 App，但一次经营判断仍需要店长在多个系统之间来回切换：查交易、看现场、核对库存，再手工整理成报表。系统各自有数据，重复工作仍靠人衔接。
+
+我们希望复用门店现有设备与应用，把这些能力变成 AI 可以组合调用的工具，让店长直接说出要完成的事。
+
+| 店长要做的事 | 钱多多的处理方式 |
+| --- | --- |
+| “帮我看看昨天生意怎么样。” | 查询已接入的收银数据，按时间和可用指标汇总，解释数据来源与统计范围 |
+| “看看这几个摄像头，现场有什么需要关注的？” | 获取授权画面，交给支持视觉的模型分析，保留继续追问与取图的能力 |
+| “把这些数据做成一个我每天能看的页面。” | 生成可交互的经营页面，通过同一网关调用已授权的数据工具 |
+| “以后每天早上做一遍，发到飞书。” | 保存流程、创建定时任务，保留独立执行记录并按连接器配置推送 |
+| “这个 App 没有接口，帮我在门店手机上操作。” | 通过配套投屏 App 观察界面，由 AI Passport 发送蓝牙鼠标、键盘输入 |
+
+库存、损耗、ERP 等分析需要相应的业务附件或自定义数据源。新部署不会自动填入模拟门店数据。
+
+## 项目特点
+
+- **一套工作台连接多种能力**：对话、任务页面、技能、定时任务、连接器和执行记录放在一起。
+- **两条接入路径**：有可用数据能力的系统通过 MCP 接入；需要界面操作的手机应用通过投屏与蓝牙 HID 接入。
+- **按需生成经营工具**：生成的页面无需另写业务后端或 SQL，复用网关、共享计算引擎和已授权工具。
+- **从一次任务变成重复流程**：先对齐对象、时间与口径，再把确认过的做法保存为技能或日程。
+- **软件与硬件可分开部署**：查看工作台不需要编译固件；需要手机操作时再部署 App、设备操作台和控制板。
+
+## 参赛交付材料
+
+评委可以先阅读[产品开发说明书](docs/product-development.md)，再按下方七步启动软件，按需复现设备联动。说明书按赛事第 7.5 节整理了概述、元器件、端云架构、接线与结构、代码、安全、限制、视频与过程照片，并包含设备协议和联动前后对比。
+
+| 材料 | 当前入口 / 状态 |
+| --- | --- |
+| 软件与固件源码 | 本仓库；构建环境和命令见[部署指南](docs/deployment.md) |
+| 产品开发说明书 | [docs/product-development.md](docs/product-development.md) |
+| 设备清单、接入协议、改造前后对比 | 已列入说明书；实际数量、赛前已有、部分来源与结构改造情况待团队确认 |
+| 产品介绍视频 | [product-demo.mp4](docs/assets/hackathon/product-demo.mp4)；目前按产品介绍素材标注 |
+| 完整实机联动视频 | 待补充最终演示版本及关键片段时间点 |
+| 实物 / 过程照片 | 三张设备照片见下方；各关卡过程照片与结果待补充 |
+
+## 设备实物与复现清单
+
+以下三张是本次参赛原型的实物照片。电脑运行工作台和设备操作台；控制板负责蓝牙输入，手机负责运行目标 App 和投屏，摄像头负责提供门店现场画面。
+
+### FoloToy AI Passport：手机键鼠控制板
+
+![参赛设备实物：FoloToy AI Passport 控制板](docs/assets/hackathon/passport.jpg)
+
+采用 ESP32-C3、8 MB Flash、无 PSRAM。控制板通过 Wi-Fi 或 USB 接收电脑指令，再通过蓝牙 HID 向手机发送鼠标与键盘输入；板上提供 Wi-Fi 配置、安装引导和按键输入锁定。板上“急停”释放并锁定输入，不切断供电。
+
+### OnePlus 8：运行目标 App 与设备投屏
+
+![参赛设备实物：OnePlus 8 Android 手机](docs/assets/hackathon/phone.jpg)
+
+参赛原型使用 OnePlus 8 / Android 13。手机安装本仓库的「设备投屏」App，将画面通过局域网传回电脑，并与 AI Passport 配对。App 支持 Android 8+，其他机型需自行验证配对、投屏和指针校准。
+
+### 海康摄像头：获取门店现场画面
+
+![参赛设备实物：海康门店摄像头](docs/assets/hackathon/camera.jpg)
+
+场内设备为海康 HK-Q3S4LW-GL/L，通过 20 AI DOL 币兑换获得。摄像头通过对应平台连接器提供授权画面，与手机控制链路分别接入工作台。
+
+| 准备项 | 本次原型 / 环境要求 | 用途 |
 | --- | --- | --- |
-| 数据源 | `apps/cli/src/datasource/` | 内置门店工具 `store__*`（只读）+ 远程 MCP 服务 `mcp__<服务>__*`（Streamable HTTP，Bearer 鉴权） |
-| Agent | `apps/cli/src/agent/` | 许愿：取数 → 写页面 → 审查发布；续聊；页面运行时的只读问答 `qdd.ask` |
-| 网关 | `apps/cli/src/gateway/` | 前端唯一出口：会话/页面/设置 API、SSE 事件、页面托管与 SDK 注入、`/mcp` 端点 |
-| 工作台前端 | `apps/web/` | 对话与提问授权、任务页面、技能、定时任务、连接器和工作台总览 |
-| 数据集 | `apps/cli/src/datasets/` | `DatasetStore` 接口 + JSONL 实现：按天分区的只追加日志、检查点、主键去重、跨进程锁、增量刷新 |
-| 计算引擎 | `packages/shared/src/compute.ts` | 零 SQL 声明式聚合 / 时间线回放 / 状态区间 / 关联；数据源侧与浏览器共用同一份代码 |
-| 会话 | `apps/cli/src/sessions.ts` | 普通对话存于 `workspace/sessions/`，定时执行对话存于 `workspace/schedule-sessions/`；终端与前端共享 |
-| 手机投屏 App | `apps/android-screen/` | 安卓 MediaProjection 内网连续投屏，带系统授权与停止通知 |
-| 安卓设备 MCP | `apps/android-mcp/` | 连续接收手机画面，提供电脑鼠标键盘遥控和视觉 MCP；通过 Wi-Fi 或 USB 连接 ESP32，再由 BLE HID 控制安卓 |
-| 硬件桥接 | `apps/esp/` | AI Passport ESP32-C3 的蓝牙键鼠、实体停止、中文界面和板上 Wi-Fi 密码键盘 |
+| Windows 电脑 | Windows 10 / 11；设备操作台交付程序为 Windows x64 | 运行工作台、网关、本地连接器和设备操作台 |
+| AI Passport | FoloToy AI Passport，ESP32-C3、8 MB Flash | 复现手机蓝牙键鼠控制；其他开发板不能直接使用此固件 |
+| Android 手机 | 参赛使用 OnePlus 8 / Android 13，需蓝牙与 Wi-Fi | 安装投屏 App、运行被操作的应用 |
+| 摄像头与平台账号 | 使用已适配平台且当前账号有权访问的设备 | 复现取图和视觉分析；纯软件与手机演示可分别进行 |
+| USB 数据线 | 控制板供电与首次烧录需要；USB 控制时保持连接电脑 | 固件写入、供电和可选 USB 通信 |
+| 局域网 | 控制板使用 2.4 GHz Wi-Fi；电脑、手机与控制板相互可达 | 安装包下载、设备发现、手机投屏；关闭 AP 客户端隔离 |
+| 互联网与模型 Key | 可访问 npm、工具链下载源、模型服务及所用厂商平台 | 首次安装依赖、模型推理和云端数据接入 |
 
-### 页面如何取数
+## 评委复现路线
 
-- `qdd.tool(name, args)`：页面直连只读数据工具，不经过 agent。agent 发布时必须声明页面用到的工具，网关按页面 token 校验，未声明的一律 403。
-- `qdd.ask(question, context, optionsOrOnEvent)`：需要 agent 能力时使用（只读工具），页面需声明 `useAgent`。第三参数可传进度回调，或 `{ images: [{ url, detail? }], onEvent? }`；支持 Base64 data URL 和 HTTPS 图片 URL，默认所有模型支持图片识别，沿用当前模型配置，限制及示例见 [图片问答](docs/api.md#图片问答)。
-- `snapshot_data` 生成的 `data/*.js`：实时数据不可用时的兜底。
+建议依次完成下表中的阶段。软件工作台可先复现，再根据手头设备增加真实数据与手机操作。
 
-### 连续状态与聚合（零 SQL）
+| 阶段 | 需要准备 | 按哪里操作 | 成功标志 |
+| --- | --- | --- | --- |
+| 1. 启动软件 | Windows 电脑、Git、Node/npm、自己的模型 Key | 下方[快速部署](#快速部署)步骤 1～6 | `/health` 返回 `status: "ok"`，工作台连接成功，对话收到模型回复 |
+| 2. 复现经营页面 | 随仓库提供的虚构 CSV 样例 | [无商户账号的复现示例](#步骤7上传样例并生成看板) | 汇总金额与文档给出的参考值一致，任务页能打开并筛选 |
+| 3. 接入真实门店 | 自己的商户 / 摄像头账号及权限；视觉分析还需视觉模型 | [接入真实门店系统](#接入真实门店系统) | 控制台登录成功，工具返回自己账号下的实际数据或画面 |
+| 4. 复现手机操作 | AI Passport、Android 手机、数据线、局域网 | [手机与硬件接入](#手机与硬件接入)与[完整硬件部署](docs/deployment.md#硬件源码部署) | 操作台出现实时手机画面，点击产生可见响应，急停能停止输入 |
 
-- **指标口径** `workspace/metrics.json` 是唯一来源：`flow` 可加总、`stock` 取期末（按实体）、`ratio` 由汇总后的分子 ÷ 分母重算（不对比率求平均）、`state` 按区间统计。修改需店长授权，并会把依赖页面标记为待复核。
-- **数据集**：事实表按天分区只追加；事件流（如 `inventory_moves`）以「检查点 + 流水回放」得到任意时刻状态，`qdd compact` 生成新检查点缩短回放；维度表（`products`）与编号映射（`keymap/*`）用于跨来源关联。
-- **工具**：`store__aggregate`（过滤/分桶/分组/补齐/窗口/关联）、`store__timeline`、`store__segments`、`store__list_metrics`、`store__list_datasets`。
-- **跨会话**：页面记录依赖的数据集版本与页面版本（乐观锁，同一页面同时只允许一个会话修改）；会话摘要 + 页面清单构成共享记忆，agent 用 `recall` / `read_session` / `read_artifact` 检索；页面参数用 `qdd.state` 持久化。
-- **存储可替换**：上层只依赖 `DatasetStore` 接口。数据集超过百万行、连锁多店或出现多进程写入冲突时，新增 SQLite 实现即可替换，SQL 仍只存在于存储实现内部，agent 与页面始终零 SQL。
+## 产品演示
 
-### 需求对齐与能力缺口
+下面沿着“接入系统 → 提出需求 → 保存技能 → 定时执行”展示参赛素材中的产品流程。界面图片为产品演示片段；实际工具、账号权限和设备状态决定一次任务能完成的范围。
 
-- **对话意图**：问候、解释、一次性查数与分析、已有结论的追问用 `reply` 回答；需要看板、交互工具或修改当前页面时才写文件并用 `finish` 发布。技能、定时任务与通知按实际工具结果回复，不要求附带页面。回复结论先行，业务事实说明来源与统计区间，区分事实、可能原因和推演假设。
-- **可靠收尾**：普通会话、定时任务与页面内 `qdd.ask` 的模型请求统一使用 `tool_choice: "auto"`，不强制服务商返回工具调用，也不因工具选择策略改变思考设置。普通会话与定时任务仍由 harness 提醒模型调用 `reply` / `finish`；若连续三轮未返回工具调用，会明确报错并保留对话供切换模型后续聊，不将未发布的页面或未完成的任务当作成功。页面内 `qdd.ask` 允许直接用正文回答。
-- **执行轮数**：普通会话与定时任务不再设置固定步数上限，持续执行直到 `reply` / `finish` 收尾、用户取消或发生错误。旧配置中的 `llm.maxSteps` 不再生效；取消、重复调用拦截、查询熔断和连续三轮无工具调用的错误处理仍保留。页面内 `qdd.ask` 的独立轮数限制不变。
-- **角色边界**：钱多多始终是助手，店长是用户；助手的建议不代表用户选择或授权。任务已完成、被拒绝或暂时无法继续时，用 `reply` 说明实际结果，不在正文反复宣布完成或追加未被要求的轮询、改配置、测试推送。运行时收尾/查询熔断提醒以 `system` 消息发送，不作为用户发言保存；续聊时移除旧版本误存为用户消息的两类固定提醒，保留真实用户输入和带来源标记的工具图片。
-- **引导式提问**：`llm.clarify` 可设为 `required`（默认）/ `auto` / `off`。`required` 在首次会话写新页面前必须先用 `clarify` 对齐，明确需求只问一个确认题；`auto` 只问影响结果的歧义；`off` 与无人值守不调用提问。续聊和修改已有页面不重复强制确认。候选项来自真实数据、推荐项在前；前端或终端回答（终端支持编号多选、回车选推荐、直接输入自定义）。未回答不代表写入授权。
-- **能力缺口**：`gaps` 由 harness 校验生成（如结论数字未能核验），无需模型提交；网关把检测到的缺口固定展示在页面顶部，页面代码无法移除。数据缺失、估测假设或能力受限仍需在页面或回复正文中说明。
+### 连接门店系统，明确授权范围
 
-对话提示词位于 `apps/cli/src/agent/prompt.ts`。策略与结束工具的回归测试位于 `apps/cli/src/agent/conversation-prompt.test.ts`，使用 Node.js 内置测试运行器：`npm run build` 后执行 `node --test apps/cli/dist/agent/conversation-prompt.test.js`；也包含在 `npm test` 中。
+![连接器授权交互示意：登录门店系统并选择访问权限](docs/assets/hackathon/connectors.jpg)
 
-### 对话中的摄像头录像
+连接器授权交互示意：店长选择业务系统、登录账号并确认访问权限。图中的 ERP 入口展示产品方向；当前内置平台与接入方法见[接入真实门店系统](#接入真实门店系统)。
 
-Web 对话中的 `/captures/<32位任务ID>/recording.mp4` 通过 `POST /api/chat/videos` 读取，请求头为 `Authorization: Bearer <网关 token>`，JSON 请求体例如 `{"url":"http://127.0.0.1:8790/captures/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/recording.mp4"}`；成功返回 `200 video/mp4`，前端下载完成后以 blob URL 播放。仅允许运行时已安装且已连接的摄像头来源，不转发凭据、不跟随重定向；最大 256 MiB，读取超时 120 秒，关闭媒体时取消读取。无须放宽采集服务的跨域权限；文件过期、连接器断开或返回非 MP4 时显示具体错误。
+### 用一句话提出经营问题
 
-离线回归：构建后运行 `node --test apps/cli/dist/chat-images.test.js`，前端运行 `node --test apps/web/tests/media.test.ts apps/web/tests/chat-view.test.mjs`；真实浏览器合成视频验证运行 `node scripts/test-chat-media-browser.mjs`（需要本机 Chrome/Edge 和 FFmpeg）。
+![对话演示：围绕生鲜损耗与临期问题确认分析需求](docs/assets/hackathon/conversation.jpg)
 
-### 图片与截图连续分析
+以生鲜损耗与临期分析为例，助手通过对话确认需求、展示取数过程，让店长继续选择要分析的问题。实际部署需先接入相应数据源或上传业务附件。
 
-- 浏览器截图、MCP `image` 内容和摄像头结果中的 `job.frames` 会作为真正的 `image_url` 输入传给下一轮模型，不再只返回路径或“无法查看图片”的文字。同批工具全部返回后才附加图片，保持工具调用与结果配对；截图后继续分析、调用后续工具，最后再 `reply` / `finish`。
-- 本地摄像头 JPEG 从该连接器对应的 `mcp/.local/{haik,tysl,ezviz}-captures/<jobId>/frame_*.jpg` 读取并转为 Base64，不把 `127.0.0.1` 地址交给公网模型。禁止任意宿主路径、目录穿越和符号链接越界。对话上传的 PNG/JPEG/GIF/WebP 图片在首轮用户消息中直接发送 Base64，单张及每条消息图片总大小不超过 50 MiB；历史图片可通过 `read_attachment` 再次读取；网络图片可用 `view_image({url})`，HTTPS URL 直接交给模型服务商，网关不代为下载。
-- 浏览器、MCP 和摄像头工具每次结果最多 4 张图片，Base64 单张不超过 5 MiB、合计不超过 10 MiB；多路摄像头可分工具调用，采集帧列表通过 `offset` / `limit` 分页。读取、格式或模型错误会明确反馈，不以文件大小或在线状态代替看图判断。
-- 默认所有模型都支持图片识别，直接沿用会话选定的模型发送视觉输入，不按模型名称拦截，不自动切换模型；服务商实际返回的接口错误会如实反馈。图片保存在受 Git 忽略的会话 `messages.json` 中供续聊，事件日志只记录工具元信息，不记录 Base64 正文。
+### 把重复流程保存为技能
 
-离线回归位于 `apps/cli/src/tool-images.test.ts`，覆盖六路截图后的连续模型调用、MCP 图文结果、浏览器截图、图片附件及续聊重载、网络 URL、限制与错误、取消后的消息配对。构建后执行 `node --test apps/cli/dist/tool-images.test.js`；不向真实模型发送门店画面。`apps/cli/src/browser.test.ts` 另用真实本机浏览器验证截图 Base64 进入下一轮后，仍能继续读页并结束回复。
+![技能流程演示片段：将确认后的做法加入技能页](docs/assets/hackathon/skills.jpg)
 
-### 拒绝后端与未授权更改
+参赛视频中的技能流程片段：把确认过的做法加入技能页，后续任务可以复用同一流程。
 
-- **鉴权**：所有 API 需网关 token；页面只拿到自己的页面级 token（HMAC 派生），无法访问会话、设置或其它工具。
-- **写入沙箱**：agent 只能写当前页面目录下的静态文件；`data/` 只能由 harness 快照生成。
-- **零后端守卫**（`guard.ts`）：拒绝 fetch/XHR/WebSocket/表单提交/eval、SQL 与浏览器 SQL 引擎、云后端、服务端代码、非白名单域名。
-- **草稿 + 原子发布**，失败不留半成品；页面带 CSP，默认只能连回网关，播放器可使用显式配置的视频源。
-- **写入类数据工具**：不开放直接调用；只能在许愿会话里由 agent 发起。普通对话需店长通过 `approval_required` 授权（终端或前端），配置 `allowWrite: true` 可免确认；定时任务会话自动授权。
+### 让日常任务按时执行
 
-### 工作台：技能、定时任务、连接器
+![定时任务与结果交付演示：日报、周报和库存巡检](docs/assets/hackathon/report.jpg)
 
-- **创建边界与推送路径**：提交前选定唯一推送方式。每轮推送结果摘要用 `notify`，由调度器发送成功摘要或失败信息，任务 prompt 和技能不再调用 `send_notification`；仅条件触发或需要自定义完整正文时，不设 `notify`，由 prompt/技能调用 `send_notification`。编辑已有任务改走后者时同步设 `notify: null`。创建成功并完成用户明确要求的其它步骤后直接回复，不先双重配置再编辑补救；授权被拒后等待用户新指示，不切换工具改造旧任务。只有用户明确要求修改/复用已有任务，或工具结果证实本轮配置有误需纠正时才编辑，不因相似名称、相同频率或已停用就擅自替换。
-- **对话编辑定时任务**：先用 `list_schedules` 查看任务 ID 和配置，再调用 `edit_schedules`（每次编辑一个任务，需店长确认）。必填 `id`，可选 `name`、`cron`、`prompt`、`enabled`、`skill`（名称或 ID）、`slug`（已有页面）、`notify`（连接器 ID 或 `auto`）。未传字段保持不变，`skill`/`slug`/`notify` 传 `null` 解除绑定。例如 `{"id":"任务ID","cron":"30 9 * * *","enabled":true}`；修改只影响后续执行，不会取消正在执行的任务。定时执行会话不可调用创建或编辑工具。回归测试位于 `apps/cli/src/edit-schedules.test.ts`，运行 `npm run build` 后执行 `node --test apps/cli/dist/edit-schedules.test.js`。
-- **待办与总览**：`GET /api/overview` / `GET /api/pending` 汇总所有会话里待店长处理的授权和问题；授权等待时长由 `approvalTimeoutMin`（默认 60 分钟）控制。
-- **技能**（`workspace/skills/`）：可复用的做事方法；agent 可从对话中 `save_skill`（需店长确认）、`load_skill`。
-- **定时任务**（`workspace/schedules.json`）：5 段 cron，网关内调度；到点无人值守执行（可绑定技能、在页面上刷新），结论推送到连接器；停机错过的执行会补跑。店长说「每天 9 点…」时 agent 可用 `create_schedule` 直接创建（需店长确认）；任务执行中的工具调用自动授权，不提问、不进入工作台待办等待确认，包括立即运行和定时会话续聊。只读连接器限制、参数校验和数据核验仍生效。
-- 每次定时执行使用独立会话 ID，与前端刷新无关。手动修改同一页面时，会停止占用页面的后台定时执行，待其完全退出后继续修改；交接和修改期间保留页面锁，其他会话不能同时写入。只取消当前执行，不停用定时配置；普通会话之间的并发修改仍会被拒绝。
-- **记录数据集**（`records/<name>`）：试吃报损、临期处置回填、巡检等逐条登记的数据。agent 用 `define_record` 提出结构（需店长确认），页面用 `qdd.records.add/update/remove/list` 读写，网关按结构校验并只允许页面访问代码中用到的记录；修改按 id 覆盖、作废写墓碑，`store__aggregate` 可直接汇总（计数指标 `records`）。
-- **连接器**（`workspace/connectors.json`）：在连接器页由用户选择安装飞书、收银系统（收钱吧）或门店摄像头（海康互联、天翼视联、萤石），默认不安装任何厂商。安装前先验证本地服务；选择保存后立即加载相应工具，删除后撤销，重启后保留用户选择。飞书凭据加密存储；agent 用 `send_notification` 推送（按连接器权限需店长确认）。
+产品演示展示日报、周报、库存巡检等任务，以及手机端的结果交付场景。接入真实业务后，按自己的数据来源、执行时间和交付渠道配置流程。
 
-### 浏览器
+### 一分钟完整演示
 
-在 `harness.config.json` 设置 `browser.enabled: true` 并重启网关后，agent 可操作本机 Chrome/Edge。浏览器使用内置 Puppeteer + CDP 驱动（移植自 Toonflow-app），无需另接 Chrome MCP 服务；`executablePath` 留空时自动查找本机浏览器。前端收到浏览器事件后自动展开实时画面，通过 `/api/browser/:id/stream` 观看、`/input` 接管；首次点击/输入需店长授权。画面可手动收起，切回标签页后自动恢复只读观看。
+[![点击观看钱多多产品演示：门店系统、摄像头和手机连接到同一工作台](docs/assets/hackathon/video-poster.png)](docs/assets/hackathon/product-demo.mp4)
 
-### 统一风格
+点击封面观看约一分钟的[产品演示视频](docs/assets/hackathon/product-demo.mp4)。封面中的 ERP、外卖等入口展示产品方向。全部图片与视频均保存在仓库的 [参赛素材目录](docs/assets/hackathon/)。
 
-`workspace/style.md` 是所有页面共用的风格提示词（内置主题 `assets/theme.css`）。前端设置页调用 `GET/PUT/DELETE /api/style`，或在终端执行 `npm run qdd -- style --edit`。
+## 系统如何工作
 
-## 快速开始
+```mermaid
+flowchart TB
+    Owner[店长] --> Web[钱多多工作台]
+    Web --> Gateway[网关：API / 授权 / 任务页面]
+    Gateway --> Agent[Agent：理解目标与编排工具]
+    Schedule[技能与定时任务] --> Agent
+    Agent <--> Model[配置的语言 / 视觉模型服务]
+    Agent --> Data[MCP 与门店数据工具]
+    Data --> Business[收钱吧 / 摄像头 / 自定义业务系统]
+    Agent --> Browser[本机浏览器工具]
+    Agent --> Device[设备操作台 MCP]
+    Device -->|Wi-Fi TCP 或 USB| Board[AI Passport / ESP32-C3]
+    Board -->|蓝牙 HID / 配套文本通道| Phone[Android 手机与目标 App]
+    Phone -->|局域网投屏| Device
+    Agent --> Pages[经营简报与交互页面]
+    Pages --> Gateway
+```
 
-需要 Node.js 24+、npm 11+。
+推荐在一台 Windows 电脑上部署工作台、网关和本地连接器，模型通过配置的兼容接口调用。摄像头服务继续访问各厂商平台；手机、电脑和控制板在同一局域网内完成投屏与设备控制。
+
+经营页面通过 `qdd.tool` 直接调用其声明过的数据工具，需要进一步分析时再用 `qdd.ask` 调用 Agent。页面使用独立权限，不能拿到整个工作台的网关 token。具体接口见 [API 文档](docs/api.md)。
+
+### 对话与定时任务的执行边界
+
+- 模型请求使用 `tool_choice: "auto"`；普通会话与定时任务仍需用 `reply` / `finish` 收尾，连续三轮未调用工具会报错并保留对话供切换模型后续聊。页面内 `qdd.ask` 可直接用正文回答。
+- 普通会话与定时任务不设固定执行步数上限，旧 `llm.maxSteps` 不再生效；用户取消、错误、重复调用拦截与查询熔断仍保留，页面内 `qdd.ask` 的独立轮数限制不变。
+- 助手的建议不代表店长选择或授权；完成、被拒或无法继续时说明实际结果，不擅自追加轮询、改配置或测试推送。运行时收尾提醒使用 `system` 消息，续聊移除旧版误存的固定提醒，保留真实用户发言与工具图片。
+- 定时任务只选一种推送路径：每轮摘要用 `notify`，条件推送或自定义正文由 prompt / 技能调用 `send_notification`，两者不同时配置；已有任务改走后者时设 `notify: null`。创建后完成当前请求，不因名称或频率相似擅自替换任务，授权被拒后等待用户新指示。
+
+## 快速部署
+
+**先完成步骤 1～7，就能用随仓库提供的虚构数据演示经营看板。** 这条路线只需 Windows 电脑、模型 Key 和网络；手机、控制板和商户账号可在之后接入。
+
+![软件部署七步流程示意](docs/assets/hackathon/software-deploy-flow.png)
+
+上图为步骤示意，下面给出实际命令和界面操作。命令使用 PowerShell；本节统一把源码放在当前用户的 `Projects/qdd_agent_harness_project` 下。
+
+### 步骤1：安装基础环境
+
+**操作位置：Windows 电脑。**
+
+| 安装项 | 版本 / 安装方法 | 安装完成后检查 |
+| --- | --- | --- |
+| Git | [Git for Windows](https://git-scm.com/install/windows)，启用命令行 PATH | `git --version` 能输出版本 |
+| Node.js | [官方 24.15.0 版本目录](https://nodejs.org/download/release/v24.15.0/)，Windows x64 选择 `node-v24.15.0-x64.msi` | `node --version` 输出 `v24.15.0` |
+| npm | Node 安装后，运行下方命令对齐版本 | `npm --version` 输出 `11.12.1` |
+| 浏览器 | Chrome / Edge | 能打开本地工作台；Agent 操作浏览器也使用它 |
+| 模型 Key | 自己可用的模型 API Key | 留到步骤 3 填写；图片任务还需模型支持图片输入 |
+
+安装 Git 和 Node 后，**重新打开 PowerShell**，执行：
 
 ```powershell
+npm install --global npm@11.12.1
+git --version
+node --version
+npm --version
+```
+
+**完成标志：**三个工具都能输出上述版本。若 PowerShell 拒绝加载 `npm.ps1`，将文中的 `npm` 改写为 `npm.cmd` 即可继续。
+
+### 步骤2：下载源码并安装依赖
+
+**操作位置：电脑 PowerShell。** 首次克隆执行：
+
+```powershell
+$qddProjects = Join-Path $env:USERPROFILE "Projects"
+New-Item -ItemType Directory -Force $qddProjects | Out-Null
+Set-Location $qddProjects
+git clone https://github.com/HBAI-Ltd/qdd_agent_harness_project.git
+Set-Location qdd_agent_harness_project
 npm ci
-Copy-Item .env.example .env                              # 填写 DEEPSEEK_API_KEY
-Copy-Item harness.config.example.json harness.config.json  # 前端直连需配置 CORS，MCP 按需配置
-npm run dev                                              # 构建并启动网关
-npm run qdd -- token                                     # 查看网关 token，交给前端
+Copy-Item .env.example .env
+Copy-Item harness.config.example.json harness.config.json
 ```
 
-另开终端运行 `npm run dev:web`，打开 `http://127.0.0.1:5177`。
-前端默认地址会跟随后端的 `HOST`、`PORT` 配置；若浏览器保留旧地址，在设置中点击「使用配置地址」。
-`gateway.corsOrigins` 必须包含当前前端来源。默认 `mcpServers` 为 `{}`。先按 [mcp/README.md](mcp/README.md) 启动所需本地服务，再在工作台连接器页选择平台并点击「验证并安装」。启动 MCP 服务只让它可用，不会自动安装连接器。`mcpServers` 仍可配置自定义 MCP；四个内置厂商的同名配置只覆盖连接地址和鉴权，实际启用取决于用户的安装选择。
+**完成标志：**`npm ci` 正常结束，当前目录内有 `package.json`、`.env` 和 `harness.config.json`。已有仓库时进入已有目录并保留原配置；以下终端的路径同步改成自己的目录。
 
-安装收钱吧后，后端默认读取 `mcp/.local/shouqianba/mcp-key`；该密钥由本地服务生成，无需复制到表单或 `.env`。自定义 MCP 可用 `bearerTokenFile` 或 `bearerTokenEnv` 指定鉴权来源，两者只能配置一个；文件相对路径基于项目根目录。密钥文件与厂商会话位于 Git 忽略的 `mcp/.local/`，不要提交。安装与账号登录分别进行，商户或摄像头账号仍需在各自本地控制台完成登录。
+### 步骤3：填写模型密钥
 
-任务内视频播放器需要跨源取流时，在 `mediaOrigins` 填写视频地址的 HTTPS origin，例如 `"mediaOrigins": ["https://stream.example.com:8443"]`；本机 HLS 服务也支持精确的 HTTP 回环来源，例如 `"http://127.0.0.1:8790"`（仅 `localhost`、`127.0.0.1`、`[::1]`）。要允许所有视频来源，显式设置 `"mediaOrigins": ["*"]`：播放器连接允许任意 HTTP、HTTPS、WS、WSS 来源，媒体允许任意 HTTP、HTTPS、blob 和 data 来源。默认仍为空数组，也可继续使用精确来源和端口；`"*"` 必须单独使用，不接受 `https://*.example.com`、签名路径、查询参数、凭据或指令注入。
-
-修改 `mediaOrigins` 后重新加载任务页面即可生效，网关会在每次加载 HTML 时读取最新配置。页面业务代码仍禁止直接 fetch、XHR、WebSocket 和表单提交。播放器可使用 blob 媒体及本地/blob worker；非空 `mediaOrigins` 允许 WASM 解码，不开启 JavaScript eval，也不会把媒体来源加入脚本或 iframe 白名单。
-
-海康 FLV/H.265 播放器与解码器通过 `/assets/camera-player/` 同源提供，包含官方 `ezuikit-flv` 的脚本、样式、WASM 和许可证。无需在任务页面复制临时签名地址或加载其他解码服务。资源及配置热更新测试位于 `apps/cli/src/camera-player-assets.test.ts`；真实浏览器合成视频回归运行 `node scripts/test-camera-player-browser.mjs`。
-
-视频 CSP 专项测试位于 `apps/cli/src/media-csp.test.ts`；构建后运行 `node --test apps/cli/dist/media-csp.test.js`，验证默认隔离、精确来源和端口、注入拒绝及业务请求守卫，不连接摄像头。
-
-### 监控推流播放器
-
-Agent 的白名单播放器规范支持在任务 iframe 内生成监控播放页面，无需嵌入外部播放器站点：
-
-| 格式 | 播放方案 |
-| --- | --- |
-| HTTP-FLV | 已安装的 `ezuikit-flv@2.1.1`，通过同源 `/assets/camera-player/index.js`、`style.css`、`decoder.js` / `decoder.wasm` 提供 |
-| HLS | 优先原生 video；否则使用网关同源 `/assets/camera-player/hls.min.js`（hls.js@1.7.3），无需访问 CDN |
-| RTMP / RTMPS / RTSP | 浏览器不能直接播放；页面明确提示提供转流后的 HLS / HTTP-FLV 地址。本项目不新增转流服务，也不通过替换 URL 协议伪造播放地址 |
-
-播放器的内部取流不等于允许页面业务代码直接联网。视频地址通过已授权的 `qdd.tool` 获取，或由用户在页面输入；不要把签名地址写死在页面中，也不要为视频域名授予脚本 CDN 权限。跨源媒体需要配置上述 `mediaOrigins`，并由媒体服务提供 CORS；HLS 清单、分片、密钥和重定向来源都必须允许。HTTPS 页面仍受浏览器混合内容限制。
-
-FLV 在点击播放后创建 `autoPlay: true` 的 SDK 实例，成功状态兼容 `playing` / `videoFrame` 事件和 `getState().playing`；WASM 使用 canvas 时不能只检查 video 元素。天翼本地接口目前只保留一路预览，监控页面应显式切换摄像头，诊断不能额外请求预览抢占画面；hls.js 解析清单成功不代表视频已解码。
-
-HLS 优先使用同源 hls.js，在 `MEDIA_ATTACHED` 后加载地址、`MANIFEST_PARSED` 后请求播放，只有实际 `playing` 才显示播放中。Chromium 的原生 HLS 检测可能返回 `maybe` 却报 `DEMUXER_ERROR_COULD_NOT_PARSE`，因此仅在 hls.js 或 MSE 不可用时回退原生。天翼本地流已转为 H.264，不应把该解复用错误直接归因于设备 H.265。小猫值班室支持重新取流，失败保留错误详情并释放播放器。
-
-天翼本地服务对 `/streams/<id>/index.m3u8` 和对应 TS 分片开放跨源读取，任务 iframe 可直接播放返回的 HLS 地址。监控相关回归可用 `npm test --prefix mcp/apps/tysl-console`（含实际 HTTP 媒体响应验证）和 `node scripts/test-camera-player-browser.mjs`（本地合成 FLV、WASM 与 Worker 验证）运行；当前生成的总台另有 `node scripts/test-generated-monitor.mjs` 验证播放与切换逻辑。
-
-FLV 使用同源解码器；HLS 使用 `enableWorker: false`，避免被 CSP 拦截的 CDN worker。Agent 规范要求点击播放、失败提示、手动重试、切换/离页释放资源，以及 RTMP 转流提示；不承诺所有编码、有声自动播放或全屏可用。可许愿：“生成监控页面，通过已授权工具获取 HTTP-FLV 或 HLS 地址，在任务 iframe 播放；仅有 RTMP 时提示需要转流。”
-
-规范与守卫回归：[camera-player-prompt.test.ts](apps/cli/src/agent/camera-player-prompt.test.ts)，构建后运行 `node --test apps/cli/dist/agent/camera-player-prompt.test.js apps/cli/dist/media-csp.test.js`。实际 iframe FLV 播放回归运行 `node scripts/test-camera-player-browser.mjs`，需要本机 Chrome/Edge 和 FFmpeg（可通过 `CHROME_PATH` / `FFMPEG_PATH` 指定），仅使用合成视频，不连接真实摄像头。
-
-MCP 鉴权专项测试位于 `apps/cli/src/datasource/mcp-auth.test.ts`；构建后运行 `node --test apps/cli/dist/datasource/mcp-auth.test.js`，验证密钥文件读取、会话重连和环境变量兼容性，不连接厂商服务。
-
-终端也可直接许愿，会话与前端共享：
+**操作位置：电脑、项目根目录。**
 
 ```powershell
-npm run qdd -- wish "最近 30 天各品类销售额和毛利，标出毛利率最高的品类"
-npm run qdd -- reply <会话id> "按周汇总"
+notepad .env
 ```
 
-## 命令
+填写并保存：
 
-| 命令 | 用途 |
+```dotenv
+DEEPSEEK_API_KEY=填写你自己的密钥
+HOST=127.0.0.1
+PORT=3000
+```
+
+`QDD_GATEWAY_TOKEN` 保持为空即可，首次运行会生成。**模型 Key 用于调用模型，网关 token 用于连接工作台，不能互换。** 更换模型服务时按[模型配置](docs/deployment.md#模型配置)修改 `llm.models` 中的模型名、`baseUrl` 和 `apiKeyEnv`。
+
+**完成标志：**已保存自己的有效模型密钥。模型实际可用性将在步骤 6 用对话确认。
+
+### 步骤4：启动后端
+
+**操作位置：新开 PowerShell，作为终端 A。**
+
+```powershell
+Set-Location "$env:USERPROFILE/Projects/qdd_agent_harness_project"
+npm run dev
+```
+
+**完成标志：**构建结束，终端打印网关启动地址 `http://127.0.0.1:3000`。保持终端 A 运行，出现此提示后再做下一步。
+
+### 步骤5：启动前端
+
+**操作位置：再开 PowerShell，作为终端 B。**
+
+```powershell
+Set-Location "$env:USERPROFILE/Projects/qdd_agent_harness_project"
+npm run dev:web
+```
+
+**完成标志：**终端显示前端地址。浏览器打开 **[http://127.0.0.1:5177](http://127.0.0.1:5177)**，能看到工作台。保持终端 B 运行。
+
+### 步骤6：连接工作台并验证模型
+
+**操作位置：终端 C + 电脑浏览器。**
+
+1. 再开 PowerShell，核对后端并查看 token：
+
+```powershell
+Set-Location "$env:USERPROFILE/Projects/qdd_agent_harness_project"
+Invoke-RestMethod http://127.0.0.1:3000/health
+npm run qdd -- token
+```
+
+2. 第一条应显示 `status` 为 `ok`。复制第二条输出的 **token 字符串**。
+3. 浏览器进入工作台「设置」，填写网关地址 `http://127.0.0.1:3000` 和 token，点击连接。如果保存过旧地址，先点击「使用配置地址」。
+4. 回到对话，发送“你好，介绍一下这个工作台能做什么”。
+
+**完成标志：**工作台显示连接成功，且收到模型正常回复。`/health` 成功只说明后端在运行，正常回复才说明模型调用也可用。
+
+| 终端 | 运行内容 | 是否保持运行 |
+| --- | --- | --- |
+| A | `npm run dev`：后端 / 网关 | 是 |
+| B | `npm run dev:web`：工作台前端 | 是 |
+| C | 健康核对、查看 token 或后续命令 | 命令完成后可关闭 |
+
+### 步骤7：上传样例并生成看板
+
+**操作位置：电脑浏览器、工作台。无需商户账号或硬件。**
+
+1. 在本地项目找到 [docs/examples/judge-sales.csv](docs/examples/judge-sales.csv)。这是专供评审的虚构销售数据。
+2. 新建对话，点击添加文件或把 CSV 拖入输入区。**确认附件卡片已出现、上传结束后**再发送以下请求：
+
+   > 读取这份附件，为 2026-10-17 的虚构销售样例生成经营看板。页面根据附件明细计算销售额、成本额、毛利和毛利率，支持按商品分类筛选，并展示明细和计算口径。标注“虚构样例 / 附件快照，非实时门店数据”。
+
+3. 回答界面上的需求确认问题，等待任务发布。
+4. 到「任务」打开新生成的看板，先查看全部分类，再逐个切换商品分类。
+5. 按下表核对数值和明细条数，确认筛选确实生效：
+
+| 筛选范围 | 明细条数 | 销售额（元） | 成本额（元） | 毛利（元） | 毛利率 |
+| --- | --- | --- | --- | --- | --- |
+| 全部 | 6 | 800 | 500 | 300 | 37.5% |
+| 生鲜 | 2 | 300 | 210 | 90 | 30% |
+| 饮品 | 2 | 200 | 80 | 120 | 60% |
+| 日用品 | 2 | 300 | 210 | 90 | 30% |
+
+**完成标志：**看板能实际打开，筛选后明细从 6 条变为对应分类的 2 条，计算结果与表格一致，页面标有虚构样例及数据日期。毛利 = 销售额 − 成本额；毛利率 = 汇总毛利 ÷ 汇总销售额。
+
+需要继续演示技能时，再要求保存刚确认的分析流程，到「技能」查看结果。
+
+| 卡在哪一步 | 先检查什么 |
 | --- | --- |
-| `npm run dev` / `npm start` | 构建并启动网关 / 直接启动网关 |
-| `npm run dev:web` / `npm run build:web` | 启动前端开发服务 / 检查类型并构建前端 |
-| `npm run qdd -- token` | 显示网关 token |
-| `npm run qdd -- wish "<需求>" [--page <slug>] [--yes]` | 终端许愿，写入授权在终端确认 |
-| `npm run qdd -- reply <会话id> "<消息>"` | 续聊 |
-| `npm run qdd -- sessions [会话id]` | 会话列表 / 事件回放 |
-| `npm run qdd -- pages` / `tools` | 页面 / 数据工具列表 |
-| `npm run qdd -- datasets` / `metrics` | 数据集（版本、水位线）/ 指标口径 |
-| `npm run qdd -- refresh [数据集...]` | 从数据源增量刷新（也可配置 `datasets.refreshIntervalSec` 由网关定时执行） |
-| `npm run qdd -- compact <数据集> "<时刻>"` | 为事件流生成检查点 |
-| `npm run qdd -- style [--edit\|--reset]` | 风格提示词 |
-| `npm run qdd -- check` | 守卫重新审查所有页面 |
-| `npm test` | 计算引擎不变量、数据集回放/检查点/去重、HTTP MCP、会话与跨会话、并发锁、页面鉴权（模拟 LLM） |
-| `npm run check:esp` | 检查 AI Passport 的 ESP-IDF 5.5.3 环境 |
-| `npm run build:esp` | 构建并验证 AI Passport 合并固件与匹配的调试归档，不烧录 |
-| `npm run validate:esp` | 固件完整门禁：仓库检查、宿主测试、构建与镜像验证 |
-| `npm run idf:esp -- <参数>` | 激活 IDF 后转发原生 `idf.py` 参数 |
-| `npm run android:mcp` | 启动安卓 stdio MCP；MCP 客户端配置直接使用 `node` 与编译后的入口路径 |
-| `npm run android:mcp:http` | 启动本机 Streamable HTTP MCP，无需令牌 |
-| `npm run test:android` | 安卓 MCP、连续投屏、Wi-Fi/串口键鼠、操作台与会话清理离线测试 |
-| `npm run build:android:screen` | 构建手机局域网投屏 APK（Android SDK + JDK 17） |
-| `start-android.cmd` | 启动连续投屏操作台与 MCP；ESP32 可通过 Wi-Fi 或 USB 连接电脑 |
+| 工作台连不上后端 | 终端 A 是否运行、网关地址和 token 是否正确；详见[启动问题](docs/deployment.md#6-常见启动问题) |
+| 已连接，但模型不回复 | `.env` Key、模型名和服务地址；修改后重启终端 A |
+| 没有附件 / 看板数值不一致 | 确认 CSV 上传完成，让助手重新读取这份附件并检查页面计算口径 |
 
-浏览器集成回归位于 `apps/cli/src/browser.test.ts`，使用本机 Chrome/Edge 与本地网页验证操作、授权和实时画面；没有本机浏览器时跳过。会话终态回归位于 `apps/cli/src/session-completion.test.ts`，验证状态持久化完成前保持运行锁。定时执行记录隔离回归位于 `apps/cli/src/schedule-sessions.test.ts`，验证独立存储、旧记录迁移与对话列表隔离。均通过 `npm test` 执行，使用 Node.js 内置测试器，测试文件命名为 `*.test.ts`。
+## 接入真实门店系统
 
-模型流式响应回归位于 `apps/cli/src/llm.test.ts`，覆盖长工具参数、分块传输、输出截断及参数校验。定向运行：先执行 `npm run build`，再执行 `node --test apps/cli/dist/llm.test.js apps/cli/dist/harness.test.js apps/cli/dist/chat-options.test.js`。
+**可选：完成上面的样例演示后，再接入自己的商户或摄像头账号。**
 
-若模型只返回思考内容而没有正文或工具调用，客户端会明确报错，不把这条响应加入对话。续聊时会自动过滤旧历史中的空 assistant 消息，避免触发 `Invalid assistant message: content or tool_calls must be set`；正常工具调用携带的思考内容仍原样保留。
+1. 在电脑项目根目录安装连接器依赖：
 
-若 `write_file` 报参数 JSON 不完整（例如 `Unterminated string in JSON`），说明模型生成的工具参数无法解析，并非文件已经写入。客户端会识别 `finish_reason=length`，阻止该轮工具执行并反馈缩小输出的提示；流意外结束且没有完成标记时直接报错，不执行部分调用。大页面应拆成较小的 HTML、JS、CSS 文件分多轮写入；同一路径仍是完整覆盖，不支持追加。默认 `llm.maxTokens` 为 8192，可在模型支持范围内调整（模型条目自己的 `maxTokens` 会覆盖全局设置），但不要用补引号或补括号的方式“修复”被截断的文件内容。
+```powershell
+npm run mcp:setup
+```
 
-DeepSeek 官方 API 的 `deepseek-flash` 当前对应 V4.1 Flash（2026-10-17）。如需使用最大输出预算，在 `harness.config.json` 的对应 `llm.models` 条目中设置 `"maxTokens": 393216`（384 × 1024），不要把该值设为所有模型的通用默认值。[官方参数文档](https://api-docs.deepseek.com/api/create-chat-completion/)规定 `max_tokens` 上限为 393216；实际输出仍受输入与输出合计上下文长度限制，长输出可能增加耗时和费用。修改配置后需重启后端。
+2. 上一步成功后编译：
+
+```powershell
+npm run mcp:build
+```
+
+3. 编译成功后启动本地服务：
+
+```powershell
+npm run mcp:start
+```
+
+4. 在工作台「连接器」选择平台，点击「验证并安装」。
+5. 从连接器卡片打开登录控制台，使用自己的账号完成官方登录。
+6. 先确认控制台能返回自己的设备或业务数据，再在对话中请求明确日期范围的查询。摄像头分析还需要支持图片输入的模型。
+
+| 内置平台 | 本地控制台 | 登录前准备 |
+| --- | --- | --- |
+| 海康互联 | `http://127.0.0.1:8787/` | 自己合法取得的客户端参数，初始化后完成人机验证与短信登录 |
+| 收钱吧 | `http://127.0.0.1:8788/` | 商户账号；可网页登录，原生登录另需自己的客户端参数 |
+| 天翼视联 | `http://127.0.0.1:8790/` | 使用自己的账号完成官方登录，回填完整返回地址 |
+| 萤石 | `http://127.0.0.1:8791/` | 自己的开放平台 AppKey / AppSecret |
+| 飞书 | 在工作台配置 | 群机器人 webhook 或企业自建应用配置 |
+
+**完成标志：**服务运行、工作台安装和厂商账号登录分别成功，工具能返回自己账号下的数据。服务启动不会自动登录账号，也不会自动提供模拟门店数据。厂商参数初始化见 [MCP 连接器说明](mcp/README.md)。
+
+### 摄像头录像与播放
+
+对话中的摄像头录像由 `POST /api/chat/videos` 使用网关 Bearer token 读取后，以 blob URL 播放；仅接受已安装且已连接的摄像头来源，不转发凭据或跟随重定向。上限为 256 MiB、120 秒，关闭媒体会取消读取，过期或格式错误会显示原因，接口见 [API 文档](docs/api.md)。
+
+任务页面的 HLS 优先使用同源 hls.js / MSE，在 `MEDIA_ATTACHED` 后加载地址、`MANIFEST_PARSED` 后请求播放，以实际 `playing` 判定播放成功；仅在 hls.js 或 MSE 不可用时回退原生 HLS。天翼本地流已转为 H.264，Chromium 解复用错误不能直接归因于 H.265；支持重新取流，失败保留错误详情并释放播放器。
+
+停止本地厂商服务：
+
+```powershell
+npm run mcp:stop
+```
+
+更换端口、局域网访问、生产构建与常见问题见[完整部署指南](docs/deployment.md)。
+
+## 手机与硬件接入
+
+**先构建并烧录控制板，再按顺序安装。** 三台设备分别操作：Windows 电脑、AI Passport 控制板、Android 手机。实物与物料见[设备实物与复现清单](#设备实物与复现清单)。
+
+![手机硬件安装步骤示意](docs/assets/hackathon/hardware-install-flow.png)
+
+上图为安装顺序示意。下面的界面配图来自仓库 v55 的 LVGL 主机渲染及生产页面夹具，帮助辨认按钮；图中 IP、设备名以手头实物为准。
+
+### 硬件步骤1：准备环境、构建并首次烧录
+
+**操作设备：Windows 电脑 + 数据线连接的 AI Passport。**
+
+全新克隆不包含 APK、EXE 或固件，需要先完成环境准备。按[硬件源码部署](docs/deployment.md#硬件源码部署)中的第一至第五步执行：
+
+| 顺序 | 先准备什么 | 再执行什么 | 完成后得到 |
+| --- | --- | --- | --- |
+| 1 | JDK 17+、Android SDK Platform 34、Build Tools 36.0.0，配置本机 SDK/JDK 路径 | `npm run build:android:screen` | 手机 APK 与清单 |
+| 2 | Rust 1.87+、MSVC C++ 工具与 Windows SDK；将输出目录设为 `windows/v56` | `npm run build:android:rust` | 电脑 EXE、ZIP 与清单 |
+| 3 | Windows x64 MinGW-w64 GCC，设置 `QDD_USB_CC` | 生成 USB 下载器和离线接收页 | `usb-driver/v52` 与 `usb-browser/v55` 资源 |
+| 4 | ESP-IDF 5.5.3、Git Bash、宿主 C 编译器，填写 `.idf.local.json` | `npm run check:esp`，通过后 `npm run build:esp` | 匹配的完整固件与调试归档 |
+| 5 | 确认自己的板卡和 COM 口，进入 ESP-IDF PowerShell | 按指南把匹配 `full.bin` 写入 `0x0` | 控制板重启进入连接引导 |
+
+**完成标志：**固件写入校验通过，控制板显示本项目的连接界面。每个阶段失败时先停下处理报错；完整命令、路径配置和产物位置见[分阶段构建](docs/deployment.md#第四步依次生成手机电脑及板上资源)与[首次烧录](docs/deployment.md#第五步首次烧录控制板)。
+
+### 硬件步骤2：在控制板上连接无线网
+
+**操作设备：控制板；电脑和手机加入同一局域网。**
+
+1. 首次开机按引导选择「开始连接」，进入「连接无线网」；已进入主界面时走「设置 → 连接无线网」。
+2. 选择 **2.4 GHz Wi-Fi** 并输入密码。密码页长按确认，打开「连接网络」菜单后执行连接。
+3. 记下控制板显示的真实 IP。电脑、手机与控制板必须互相可达，访客网络的客户端隔离会阻止设备发现或投屏。
+
+![控制板六步连接引导：v55 LVGL 主机渲染](docs/assets/hackathon/board-onboarding-v55.png)
+
+*控制板六页引导，v55 LVGL 主机渲染；图中的地址和蓝牙名称是示例。*
+
+**完成标志：**控制板显示安装页 `http://<控制板IP>:3334/`，手机和电脑浏览器都能打开。
+
+### 硬件步骤3：在手机上安装设备投屏 App
+
+**操作设备：Android 手机。**
+
+1. 扫描板上二维码或打开控制板安装页。
+2. 点击「下载 Android 手机版」，等 APK 下载结束后打开，按系统提示允许从当前浏览器或文件管理器安装。
+3. 安装完成后返回安装页，点击「打开设备投屏」。
+
+![手机安装并打开设备投屏：v55 生产页面夹具](docs/assets/hackathon/install-mobile-v55.png)
+
+*手机安装页，v55 生产页面夹具渲染；不是手机系统授权截图。*
+
+**完成标志：**手机已安装并能打开「设备投屏」，能看到设备控制器与屏幕共享相关入口。
+
+### 硬件步骤4：配对蓝牙并开始投屏
+
+**操作设备：控制板 + Android 手机。**
+
+1. 在板上引导或设置中打开配对窗口。
+2. 手机系统蓝牙设置中，选择**板上显示的对应设备名**，确认系统配对提示，无需手输数字。
+3. 回到「设备投屏」App 的「设备控制器」卡片连接目标设备。板上完成配对后退出设置、返回主界面。
+4. 在 App 的「屏幕共享」卡片点击「开始投屏」，由本人确认 Android 系统的共享屏幕授权。
+
+**完成标志：**蓝牙显示就绪，App 显示正在投屏，并给出手机画面地址 `http://<手机IP>:8791`。系统蓝牙配对和屏幕共享是两次独立授权；具体 App 操作见[详细安装步骤](docs/deployment.md#第六步安装配网配对并完成演示)。
+
+### 硬件步骤5：在电脑上安装并打开操作台
+
+**操作设备：Windows 电脑。**
+
+1. 浏览器打开同一个控制板安装页，点击「下载 Windows 电脑版」。
+2. 下载完成后对 ZIP 选择「全部解压缩」，进入解压目录。
+3. 在该目录打开 PowerShell，执行：
+
+```powershell
+.\设备操作台.exe --port 8792
+```
+
+4. 点击「自动查找手机与设备控制器」，确认目标设备，再点击「保存并打开操作台」。找不到时，按[详细安装步骤](docs/deployment.md#第六步安装配网配对并完成演示)手填控制板 IP 和手机画面地址。
+
+![电脑下载安装包：v55 生产页面夹具](docs/assets/hackathon/install-desktop-v55.png)
+
+*电脑下载页，v55 生产页面夹具渲染。运行安装包无需 Node.js 或 Rust。*
+
+**完成标志：**操作台中出现持续更新的手机画面。此处统一使用 `8792`，避开天翼服务默认占用的 `8790`。
+
+### 硬件步骤6：让主工作台加载设备工具
+
+**操作设备：Windows 电脑，项目配置文件与终端 A。**
+
+1. 从设备操作台复制其显示的电脑局域网地址。
+2. 编辑项目根目录 `harness.config.json`，把下方 `androidDevice` 条目加入已有 `mcpServers`，保留模型、网关和其他服务配置。示例 `192.168.1.20` 必须替换为自己的**电脑 IP**：
+
+```json
+{
+  "mcpServers": {
+    "androidDevice": {
+      "url": "http://192.168.1.20:8792/mcp",
+      "allowWrite": false
+    }
+  }
+}
+```
+
+3. 终端 A 按 Ctrl+C 停止后端，再运行 `npm run dev`。电脑操作台和手机投屏继续保持运行。
+4. 工作台中确认自定义 MCP 已加载，选择支持图片输入的模型，请求查看手机截图。
+
+**完成标志：**助手能够调用设备工具获取当前手机画面。`allowWrite: false` 保留写入类操作的逐次授权。当前「门店手机」预设安装入口尚未开放，使用上述配置接入。
+
+### 硬件步骤7：核对现场操作
+
+**操作设备：手机 + 电脑操作台 + 控制板。**
+
+- 选择一个无业务影响的测试界面，核对画面持续更新与指针定位；第一次点击用于进入控制，随后输入才传给手机。
+- 需要中文输入时，由本人在手机中启用并选择配套「设备中文输入」输入法，在空白文本框核对实际文字。
+- 按 Esc 退出电脑控制，再触发控制板物理急停，确认输入停止。物理急停只能在控制板上解除。
+
+**完成标志：**实际画面与输入一致，退出和急停均生效。摄像头是另一条接入链路，按[真实门店系统](#接入真实门店系统)核对自己的设备列表、取图和模型分析。
+
+模块说明：[Android App](apps/android-screen/README.zh_CN.md) · [Rust 操作台](apps/android-mcp-rust/README.zh_CN.md) · [ESP 固件](apps/esp/README.zh_CN.md)。
 
 ## 默认技能
 
@@ -194,22 +477,31 @@ DeepSeek 官方 API 的 `deepseek-flash` 当前对应 V4.1 Flash（2026-10-17）
 
 默认技能与已有用户技能的存储、完整上下文加载回归位于 `apps/cli/src/builtin-skills.test.ts`，通过 `npm test` 执行。技能页回归可用 `node --test apps/web/tests/skills-view.test.mjs` 执行。
 
-## 目录结构
+## 仓库结构
 
 ```text
-apps/cli/            harness（datasource / agent / gateway / guard / sessions）
-apps/web/            Vue / Element Plus 工作台（page/layout 公共框架、views 路由界面）
-apps/esp/            FoloToy AI Passport ESP32-C3 固件（ESP-IDF 5.5.3，独立构建）
-apps/android-screen/ 安卓内网投屏 App（MediaProjection）
-apps/android-mcp/    手机内网画面与 ESP32 BLE 键鼠 MCP（电脑运行）
-packages/shared/     共享类型（含前端 API 契约）
-skills/              默认 Android / 小红书技能、完整参考文档及配套脚本
-docs/api.md          前端对接文档
-workspace/           运行时生成（已 gitignore）：style.md、metrics.json、datasets/、store.json 门店数据（初始为空，不自动填充示例）、site/、sessions/、schedule-sessions/、state/、.gateway-token
+apps/cli/               Agent、网关、数据集、技能与调度
+apps/web/               Vue / Element Plus 工作台
+mcp/                    监控与收钱吧的独立 MCP 连接器
+apps/android-screen/    Android 投屏、校准与配套输入法
+apps/android-mcp-rust/  Rust Windows 设备操作台与视觉 MCP
+apps/android-mcp/       TypeScript 设备 MCP 与桌面对照实现
+apps/esp/               AI Passport ESP32-C3 固件
+packages/shared/        共享类型、计算引擎与页面通信协议
+skills/                默认 Android / 小红书技能、完整参考文档及配套脚本
+docs/deployment.md      完整部署、配置与排错指南
+docs/product-development.md  硬件产品开发说明书与参赛材料状态
+docs/api.md             前端与生成页面 API
+docs/assets/hackathon/  参赛演示视频、界面素材与设备照片
+workspace/              运行时数据、任务页面、会话和本地密钥
 ```
 
-AI Passport 环境配置与命令见 [apps/esp/README.zh_CN.md](apps/esp/README.zh_CN.md)。
-根 `npm run build` 继续只构建 TypeScript 工程；固件通过 `build:esp` 单独构建。
+`workspace/`、本地 `.env`、`harness.config.json` 和连接器的 `mcp/.local/` 不进入 Git。部署备份时应保留运行数据与本地密钥；公开演示素材与实际门店数据分开保存。
 
-安卓连接、配对、只读投屏及 MCP 配置见 [apps/android-mcp/README.zh_CN.md](apps/android-mcp/README.zh_CN.md)。
-该 MCP 服务直接返回手机原分辨率 JPEG 图像；门店 harness 会保留 MCP 图像并通过 Base64 传给模型，需要选用支持视觉输入及工具调用的模型。
+## 当前范围
+
+仓库已包含软件与硬件链路的源码、构建脚本和回归测试。内置收钱吧工具以只读经营查询为主；ERP、外卖平台及其他系统可通过自定义 MCP 扩展，具体能力取决于账号权限和适配器。
+
+手机兼容性、无线稳定性、视觉判断和真实业务执行需要结合实际设备与账号验证。演示视频、源码构建和离线测试分别说明不同范围，实机记录见[设备验收文档](apps/android-mcp/docs/acceptance.zh_CN.md)。
+
+[部署与排错](docs/deployment.md) · [连接器配置](mcp/README.md) · [API 契约](docs/api.md) · [表格附件说明](docs/excel-attachments.md)

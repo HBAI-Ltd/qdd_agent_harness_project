@@ -86,7 +86,7 @@ final class ImeGattClient {
     if (!subscribed || current == null || writer == null || value == null) return;
     // These packets contain readiness/results only, never input text.
     if (value.length != 6 && value.length != 15) { disconnect("中文输入协议错误"); return; }
-    if (queue.size() >= 8) { disconnect("中文输入确认通道繁忙，请重新选择输入法"); return; }
+    if (queue.size() >= 8) { disconnect("中文输入确认通道繁忙，请检查投屏和蓝牙连接"); return; }
     queue.addLast(value.clone()); pump();
   }
   @SuppressWarnings("deprecation")

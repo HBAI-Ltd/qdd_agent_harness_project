@@ -257,7 +257,8 @@ impl ScreenClient {
       &body,
       &operation.cancel,
       2048,
-    )?;
+    )
+    .map_err(|error| self.connection_error(error))?;
     check_cancel(&operation.cancel)?;
     if response.status == 404 {
       if profile.is_none() {
@@ -315,7 +316,8 @@ impl ScreenClient {
       body,
       &operation.cancel,
       limit,
-    )?;
+    )
+    .map_err(|error| self.connection_error(error))?;
     check_cancel(&operation.cancel)?;
     successful(response.status)?;
     Ok(response)
@@ -330,7 +332,8 @@ impl ScreenClient {
       &[],
       &[],
       cancel,
-    )?;
+    )
+    .map_err(|error| self.connection_error(error))?;
     successful(response.status)?;
     let content_type = response
       .headers
@@ -345,6 +348,15 @@ impl ScreenClient {
       "SCREEN_HTTP_ERROR: 手机连续流的 MIME 或边界无效，请更新手机 App。"
     );
     Ok(response)
+  }
+
+  fn connection_error(&self, error: anyhow::Error) -> anyhow::Error {
+    // Display only the authority, never a path, query or URL credentials.
+    let target = net::Endpoint::parse(&self.endpoint)
+      .map(|endpoint| format!("{}:{}", endpoint.host, endpoint.port))
+      .unwrap_or_else(|_| "地址无效".into());
+    let message = format!("SCREEN_CONNECTION_ERROR: 手机画面连接失败（{target}）：{error:#}");
+    error.context(message)
   }
 
   pub(crate) fn frame_from_parts(
@@ -882,6 +894,69 @@ pub fn read_png_dimensions(png: &[u8]) -> Result<(u32, u32)> {
 mod tests {
   use super::*;
   use std::io::Cursor;
+
+  #[test]
+  fn refused_connection_identifies_phone_for_all_network_paths_and_retains_os_reason() {
+    let reserved = socket2::Socket::new(
+      socket2::Domain::IPV4,
+      socket2::Type::STREAM,
+      Some(socket2::Protocol::TCP),
+    )
+    .unwrap();
+    reserved
+      .bind(
+        &"127.0.0.1:0"
+          .parse::<std::net::SocketAddr>()
+          .unwrap()
+          .into(),
+      )
+      .unwrap();
+    let address = reserved.local_addr().unwrap().as_socket().unwrap();
+    let client = ScreenClient::new(format!("http://{address}"), None).unwrap();
+    let started = Instant::now();
+    let cancel = Cancel::new();
+    let errors = [
+      client.list_devices().unwrap_err(),
+      client.capture(None, &cancel).unwrap_err(),
+      client.get_preview_profile().unwrap_err(),
+      client
+        .open_stream(&cancel)
+        .err()
+        .expect("Stream connection refused"),
+    ];
+    // Each of the four requests keeps the production 3-second connect budget.
+    assert!(started.elapsed() < Duration::from_secs(16));
+    for error in errors {
+      let original = error.downcast_ref::<std::io::Error>().unwrap();
+      assert_eq!(original.kind(), std::io::ErrorKind::ConnectionRefused);
+      let message = error.to_string();
+      assert!(message.contains("SCREEN_CONNECTION_ERROR"), "{message}");
+      assert!(message.contains("手机画面"), "{message}");
+      assert!(message.contains(&address.to_string()), "{message}");
+      assert!(message.contains(&original.to_string()), "{message}");
+      assert!(!message.contains("ESP_CONNECTION_ERROR"));
+    }
+  }
+
+  #[test]
+  fn connection_context_and_endpoint_rejection_do_not_echo_url_credentials_or_query() {
+    for url in [
+      "http://user:fixture-secret@127.0.0.1:8791",
+      "http://127.0.0.1:8791/?token=fixture-secret",
+    ] {
+      let error = ScreenClient::new(url.into(), None).err().unwrap();
+      assert!(!error.to_string().contains("fixture-secret"));
+    }
+    let client = ScreenClient::new("http://127.0.0.1:8791/frame.jpg".into(), None).unwrap();
+    let error = client.connection_error(
+      std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "local refusal").into(),
+    );
+    let message = error.to_string();
+    assert!(message.contains("127.0.0.1:8791"));
+    assert!(message.contains("local refusal"));
+    assert!(!message.contains("http://") && !message.contains("frame.jpg"));
+    assert!(error.downcast_ref::<std::io::Error>().is_some());
+  }
 
   #[test]
   fn pointer_calibration_is_a_read_only_get_and_includes_transport_age() {

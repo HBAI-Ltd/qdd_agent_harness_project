@@ -2,7 +2,7 @@ use crate::protocol::{
   decode_reply, encode_command, AckTimeoutError, HidCancelled, HidOperation, HidProtocolError,
   HidReply, HidStatus, MAX_REQUEST_ID,
 };
-use crate::text::{TextCommand, TextPhase, TextReply, TextStatus};
+use crate::text::{TextCommand, TextMode, TextPhase, TextReply, TextStatus};
 use crate::{Cancel, Result};
 use anyhow::{anyhow, bail, ensure, Context};
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -91,6 +91,7 @@ struct Pending {
 }
 struct TextPending {
   tx: oneshot::Sender<Result<TextStatus>>,
+  identity: Arc<()>,
 }
 struct Cached {
   status: HidStatus,
@@ -232,12 +233,18 @@ impl Drop for WireReservation {
 struct PendingReservation {
   inner: Arc<Inner>,
   id: u32,
+  sequence: u64,
   op: HidOperation,
   finished: bool,
 }
 impl Drop for PendingReservation {
   fn drop(&mut self) {
-    let abandoned = take_pending(&mut self.inner.state.lock().unwrap(), self.id).is_some();
+    let abandoned = take_current_pending(
+      &mut self.inner.state.lock().unwrap(),
+      self.id,
+      self.sequence,
+    )
+    .is_some();
     if abandoned && !self.finished && (self.op.is_input() || self.op == HidOperation::Arm) {
       Bridge {
         inner: self.inner.clone(),
@@ -249,11 +256,17 @@ impl Drop for PendingReservation {
 struct TextPendingReservation {
   inner: Arc<Inner>,
   id: u32,
+  identity: Arc<()>,
   finished: bool,
 }
 impl Drop for TextPendingReservation {
   fn drop(&mut self) {
-    let abandoned = take_text_pending(&mut self.inner.state.lock().unwrap(), self.id).is_some();
+    let abandoned = take_current_text_pending(
+      &mut self.inner.state.lock().unwrap(),
+      self.id,
+      &self.identity,
+    )
+    .is_some();
     if abandoned && !self.finished {
       Bridge {
         inner: self.inner.clone(),
@@ -294,6 +307,17 @@ fn take_pending(state: &mut State, id: u32) -> Option<Pending> {
   }
   pending
 }
+fn take_current_pending(state: &mut State, id: u32, sequence: u64) -> Option<Pending> {
+  if state
+    .pending
+    .get(&id)
+    .is_some_and(|pending| pending.sequence == sequence)
+  {
+    take_pending(state, id)
+  } else {
+    None
+  }
+}
 fn fail_pending(state: &mut State, message: &str) {
   let ids: Vec<_> = state.pending.keys().copied().collect();
   for id in ids {
@@ -314,6 +338,21 @@ fn take_text_pending(state: &mut State, id: u32) -> Option<TextPending> {
     retire(&mut state.retired, id);
   }
   pending
+}
+fn take_current_text_pending(
+  state: &mut State,
+  id: u32,
+  identity: &Arc<()>,
+) -> Option<TextPending> {
+  if state
+    .text_pending
+    .get(&id)
+    .is_some_and(|pending| Arc::ptr_eq(&pending.identity, identity))
+  {
+    take_text_pending(state, id)
+  } else {
+    None
+  }
 }
 fn retire_heartbeats(state: &mut State) {
   state.round = state.round.wrapping_add(1);
@@ -402,7 +441,7 @@ fn receive(inner: &Inner, epoch: u64, bytes: &[u8]) {
     };
     if let Some(waiting) = take_text_pending(&mut state, id) {
       let message = match reply {
-        HidReply::Err { code, .. } => format!("ESP32 text channel unavailable ({code}); update matching firmware and enable the phone IME."),
+        HidReply::Err { code, .. } => format!("ESP32 text channel unavailable ({code}); update the ESP firmware and phone App for clipboard input."),
         HidReply::Ok { .. } => "Unexpected HID acknowledgement for a text command; update matching firmware.".into(),
       };
       let _ = waiting.tx.send(Err(anyhow!(message)));
@@ -683,7 +722,7 @@ impl Bridge {
     crate::text::validate_text(text)?;
     ensure!(
       !text.is_ascii(),
-      "The IME channel is only used for text containing non-ASCII characters."
+      "The device input method channel is only used for text containing non-ASCII characters."
     );
     let (previous, completion, reports) = {
       let mut state = self.inner.state.lock().unwrap();
@@ -721,9 +760,11 @@ impl Bridge {
       "Unicode input requires explicit ARM, encrypted BLE and a ready phone; no text was sent."
     );
     let editor = self.text_exchange(&TextCommand::Status(0), cancel).await
-      .context("Unicode input unavailable: update the ESP/App and enable/select the QDD phone IME, then focus an editable field. No text was sent.")?;
+      .context("TEXT_IME_UNAVAILABLE: The device input method channel is unavailable. Use the phone APK with the device input method and matching ESP firmware, then select the current controller in the phone App. No text was sent.")?;
+    ensure!(editor.mode == TextMode::Ime,
+      "TEXT_IME_UNAVAILABLE: This phone is using the clipboard receiver. Update the phone APK with the device input method, enable and select it, then focus the target field. No text was sent.");
     ensure!(editor.ready && editor.editor_epoch != 0,
-      "Phone Unicode IME is not ready. Enable/select it and focus an editable field; no text was sent.");
+      "TEXT_IME_NOT_READY: Select the current controller in the phone App, enable and select the device input method, then focus the target editable field. No text was sent.");
     let transfer = crate::text::next_transfer_id(crate::text::parse_transfer_id(&editor.id)?)?;
     let mut began = false;
     let mut commit_attempted = false;
@@ -742,24 +783,23 @@ impl Bridge {
           "Text DATA acknowledgement has unexpected progress; no COMMIT was sent.");
       }
       check_cancel(cancel)?;
-      // Once this write is attempted, loss of any ACK cannot establish whether
-      // commitText ran. Never retry COMMIT or start a replacement transaction.
+      // COMMIT is attempted once. A lost acknowledgement never authorizes a
+      // replacement transfer, clipboard paste or HID fallback.
       commit_attempted = true;
-      let committed = self.text_exchange(&TextCommand::Commit(transfer), cancel).await?;
-      Self::check_text_identity(&committed, transfer, editor.editor_epoch, text.len())?;
+      let mut status = self.text_exchange(&TextCommand::Commit(transfer), cancel).await?;
+      Self::check_text_identity(&status, transfer, editor.editor_epoch, text.len())?;
       let waiting = cancel.map(Cancel::child_token).unwrap_or_default();
       let timer = waiting.clone();
       tokio::spawn(async move { tokio::time::sleep(Duration::from_secs(10)).await; timer.cancel(); });
-      let mut status = committed;
       loop {
         check_cancel(Some(&waiting))?;
         match status.status {
           TextPhase::Accepted => return Ok(status),
           TextPhase::Rejected => bail!(crate::text::TextTransferError { transfer_id:transfer, uncertain:false,
-            message:"The phone IME explicitly rejected commitText.".into() }),
-          TextPhase::Uncertain | TextPhase::Cancelled => bail!("The committed text transfer was cancelled or its delivery could not be confirmed."),
+            message:"TEXT_IME_REJECTED: The device input method rejected the text. Select the current controller, enable and select the device input method, then focus the target editable field before a new intentional action.".into() }),
+          TextPhase::Uncertain | TextPhase::Cancelled => bail!("Device input method delivery could not be confirmed; observe the phone and do not resubmit."),
           TextPhase::Queued | TextPhase::Sending | TextPhase::AwaitingAck => {},
-          _ => bail!("Unexpected post-COMMIT text state; delivery cannot be established."),
+          _ => bail!("Unexpected device input method state; observe the phone and do not resubmit."),
         }
         tokio::select! { biased; _ = waiting.cancelled() => return Err(HidCancelled.into()), _ = tokio::time::sleep(Duration::from_millis(40)) => {} }
         status = self.text_exchange(&TextCommand::Status(transfer), Some(&waiting)).await?;
@@ -769,8 +809,9 @@ impl Bridge {
     match result {
       Ok(status) => Ok(status),
       Err(error) => {
-        if began && !commit_attempted {
-          // Discard a partial, never committed buffer in the same reservation.
+        if began {
+          // CANCEL is neutral cleanup. It stays inside this reservation and
+          // never authorizes retransmission of an uncertain COMMIT.
           let _ = self
             .text_exchange(&TextCommand::Cancel(transfer), None)
             .await;
@@ -798,12 +839,21 @@ impl Bridge {
   ) -> Result<()> {
     let terminal = matches!(
       status.status,
-      TextPhase::Accepted | TextPhase::Rejected | TextPhase::Uncertain | TextPhase::Cancelled
+      TextPhase::Accepted
+        | TextPhase::Rejected
+        | TextPhase::Uncertain
+        | TextPhase::Cancelled
+        | TextPhase::ClipboardDispatched
+        | TextPhase::ClipboardVerified
+        | TextPhase::PastePending
+        | TextPhase::PasteSent
+        | TextPhase::PasteUncertain
     );
     // The board clears its text buffer on completion/failure, retaining only
     // identity/result. Terminal zero byte counts are an intentional privacy boundary.
     ensure!(
-      status.id == format!("{transfer:016x}")
+      status.mode == TextMode::Ime
+        && status.id == format!("{transfer:016x}")
         && status.editor_epoch == editor_epoch
         && (status.bytes == bytes || (terminal && status.bytes == 0 && status.received == 0)),
       "Text transfer identity, editor focus or byte count changed."
@@ -817,6 +867,8 @@ impl Bridge {
     cancel: Option<&Cancel>,
   ) -> Result<TextStatus> {
     check_cancel(cancel)?;
+    let deadline = Instant::now() + self.inner.options.timeout;
+    let identity = Arc::new(());
     let (id, line, receiver, connection) = {
       let mut state = self.inner.state.lock().unwrap();
       let connection = state
@@ -831,12 +883,19 @@ impl Bridge {
       state.next_id = if id == MAX_REQUEST_ID { 1 } else { id + 1 };
       let line = command.encode(id)?;
       let (tx, receiver) = oneshot::channel();
-      state.text_pending.insert(id, TextPending { tx });
+      state.text_pending.insert(
+        id,
+        TextPending {
+          tx,
+          identity: identity.clone(),
+        },
+      );
       (id, line, receiver, connection)
     };
     let mut reservation = TextPendingReservation {
       inner: self.inner.clone(),
       id,
+      identity: identity.clone(),
       finished: false,
     };
     let operation = async {
@@ -845,24 +904,51 @@ impl Bridge {
       {
         let state = self.inner.state.lock().unwrap();
         ensure!(
-          state.text_pending.contains_key(&id)
+          state
+            .text_pending
+            .get(&id)
+            .is_some_and(|pending| Arc::ptr_eq(&pending.identity, &identity))
             && state.connection.as_ref().map(|c| c.epoch) == Some(connection.epoch),
           "Queued text command was cancelled."
         );
       }
       let writer = connection.writer.clone();
       let stop = connection.stop.clone();
-      let written = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+      let inner = self.inner.clone();
+      let epoch = connection.epoch;
+      let queued_cancel = cancel.cloned();
+      let write = tokio::task::spawn_blocking(move || -> Result<std::io::Result<()>> {
         let mut writer = writer.lock().unwrap();
-        if stop.load(Ordering::Acquire) {
-          return Err(std::io::Error::new(
-            std::io::ErrorKind::NotConnected,
-            "ESP32 link is not open.",
-          ));
+        // spawn_blocking can outlive its timed-out/abandoned waiter. Recheck
+        // admission only after the final writer lock, against this exact request.
+        // A rejection here is local cancellation, not a fault in a newer link.
+        check_cancel(queued_cancel.as_ref())?;
+        ensure!(!stop.load(Ordering::Acquire), "ESP32 link is not open.");
+        {
+          let state = inner.state.lock().unwrap();
+          ensure!(
+            !state.disposed
+              && state
+                .text_pending
+                .get(&id)
+                .is_some_and(|pending| Arc::ptr_eq(&pending.identity, &identity))
+              && state.connection.as_ref().map(|c| c.epoch) == Some(epoch),
+            "Queued text command was cancelled before write."
+          );
         }
-        writer.write_all(line.as_bytes())
-      })
-      .await?;
+        check_cancel(queued_cancel.as_ref())?;
+        ensure!(
+          Instant::now() < deadline,
+          "Queued text command expired before write."
+        );
+        // From this boundary onward write_all may have written some/all bytes.
+        // Cancellation or missing ACK must remain uncertain, never a safe retry.
+        Ok(writer.write_all(line.as_bytes()))
+      });
+      let written = tokio::select! { biased;
+        _ = cancelled(cancel) => return Err(HidCancelled.into()),
+        result = write => result??,
+      };
       if let Err(error) = written {
         fault(&self.inner, connection.epoch, error.to_string());
       }
@@ -872,7 +958,7 @@ impl Bridge {
         _ = cancelled(cancel) => Err(HidCancelled.into()),
       }
     };
-    let result = tokio::time::timeout(self.inner.options.timeout, operation)
+    let result = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), operation)
       .await
       .unwrap_or_else(|_| {
         Err(anyhow!(
@@ -881,7 +967,11 @@ impl Bridge {
         ))
       });
     reservation.finished = true;
-    take_text_pending(&mut self.inner.state.lock().unwrap(), id);
+    take_current_text_pending(
+      &mut self.inner.state.lock().unwrap(),
+      id,
+      &reservation.identity,
+    );
     result
   }
 
@@ -1164,7 +1254,24 @@ impl Bridge {
       }),
     )
     .await
-    .context("Opening ESP32 connection timed out.")???;
+    .context("Opening ESP32 connection timed out.")
+    .and_then(|task| task.context("Opening ESP32 connection task failed."))
+    .and_then(|result| result)
+    .map_err(|error| {
+      if let BridgeTarget::Tcp { host, port } = &self.inner.options.target {
+        // Do not echo an invalid raw host that could contain a URL credential
+        // or query. Valid hosts are just a private IPv4 address or LAN name.
+        let target = if crate::lan::validate_host(host).is_ok() && *port != 0 {
+          format!("{host}:{port}")
+        } else {
+          "地址无效".into()
+        };
+        let message = format!("ESP_CONNECTION_ERROR: 设备控制器连接失败（{target}）：{error:#}");
+        error.context(message)
+      } else {
+        error
+      }
+    })?;
     let (writer, reader) = opened;
     let connection = {
       let mut state = self.inner.state.lock().unwrap();
@@ -1411,7 +1518,8 @@ impl Bridge {
     expected_round: Option<u64>,
   ) -> Result<(u32, HidStatus)> {
     check_cancel(cancel)?;
-    let (id, line, receiver, connection) = {
+    let deadline = Instant::now() + timeout;
+    let (id, line, receiver, connection, sequence, round) = {
       let mut state = self.inner.state.lock().unwrap();
       ensure!(
         expected_round.is_none_or(|round| round == state.round),
@@ -1443,11 +1551,12 @@ impl Bridge {
       if heartbeat {
         state.heartbeats.insert(id, sequence);
       }
-      (id, line, rx, connection)
+      (id, line, rx, connection, sequence, round)
     };
     let mut reservation = PendingReservation {
       inner: self.inner.clone(),
       id,
+      sequence,
       op,
       finished: false,
     };
@@ -1457,24 +1566,52 @@ impl Bridge {
       {
         let state = self.inner.state.lock().unwrap();
         ensure!(
-          state.pending.contains_key(&id)
+          state
+            .pending
+            .get(&id)
+            .is_some_and(|pending| pending.sequence == sequence && pending.round == round)
+            && state.round == round
             && state.connection.as_ref().map(|c| c.epoch) == Some(connection.epoch),
           "Queued HID request was cancelled."
         );
       }
       let writer = connection.writer.clone();
       let stop = connection.stop.clone();
-      let write = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+      let inner = self.inner.clone();
+      let epoch = connection.epoch;
+      let queued_cancel = cancel.cloned();
+      let write = tokio::task::spawn_blocking(move || -> Result<std::io::Result<()>> {
         let mut writer = writer.lock().unwrap();
-        if stop.load(Ordering::Acquire) {
-          return Err(std::io::Error::new(
-            std::io::ErrorKind::NotConnected,
-            "ESP32 link is not open.",
-          ));
+        // A blocking task can survive timeout or cancellation while waiting for
+        // this lock. Its original pending sequence and control round must still
+        // own admission; do not let an old task fault or write into a new round.
+        check_cancel(queued_cancel.as_ref())?;
+        ensure!(!stop.load(Ordering::Acquire), "ESP32 link is not open.");
+        {
+          let state = inner.state.lock().unwrap();
+          ensure!(
+            state
+              .pending
+              .get(&id)
+              .is_some_and(|pending| pending.sequence == sequence && pending.round == round)
+              && state.round == round
+              && state.connection.as_ref().map(|c| c.epoch) == Some(epoch),
+            "Queued HID request was cancelled before write."
+          );
         }
-        writer.write_all(line.as_bytes())
-      })
-      .await?;
+        check_cancel(queued_cancel.as_ref())?;
+        ensure!(
+          Instant::now() < deadline,
+          "Queued HID request expired before write."
+        );
+        // The state lock is released before IO. This is dispatch admission;
+        // subsequent cancellation cannot retract bytes already being written.
+        Ok(writer.write_all(line.as_bytes()))
+      });
+      let write = tokio::select! { biased;
+        _ = cancelled(cancel) => return Err(HidCancelled.into()),
+        result = write => result??,
+      };
       if let Err(error) = write {
         fault(&self.inner, connection.epoch, error.to_string());
       }
@@ -1490,11 +1627,11 @@ impl Bridge {
         }
       }
     };
-    let result = tokio::time::timeout(timeout, operation)
+    let result = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), operation)
       .await
       .unwrap_or_else(|_| Err(AckTimeoutError(op).into()));
     reservation.finished = true;
-    take_pending(&mut self.inner.state.lock().unwrap(), id);
+    take_current_pending(&mut self.inner.state.lock().unwrap(), id, sequence);
     result.map(|status| (id, status))
   }
 }
@@ -1502,6 +1639,303 @@ impl Bridge {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  async fn blocked_writer_case(command: &'static str, invalidate: &'static str) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let stream = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (mut peer, _) = listener.accept().unwrap();
+    peer
+      .set_read_timeout(Some(Duration::from_millis(180)))
+      .unwrap();
+    let writer = Arc::new(Mutex::new(Writer::Tcp(stream)));
+    let connection = Arc::new(Connection {
+      epoch: 1,
+      writer: writer.clone(),
+      stop: Arc::new(AtomicBool::new(false)),
+      heartbeat: Cancel::new(),
+    });
+    let mut options = BridgeOptions::tcp("127.0.0.1", listener.local_addr().unwrap().port());
+    options.timeout = Duration::from_millis(70);
+    let bridge = Bridge::new(options).unwrap();
+    bridge.inner.state.lock().unwrap().connection = Some(connection);
+    // The writer mutex, not the async write gate, is the production race boundary.
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let locked_writer = writer.clone();
+    let lock_thread = std::thread::spawn(move || {
+      let _guard = locked_writer.lock().unwrap();
+      held_tx.send(()).unwrap();
+      release_rx.recv().unwrap();
+    });
+    held_rx.recv().unwrap();
+    let cancel = Cancel::new();
+    let queued_cancel = cancel.clone();
+    let queued = bridge.clone();
+    let mut task = Some(tokio::spawn(async move {
+      if matches!(command, "COMMIT" | "PASTE") {
+        let command = if command == "COMMIT" {
+          TextCommand::Commit(1)
+        } else {
+          TextCommand::Paste(1)
+        };
+        queued
+          .text_exchange(&command, Some(&queued_cancel))
+          .await
+          .map(|_| ())
+      } else {
+        let (op, args) = match command {
+          "ARM" => (HidOperation::Arm, vec![]),
+          "KEY" => (HidOperation::Key, vec![1, 25]),
+          "PING" => (HidOperation::Ping, vec![]),
+          _ => unreachable!(),
+        };
+        queued
+          .exchange(
+            op,
+            &args,
+            Some(&queued_cancel),
+            queued.inner.options.timeout,
+            false,
+          )
+          .await
+          .map(|_| ())
+      }
+    }));
+    for _ in 0..100 {
+      let has_pending = {
+        let state = bridge.inner.state.lock().unwrap();
+        !state.text_pending.is_empty() || !state.pending.is_empty()
+      };
+      if has_pending && bridge.inner.write_gate.try_lock().is_err() {
+        break;
+      }
+      tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    {
+      let state = bridge.inner.state.lock().unwrap();
+      assert_eq!(state.text_pending.len() + state.pending.len(), 1);
+    }
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let mut completed = None;
+    let mut _replacement_text_receiver = None;
+    let mut _replacement_hid_receiver = None;
+    match invalidate {
+      "timeout" => {
+        completed = Some(task.take().unwrap().await.unwrap());
+      }
+      "cancel" => {
+        cancel.cancel();
+      }
+      "round" => {
+        bridge.inner.state.lock().unwrap().round += 1;
+      }
+      "deadline" => {
+        // This variant runs on a current-thread runtime: block its timers so
+        // pending is still present when the blocking worker gets the writer.
+        std::thread::sleep(Duration::from_millis(100));
+      }
+      "replacement" => {
+        let mut state = bridge.inner.state.lock().unwrap();
+        if matches!(command, "COMMIT" | "PASTE") {
+          take_text_pending(&mut state, 1);
+          let (tx, rx) = oneshot::channel();
+          _replacement_text_receiver = Some(rx);
+          state.text_pending.insert(
+            1,
+            TextPending {
+              tx,
+              identity: Arc::new(()),
+            },
+          );
+        } else {
+          let sequence = take_pending(&mut state, 1).unwrap().sequence + 1;
+          let round = state.round;
+          let (tx, rx) = oneshot::channel();
+          _replacement_hid_receiver = Some(rx);
+          state.pending.insert(
+            1,
+            Pending {
+              tx,
+              sequence,
+              round,
+            },
+          );
+        }
+      }
+      "connection-epoch" => {
+        bridge.inner.state.lock().unwrap().connection = Some(Arc::new(Connection {
+          epoch: 2,
+          writer: writer.clone(),
+          stop: Arc::new(AtomicBool::new(false)),
+          heartbeat: Cancel::new(),
+        }));
+      }
+      _ => unreachable!(),
+    }
+    release_tx.send(()).unwrap();
+    lock_thread.join().unwrap();
+    if invalidate == "deadline" {
+      std::thread::sleep(Duration::from_millis(30));
+      let state = bridge.inner.state.lock().unwrap();
+      assert_eq!(state.text_pending.len() + state.pending.len(), 1);
+    }
+    // A bounded real socket read sees any late first write, including after timeout.
+    let bytes = tokio::task::spawn_blocking(move || {
+      let mut bytes = [0u8; 256];
+      match peer.read(&mut bytes) {
+        Ok(n) => bytes[..n].to_vec(),
+        Err(e)
+          if matches!(
+            e.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+          ) =>
+        {
+          Vec::new()
+        }
+        Err(e) => panic!("{e}"),
+      }
+    })
+    .await
+    .unwrap();
+    let result = if let Some(result) = completed {
+      result
+    } else {
+      task.take().unwrap().await.unwrap()
+    };
+    assert!(result.is_err());
+    if invalidate == "replacement" {
+      let state = bridge.inner.state.lock().unwrap();
+      assert_eq!(
+        state.text_pending.len() + state.pending.len(),
+        1,
+        "old completion removed a newer pending request"
+      );
+    }
+    bridge.disconnect();
+    assert!(
+      bytes.is_empty(),
+      "{command}/{invalidate} sent after invalidation: {}",
+      String::from_utf8_lossy(&bytes)
+    );
+  }
+
+  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+  async fn text_writer_wait_cannot_send_commit_or_paste_after_timeout() {
+    for command in ["COMMIT", "PASTE"] {
+      blocked_writer_case(command, "timeout").await;
+    }
+  }
+  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+  async fn text_writer_wait_cannot_send_commit_or_paste_after_cancellation() {
+    for command in ["COMMIT", "PASTE"] {
+      blocked_writer_case(command, "cancel").await;
+    }
+  }
+  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+  async fn text_writer_wait_cannot_send_commit_or_paste_into_replaced_connection() {
+    for command in ["COMMIT", "PASTE"] {
+      blocked_writer_case(command, "connection-epoch").await;
+    }
+  }
+  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+  async fn hid_writer_wait_cannot_send_key_arm_or_ping_after_timeout() {
+    for command in ["KEY", "ARM", "PING"] {
+      blocked_writer_case(command, "timeout").await;
+    }
+  }
+  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+  async fn hid_writer_wait_cannot_send_key_arm_or_ping_after_cancellation() {
+    for command in ["KEY", "ARM", "PING"] {
+      blocked_writer_case(command, "cancel").await;
+    }
+  }
+  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+  async fn hid_writer_wait_cannot_send_key_arm_or_ping_into_replaced_connection_or_round() {
+    for invalidation in ["connection-epoch", "round"] {
+      for command in ["KEY", "ARM", "PING"] {
+        blocked_writer_case(command, invalidation).await;
+      }
+    }
+  }
+  #[tokio::test]
+  async fn writer_wait_checks_absolute_deadline_even_before_async_timeout_retires_pending() {
+    for command in ["COMMIT", "PASTE", "KEY", "ARM", "PING"] {
+      blocked_writer_case(command, "deadline").await;
+    }
+  }
+  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+  async fn text_writer_wait_cannot_use_or_remove_a_reused_pending_id() {
+    for command in ["COMMIT", "PASTE"] {
+      blocked_writer_case(command, "replacement").await;
+    }
+  }
+  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+  async fn hid_writer_wait_cannot_use_or_remove_a_reused_pending_id() {
+    for command in ["KEY", "ARM", "PING"] {
+      blocked_writer_case(command, "replacement").await;
+    }
+  }
+
+  #[tokio::test]
+  async fn refused_connection_identifies_esp_endpoint_and_retains_os_reason() {
+    let reserved = socket2::Socket::new(
+      socket2::Domain::IPV4,
+      socket2::Type::STREAM,
+      Some(socket2::Protocol::TCP),
+    )
+    .unwrap();
+    reserved
+      .bind(
+        &"127.0.0.1:0"
+          .parse::<std::net::SocketAddr>()
+          .unwrap()
+          .into(),
+      )
+      .unwrap();
+    // Bound but deliberately not listening: reserve the port without racing
+    // another test or opening a fake board capable of accepting input.
+    let address = reserved.local_addr().unwrap().as_socket().unwrap();
+    let bridge = Bridge::new(BridgeOptions::tcp("127.0.0.1", address.port())).unwrap();
+    let error = tokio::time::timeout(
+      Duration::from_secs(4),
+      bridge.request(HidOperation::Status, &[], None),
+    )
+    .await
+    .expect("A refused loopback connection must remain bounded")
+    .unwrap_err();
+    let original = error.downcast_ref::<std::io::Error>().unwrap();
+    assert_eq!(original.kind(), std::io::ErrorKind::ConnectionRefused);
+    let message = error.to_string();
+    assert!(message.contains("ESP_CONNECTION_ERROR"), "{message}");
+    assert!(message.contains("设备控制器"), "{message}");
+    assert!(message.contains(&address.to_string()), "{message}");
+    assert!(message.contains(&original.to_string()), "{message}");
+    assert!(!message.contains("SCREEN_CONNECTION_ERROR"));
+    let state = bridge.inner.state.lock().unwrap();
+    assert!(state.connection.is_none());
+    assert!(!state.control_attempted);
+    assert!(state.pending.is_empty());
+    assert!(state.heartbeats.is_empty());
+  }
+
+  #[tokio::test]
+  async fn connection_context_does_not_echo_invalid_raw_host_credentials_or_query() {
+    for host in [
+      "http://user:fixture-secret@127.0.0.1",
+      "127.0.0.1?token=fixture-secret",
+    ] {
+      let bridge = Bridge::new(BridgeOptions::tcp(host, 3333)).unwrap();
+      let message = bridge
+        .request(HidOperation::Status, &[], None)
+        .await
+        .unwrap_err()
+        .to_string();
+      assert!(message.contains("ESP_CONNECTION_ERROR"), "{message}");
+      assert!(!message.contains("fixture-secret"), "{message}");
+      assert!(!message.contains(host), "{message}");
+      assert!(bridge.inner.state.lock().unwrap().connection.is_none());
+    }
+  }
 
   fn text_mock(
     mode: &'static str,
@@ -1539,7 +1973,8 @@ mod tests {
           format!(
             "QDDHID/1 {} OK {}\n",
             p[1],
-            serde_json::json!({"v":1,"connected":true,"encrypted":true,"armed":armed,"locked":false,"bonded":true,"name":"text-mock"})
+            serde_json::json!({"v":1,"connected":true,"encrypted":true,
+            "armed":armed,"locked":false,"bonded":true,"name":"text-mock"})
           )
         } else {
           assert_eq!(p[0], "QDDTXT/1");
@@ -1547,7 +1982,7 @@ mod tests {
             continue;
           }
           match p[2] {
-            "BEGIN" => {
+            "BEGIN" | "CLIP_BEGIN" => {
               transfer = p[3].into();
               total = p[5].parse().unwrap();
               received = 0;
@@ -1557,26 +1992,36 @@ mod tests {
               assert_eq!(p[3], transfer);
               assert_eq!(p[4].parse::<usize>().unwrap(), received);
               received += p[5].len() / 2;
+              if mode == "cancel-before-commit" {
+                cancel.cancel();
+              }
             }
             "COMMIT" => {
               phase = "queued";
               if mode == "lost-commit" {
                 continue;
               }
+              if mode == "late-commit" {
+                std::thread::sleep(Duration::from_millis(180));
+                phase = "accepted";
+              }
             }
-            "CANCEL" => {
-              phase = "cancelled";
-            }
+            "PASTE" => phase = "paste_sent",
+            "CANCEL" => phase = "cancelled",
             "STATUS" if phase == "queued" || phase == "awaiting_ack" => {
               polls += 1;
               if polls == 1 {
                 phase = "awaiting_ack";
                 std::thread::sleep(Duration::from_millis(75));
               } else {
-                phase = if mode == "rejected" {
-                  "rejected"
-                } else {
-                  "accepted"
+                phase = match mode {
+                  "rejected" => "rejected",
+                  "uncertain" => "uncertain",
+                  "cancelled" => "cancelled",
+                  "clipboard-state" => "clipboard_dispatched",
+                  "clipboard-verified" => "clipboard_verified",
+                  "paste-state" => "paste_sent",
+                  _ => "accepted",
                 };
               }
               if mode == "cancel-after-commit" {
@@ -1588,24 +2033,52 @@ mod tests {
           if mode == "reject-data" && p[2] == "DATA" {
             format!("QDDTXT/1 {} ERR BAD_OFFSET\n", p[1])
           } else {
-            if matches!(phase, "accepted" | "rejected" | "uncertain" | "cancelled") {
+            if !matches!(
+              phase,
+              "idle" | "receiving" | "queued" | "sending" | "awaiting_ack"
+            ) {
               total = 0;
               received = 0;
             }
-            let epoch = if mode == "focus-changed" && p[2] == "STATUS" && polls > 0 {
+            let epoch = if mode == "ime-unready-epoch-zero" {
+              0
+            } else if mode == "focus-changed" && p[2] == "STATUS" && polls > 0 {
               8
             } else {
               7
             };
-            format!(
-              "QDDTXT/1 {} OK {}\n",
-              p[1],
-              serde_json::json!({"id":transfer,"status":phase,"editorEpoch":epoch,
-              "ready":mode != "ime-unready","received":received,"bytes":total})
-            )
+            let reply_id = if mode == "id-changed" && polls > 0 {
+              "ffffffffffffffff"
+            } else {
+              &transfer
+            };
+            let mut status = serde_json::json!({"id":reply_id,"status":phase,"editorEpoch":epoch,
+              "ready":!matches!(mode, "ime-unready" | "ime-unready-epoch-zero"),"received":received,"bytes":total});
+            if mode != "legacy-ime" {
+              status["mode"] = serde_json::json!(if mode == "clipboard"
+                || (mode == "mode-changed" && polls > 0)
+              {
+                "clipboard"
+              } else {
+                "ime"
+              });
+              status["clipboardVerified"] =
+                serde_json::json!(mode == "clipboard-verified" && phase == "clipboard_verified");
+              status["pasteSent"] = serde_json::json!(phase == "paste_sent");
+              status["insertionVerified"] = serde_json::json!(false);
+            }
+            format!("QDDTXT/1 {} OK {}\n", p[1], status)
           }
         };
         if stream.write_all(reply.as_bytes()).is_err() {
+          return;
+        }
+        // A duplicate transport reply must not become permission to resubmit COMMIT.
+        if mode == "duplicate-commit-ack"
+          && p[0] == "QDDTXT/1"
+          && p[2] == "COMMIT"
+          && stream.write_all(reply.as_bytes()).is_err()
+        {
           return;
         }
       }
@@ -1614,79 +2087,130 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn unicode_text_submits_once_and_waits_for_phone_acceptance_with_heartbeats() {
-    let cancel = Cancel::new();
-    let (bridge, records, server) = text_mock("accepted", cancel.clone());
-    bridge.request(HidOperation::Arm, &[], None).await.unwrap();
-    let began = Instant::now();
-    let status = bridge
-      .unicode_text("中文🙂".repeat(12).as_str(), Some(&cancel))
-      .await
-      .unwrap();
-    assert_eq!(status.status, TextPhase::Accepted);
-    assert!(began.elapsed() >= Duration::from_millis(75));
-    let log = records.lock().unwrap().clone();
-    assert_eq!(log.iter().filter(|l| l.contains(" COMMIT ")).count(), 1);
-    assert_eq!(log.iter().filter(|l| l.contains(" BEGIN ")).count(), 1);
-    assert_eq!(log.iter().filter(|l| l.contains(" DATA ")).count(), 5);
-    assert!(log.iter().all(|l| l.len() < 128));
-    assert!(log.iter().filter(|l| l.ends_with(" PING")).count() > 3);
-    bridge.close().await.unwrap();
-    server.join().unwrap();
+  async fn unicode_ime_acceptance_sends_one_commit_without_clipboard_or_hid_fallback() {
+    for mode in ["ime", "legacy-ime", "duplicate-commit-ack"] {
+      let cancel = Cancel::new();
+      let (bridge, records, server) = text_mock(mode, cancel.clone());
+      bridge.request(HidOperation::Arm, &[], None).await.unwrap();
+      let result = bridge
+        .unicode_text("中文🙂".repeat(12).as_str(), Some(&cancel))
+        .await;
+      let log = records.lock().unwrap().clone();
+      bridge.close().await.unwrap();
+      server.join().unwrap();
+      let status = serde_json::to_value(result.unwrap()).unwrap();
+      assert_eq!(status["mode"], "ime");
+      assert_eq!(status["status"], "accepted");
+      assert_eq!(status["clipboardVerified"], false);
+      assert_eq!(status["pasteSent"], false);
+      assert_eq!(status["insertionVerified"], false);
+      assert_eq!(log.iter().filter(|l| l.contains(" BEGIN ")).count(), 1);
+      assert_eq!(log.iter().filter(|l| l.contains(" COMMIT ")).count(), 1);
+      assert_eq!(log.iter().filter(|l| l.contains(" DATA ")).count(), 5);
+      assert!(log.iter().all(|l| l.len() < 128
+        && !l.contains(" CLIP_BEGIN ")
+        && !l.contains(" PASTE ")
+        && !l.contains(" KEY ")));
+      assert!(log.iter().filter(|l| l.ends_with(" PING")).count() > 3);
+    }
   }
 
   #[tokio::test]
-  async fn unicode_failures_never_resubmit_commit_or_send_hid_fallback() {
+  async fn unicode_ime_preflight_explains_setup_and_rejects_clipboard_before_upload() {
     for mode in [
-      "lost-commit",
-      "cancel-after-commit",
-      "focus-changed",
-      "rejected",
-      "reject-data",
       "ime-unready",
+      "ime-unready-epoch-zero",
+      "clipboard",
       "legacy",
     ] {
       let cancel = Cancel::new();
       let (bridge, records, server) = text_mock(mode, cancel.clone());
       bridge.request(HidOperation::Arm, &[], None).await.unwrap();
-      let error = bridge
-        .unicode_text("中文", Some(&cancel))
-        .await
-        .unwrap_err();
-      if ["lost-commit", "cancel-after-commit", "focus-changed"].contains(&mode) {
-        assert!(
-          error
-            .downcast_ref::<crate::text::TextTransferError>()
-            .unwrap()
-            .uncertain,
-          "{mode}: {error}"
-        );
-      }
-      if mode == "rejected" {
-        assert!(
-          !error
-            .downcast_ref::<crate::text::TextTransferError>()
-            .unwrap()
-            .uncertain
-        );
-      }
+      let result = bridge.unicode_text("中文", Some(&cancel)).await;
       let log = records.lock().unwrap().clone();
+      bridge.close().await.unwrap();
+      server.join().unwrap();
+      let error = result.expect_err(mode).to_string();
+      if matches!(mode, "ime-unready" | "ime-unready-epoch-zero") {
+        assert!(error.contains("TEXT_IME_NOT_READY"), "{error}");
+        assert!(
+          error.contains("enable and select") && error.contains("focus"),
+          "{error}"
+        );
+      } else if mode == "clipboard" {
+        assert!(
+          error.contains("TEXT_IME_UNAVAILABLE") && error.contains("APK"),
+          "{error}"
+        );
+      }
+      assert!(!error.contains("keep screen sharing active"), "{error}");
+      assert!(
+        log.iter().all(|l| !l.contains(" BEGIN ")
+          && !l.contains(" CLIP_BEGIN ")
+          && !l.contains(" DATA ")
+          && !l.contains(" COMMIT ")
+          && !l.contains(" PASTE ")
+          && !l.contains(" KEY ")),
+        "{mode}: {log:?}"
+      );
+    }
+  }
+
+  #[tokio::test]
+  async fn unicode_ime_failures_cancel_and_late_ack_never_resubmit_or_paste() {
+    for mode in [
+      "lost-commit",
+      "late-commit",
+      "cancel-before-commit",
+      "cancel-after-commit",
+      "focus-changed",
+      "id-changed",
+      "mode-changed",
+      "rejected",
+      "reject-data",
+      "uncertain",
+      "cancelled",
+      "clipboard-state",
+      "clipboard-verified",
+      "paste-state",
+    ] {
+      let cancel = Cancel::new();
+      let (bridge, records, server) = text_mock(mode, cancel.clone());
+      bridge.request(HidOperation::Arm, &[], None).await.unwrap();
+      let result = bridge.unicode_text("中文", Some(&cancel)).await;
+      let log = records.lock().unwrap().clone();
+      bridge.close().await.unwrap();
+      server.join().unwrap();
+      let error = result.expect_err(mode);
+      let transfer_error = error
+        .downcast_ref::<crate::text::TextTransferError>()
+        .expect(mode);
+      assert_eq!(
+        transfer_error.uncertain,
+        !["rejected", "reject-data", "cancel-before-commit"].contains(&mode),
+        "{mode}: {error}"
+      );
+      if mode == "rejected" {
+        assert!(error.to_string().contains("TEXT_IME_REJECTED"));
+      }
       assert!(
         log.iter().filter(|l| l.contains(" COMMIT ")).count() <= 1,
         "{mode}: {log:?}"
       );
-      assert!(log
-        .iter()
-        .all(|l| !l.contains(" KEY ") && !l.contains(" MOVE ")));
-      if ["ime-unready", "legacy"].contains(&mode) {
-        assert!(log.iter().all(|l| !l.contains(" BEGIN ")));
-      }
-      if mode == "reject-data" {
-        assert!(log.iter().all(|l| !l.contains(" COMMIT ")));
+      assert!(
+        log.iter().all(|l| !l.contains(" CLIP_BEGIN ")
+          && !l.contains(" PASTE ")
+          && !l.contains(" KEY ")
+          && !l.contains(" MOVE ")),
+        "{mode}: {log:?}"
+      );
+      if ["reject-data", "cancel-before-commit"].contains(&mode) {
+        assert!(
+          log.iter().all(|l| !l.contains(" COMMIT ")),
+          "{mode}: {log:?}"
+        );
         assert_eq!(log.iter().filter(|l| l.contains(" CANCEL ")).count(), 1);
       }
-      bridge.close().await.unwrap();
-      server.join().unwrap();
     }
   }
   use std::io::{BufRead, BufReader};

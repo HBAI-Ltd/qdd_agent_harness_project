@@ -200,14 +200,44 @@ static bool text_fast_allowed(void) {
       !(atomic_load(&s_events) & (EVENT_STOP | EVENT_MENU));
 }
 
-static void sync_text(void) {
+static void text_release_paste(void) {
+  if (!s_text.paste_release_required) return;
+  // Transfer any failed neutral cleanup to the existing HID safety latch.
+  // Clear this transaction's timer before a new ARM/input can begin.
+  s_text.paste_release_required = false;
+  (void)qdd_hid_release(&s_state, report, NULL);
+}
+
+static void text_before_hid(qdd_op_t operation) {
+  if (operation == QDD_PING || operation == QDD_STATUS || operation == QDD_PAIR_STATUS) return;
+  qdd_ble_text_cancel_pending();
+  qdd_text_abort(&s_text, s_state.connected);
+  text_release_paste();
+}
+
+static bool paste_report(uint8_t id, const uint8_t *data, size_t length, void *context) {
+  bool nonzero = false;
+  for (size_t i = 0; i < length; i++) nonzero |= data[i] != 0;
+  if (nonzero && !qdd_ble_text_current(s_text.transfer_version, s_text.transfer_epoch)) return false;
+  return report(id, data, length, context);
+}
+
+static bool text_batch_ready(void) {
+  const qdd_stream_t *stream = s_control.owner == QDD_SOURCE_USB ? &s_usb_stream :
+      s_control.owner == QDD_SOURCE_TCP ? &s_tcp_stream : NULL;
+  // A 64-byte read can split an already-arriving CANCEL after a complete PASTE.
+  // Only the owner's unfinished command delays a new press, never its release.
+  return stream && !stream->length && !stream->overflow && !stream->invalid;
+}
+
+static void sync_text(bool start_paste) {
   const qdd_ble_text_events_t events = qdd_ble_text_events();
   // A known phone acceptance remains terminal even if the target then loses focus.
-  if (events.ack_received) qdd_text_ack(&s_text, events.ack_id, events.ack_epoch, events.ack_status);
+  if (events.ack_received) qdd_text_ack(&s_text, events.ack_id, events.ack_epoch, events.ack_version, events.ack_status, now_ms());
   if (events.indication_done) qdd_text_indication_done(&s_text, events.indication_token, events.indication_success);
   if (events.editor_changed) {
-    if (!events.ready || events.editor_epoch != s_text.editor_epoch) qdd_ble_text_cancel_pending();
-    qdd_text_editor(&s_text, events.ready, events.editor_epoch);
+    if (!events.ready || events.editor_epoch != s_text.editor_epoch || events.receiver_version != s_text.receiver_version) qdd_ble_text_cancel_pending();
+    qdd_text_editor(&s_text, events.ready, events.editor_epoch, events.receiver_version);
   }
   const bool secure = s_state.connected && s_state.encrypted && s_state.bonded;
   const bool allowed = secure && controller_live() && !atomic_load(&s_configuring) &&
@@ -215,6 +245,17 @@ static void sync_text(void) {
       !qdd_hid_text_permission(&s_state, now_ms());
   if (!allowed) { qdd_ble_text_cancel_pending(); qdd_text_abort(&s_text, secure); }
   qdd_text_tick(&s_text, now_ms());
+  if (s_text.status != QDD_TEXT_PASTE_PENDING) text_release_paste();
+  if (allowed && text_fast_allowed() && ((start_paste && text_batch_ready()) || s_text.paste_stage != 1)) {
+    const qdd_text_paste_action_t action = qdd_text_paste_action(&s_text, now_ms());
+    if (action != QDD_TEXT_PASTE_NONE) {
+      const qdd_command_t key = {.op = QDD_KEY, .args = {action == QDD_TEXT_PASTE_PRESS ? 1 : 0,
+          action == QDD_TEXT_PASTE_PRESS ? 25 : 0}};
+      const bool sent = qdd_hid_execute(&s_state, &key, now_ms(), paste_report, NULL) == NULL;
+      qdd_text_paste_result(&s_text, action, sent, now_ms());
+      if (!sent) text_release_paste();
+    }
+  }
   if (s_text.status < QDD_TEXT_QUEUED || s_text.status > QDD_TEXT_AWAITING_ACK) qdd_ble_text_cancel_pending();
   // CANCEL is neutral cleanup after PAUSE/lease loss. A pending text fragment
   // never resumes after its gate closes, and COMMIT is never replayed.
@@ -231,7 +272,7 @@ static void sync_text(void) {
   else if (result == QDD_BLE_TEXT_FAILED) qdd_text_abort(&s_text, false);
 }
 
-static void sync_safety(void) {
+static void sync_safety(bool start_paste) {
   if (qdd_ui_guide_step() != 4) s_guide_pair_requested = false;
   qdd_ble_pairing_context(atomic_load(&s_configuring) ?
       s_setup.page == QDD_SETUP_PAIR : s_guide_pair_requested);
@@ -293,7 +334,7 @@ static void sync_safety(void) {
     ui_feedback("UNLOCKED");
   }
   if (s_state.release_required) (void)qdd_hid_release(&s_state, report, NULL);
-  sync_text();
+  sync_text(start_paste);
 }
 
 static bool write_reply(qdd_source_t source, const char *reply) {
@@ -386,6 +427,7 @@ static void on_text_line(const char *line, qdd_source_t source) {
     if (!error) error = qdd_hid_text_permission(&s_state, now_ms());
   }
   if (!error) error = qdd_text_execute(&s_text, &command, now_ms());
+  if (!error && command.operation == QDD_TEXT_CANCEL) text_release_paste();
   char reply[QDD_REPLY_MAX];
   qdd_text_reply(reply, sizeof(reply), command.request_id, error, &s_text,
       command.operation == QDD_TEXT_STATUS && command.id == 0);
@@ -397,7 +439,7 @@ static void on_text_line(const char *line, qdd_source_t source) {
 static void on_line(const char *line, const char *error, void *context) {
   const qdd_source_t source = (qdd_source_t)(uintptr_t)context;
   qdd_command_t command = {0};
-  sync_safety();
+  sync_safety(false);
   if (!error && strncmp(line, "QDDDRV/1 ", 9) == 0) {
     qdd_driver_command_t driver = {0};
     const char *driver_error = qdd_driver_parse(line, &driver) ? NULL : "BAD_COMMAND";
@@ -418,12 +460,13 @@ static void on_line(const char *line, const char *error, void *context) {
       command.op != QDD_PAIR_STATUS && command.op != QDD_PAUSE && command.op != QDD_RELEASE &&
       !(command.op == QDD_PING && s_control.owner == source)) error = "CONFIGURING";
   if (!error) error = qdd_control_allow(&s_control, source, command.op, now_ms());
+  if (!error) text_before_hid(command.op);
   if (!error) error = qdd_hid_execute(&s_state, &command, now_ms(), report, NULL);
   if (!error && command.op == QDD_PAIR) {
     qdd_ble_open_pairing();
     ui_feedback("PAIRING");
   }
-  sync_safety();
+  sync_safety(false);
   if (!error && command.op == QDD_ARM && s_state.armed && !s_state.locked) ui_feedback("ENABLED");
   char reply[QDD_REPLY_MAX];
   if (command.op == QDD_PAIR || command.op == QDD_PAIR_STATUS) {
@@ -543,23 +586,27 @@ void app_main(void) {
     }
     const qdd_wifi_view_t wifi = qdd_wifi_view();
     if (atomic_load(&s_configuring)) {
+      // A dismissed scan may finish in the background without replacing the
+      // user's current settings page. Connection errors belong to CONNECTING.
       if (s_setup.page == QDD_SETUP_CONNECTING && wifi.connected) {
         qdd_setup_exit(&s_setup);
         setup_action(QDD_SETUP_EXIT);
         ui_feedback("WIFI_CONNECTED");
-      } else if ((s_was_scanning && !wifi.scanning && wifi.failed) ||
+      } else if ((s_setup.page == QDD_SETUP_LIST && s_was_scanning && !wifi.scanning && wifi.failed) ||
           (s_setup.page == QDD_SETUP_CONNECTING && wifi.failed && !wifi.connecting)) {
         qdd_setup_error(&s_setup, "连接失败，请检查网络");
       }
     }
     s_was_scanning = wifi.scanning;
-    sync_safety();
+    sync_safety(false);
     uint8_t bytes[64];
     const int count = usb_serial_jtag_read_bytes(bytes, sizeof(bytes), pdMS_TO_TICKS(10));
     if (count > 0) qdd_stream_feed(&s_usb_stream, bytes, (size_t)count, on_line, (void *)(uintptr_t)QDD_SOURCE_USB);
     const int tcp_count = qdd_wifi_read(bytes, sizeof(bytes));
     if (tcp_count > 0) qdd_stream_feed(&s_tcp_stream, bytes, (size_t)tcp_count, on_line, (void *)(uintptr_t)QDD_SOURCE_TCP);
-    sync_safety();
+    // Dispatch a new paste only after both transport batches have been parsed.
+    // Same-batch CANCEL/PAUSE/ARM/RELEASE must win before its first nonzero report.
+    sync_safety(true);
     portENTER_CRITICAL(&s_view_lock);
     s_view_state = s_state;
     s_view_message = s_message;

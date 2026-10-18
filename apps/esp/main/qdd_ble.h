@@ -34,11 +34,12 @@ typedef struct {
   bool editor_changed, ready, ack_received, indication_done, indication_success;
   uint32_t editor_epoch, ack_epoch, indication_token;
   uint64_t ack_id;
-  uint8_t ack_status;
+  uint8_t ack_status, receiver_version, ack_version;
 } qdd_ble_text_events_t;
 typedef enum { QDD_BLE_TEXT_QUEUED, QDD_BLE_TEXT_BUSY, QDD_BLE_TEXT_FAILED } qdd_ble_text_send_t;
 qdd_ble_text_events_t qdd_ble_text_events(void);
 uint16_t qdd_ble_text_mtu(void);
+bool qdd_ble_text_current(uint8_t version, uint32_t epoch);
 void qdd_ble_text_cancel_pending(void);
 qdd_ble_text_send_t qdd_ble_text_indicate(const uint8_t *bytes, size_t length,
     uint64_t deadline_ms, bool (*allowed)(void), uint32_t *token);

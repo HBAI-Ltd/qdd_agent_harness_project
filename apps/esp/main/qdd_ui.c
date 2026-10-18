@@ -135,9 +135,11 @@ static void home_actions(bool locked, unsigned guide_step) {
     if (s_home_action_selection == selected && s_home_action_locked == locked && s_home_action_step == guide_step) return;
     s_home_action_selection = selected; s_home_action_locked = locked; s_home_action_step = guide_step;
     if (guide_step) {
-        const char *action = guide_step == 1 ? "选择无线网" : guide_step == 4 ? "开始配对" :
-            guide_step == 6 ? "进入主页" : "下一步";
+        static const char *actions[] = {"", "选择无线网", "安装手机软件", "连接手机蓝牙", "开始配对", "检查设备连接", "进入主页"};
+        const char *action = actions[guide_step];
         text(&s_home_rows[1], action);
+        text(&s_guide_forward, guide_step == 6 ? "完成引导" : "下一步");
+        lv_obj_set_style_opa(s_home_rows[0].object, guide_step == 1 ? LV_OPA_40 : LV_OPA_COVER, 0);
         return;
     }
     text(&s_home_rows[0], locked ? "取消急停" : "紧急停止");
@@ -320,16 +322,18 @@ static void guide_refresh(const qdd_ui_view_t *view, qdd_ble_status_t ble, int c
     if (s_guide_step != view->onboarding_step) { s_guide_step = view->onboarding_step; lv_obj_invalidate(lv_screen_active()); }
     char value[64]; snprintf(value, sizeof(value), "连接助手 %u/6", view->onboarding_step); text(&s_header, value); battery(charge);
     text(&s_title, view->title);
+    const bool passkey = view->onboarding_step == 4 && view->show_passkey && !view->show_qr;
+    if (s_passkey != passkey) { s_passkey = passkey; lv_obj_set_style_text_font(s_value.object, passkey ? &qdd_cjk_20 : &qdd_cjk_14, 0); }
+    lv_obj_set_y(s_hint.object, view->onboarding_step == 2 ? 181 : 171);
     if (view->onboarding_step == 2) {
         text(&s_detail, view->detail); text(&s_next, view->next); text(&s_notice, "长按确认：设置");
         lv_obj_add_flag(s_qrcode, LV_OBJ_FLAG_HIDDEN); lv_obj_remove_flag(s_card, LV_OBJ_FLAG_HIDDEN);
         lv_obj_set_pos(s_card, 12, 110); lv_obj_set_size(s_card, 200, 102);
         lv_obj_set_pos(s_value.object, 22, 131); lv_obj_set_width(s_value.object, 180);
-        lv_obj_set_style_text_font(s_value.object, &qdd_cjk_14, 0);
         lv_obj_set_style_text_align(s_value.object, LV_TEXT_ALIGN_CENTER, 0);
         if (s_wifi.connected && s_wifi.ip[0]) snprintf(value, sizeof(value), "http://%s:3334/", s_wifi.ip);
         else strcpy(value, "请先连接无线网");
-        text(&s_value, value); lv_obj_set_pos(s_hint.object, 22, 181); text(&s_hint, "电脑和手机连同一无线网");
+        text(&s_value, value); text(&s_hint, "电脑和手机连同一无线网");
         lv_obj_set_pos(s_next.object, 14, 216);
         return;
     }
@@ -350,8 +354,6 @@ static void guide_refresh(const qdd_ui_view_t *view, qdd_ble_status_t ble, int c
         text(&s_detail, view->detail); text(&s_next, view->next); text(&s_notice, *view->notice ? view->notice : "长按确认：设置");
         lv_obj_add_flag(s_qrcode, LV_OBJ_FLAG_HIDDEN); lv_obj_remove_flag(s_card, LV_OBJ_FLAG_HIDDEN);
         lv_obj_set_y(s_value.object, 131); lv_obj_set_pos(s_next.object, 14, 216); lv_obj_set_width(s_next.object, 196);
-        bool passkey = view->onboarding_step == 4 && view->show_passkey;
-        if (s_passkey != passkey) { s_passkey = passkey; lv_obj_set_style_text_font(s_value.object, passkey ? &qdd_cjk_20 : &qdd_cjk_14, 0); }
         if (view->onboarding_step == 4) {
             if (passkey) snprintf(value, sizeof(value), "%06lu", (unsigned long)ble.passkey); else snprintf(value, sizeof(value), "%s", qdd_ble_name());
             text(&s_value, value); text(&s_hint, passkey ? "在手机输入配对码" : "手机蓝牙中选择本设备");
@@ -584,7 +586,7 @@ void qdd_ui_wifi(const qdd_setup_model_t *setup, qdd_wifi_view_t wifi) {
     char value[96], title[64]; const uint8_t empty_bssid[6] = {0}; text(&s_notice, "");
     if (setup->page == QDD_SETUP_LIST) {
         if (wifi.scanning) {
-            text(&s_header, "正在扫描 Wi-Fi"); text(&s_detail, "通常需要 3-5 秒"); text(&s_value, "请稍候");
+            text(&s_header, "正在扫描 Wi-Fi"); text(&s_detail, ""); text(&s_value, "请稍候");
             text(&s_hint, "确认返回 · 扫描继续");
             lv_obj_remove_flag(s_rows[4].object, LV_OBJ_FLAG_HIDDEN); text(&s_rows[4], "返回上一级");
             lv_obj_set_style_bg_color(s_rows[4].object, lv_color_hex(ACCENT), 0);
@@ -649,11 +651,14 @@ void qdd_ui_wifi(const qdd_setup_model_t *setup, qdd_wifi_view_t wifi) {
     } else if (setup->page == QDD_SETUP_PAIR) {
         text(&s_header, "手机蓝牙"); text(&s_detail, "在手机蓝牙中选择"); text(&s_value, qdd_ble_name());
     } else {
-        text(&s_header, setup->page == QDD_SETUP_CONNECTING ? "正在连接" : "未能连接");
-        ssid_display(value, sizeof(value), setup->credentials.ssid, 1, empty_bssid, 196); text(&s_detail, value);
+        const bool scan_error = setup->page == QDD_SETUP_ERROR && !setup->credentials.ssid[0];
+        text(&s_header, setup->page == QDD_SETUP_CONNECTING ? "正在连接" : scan_error ? "未能查找网络" : "未能连接");
+        if (scan_error) value[0] = '\0';
+        else ssid_display(value, sizeof(value), setup->credentials.ssid, 1, empty_bssid, 196);
+        text(&s_detail, value);
         text(&s_value, setup->page == QDD_SETUP_CONNECTING ? "等待网络回应" : ""); text(&s_notice, setup->error ? setup->error : "");
     }
-    text(&s_hint, "上下选择 · 确认进入");
+    text(&s_hint, setup->page == QDD_SETUP_ACTIONS && setup->error ? setup->error : "上下选择 · 确认进入");
     unsigned regular = 0, selected = setup->selection;
     if (setup->page == QDD_SETUP_MENU) regular = QDD_SETUP_MENU_ITEMS - 1;
     else if (setup->page == QDD_SETUP_ACTIONS) regular = QDD_SETUP_ACTION_COUNT - 1;
@@ -689,7 +694,8 @@ void qdd_ui_wifi(const qdd_setup_model_t *setup, qdd_wifi_view_t wifi) {
                 if (qdd_wifi_ap((uint8_t)index, wifi.scan_revision, &ap)) ssid_display(value, sizeof(value), ap.ssid, index + 1, ap.bssid, 192);
                 else strcpy(value, "正在更新网络");
             } else strcpy(value, "重新查找网络");
-        } else strcpy(value, setup->page == QDD_SETUP_ERROR ? "重新输入密码" : "开启手机配对");
+        } else strcpy(value, setup->page == QDD_SETUP_ERROR ?
+            (setup->credentials.ssid[0] ? "重新输入密码" : "返回网络列表") : "开启手机配对");
         lv_obj_set_y(s_rows[i].object, setup->page == QDD_SETUP_PAIR || setup->page == QDD_SETUP_ERROR ? 139 + (int)i * 35 : 108 + (int)i * 35);
         lv_obj_remove_flag(s_rows[i].object, LV_OBJ_FLAG_HIDDEN); text(&s_rows[i], value);
         lv_obj_set_style_bg_color(s_rows[i].object, lv_color_hex(index == selected ? ACCENT : PANEL), 0);

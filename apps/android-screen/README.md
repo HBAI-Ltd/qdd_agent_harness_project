@@ -12,6 +12,7 @@ the separate ESP32 BLE HID path.
 Android MediaProjection → Wi-Fi LAN MJPEG preview → PC operator
 Android MediaProjection → Wi-Fi LAN original JPEG → PC MCP → AI sees the screen
 ESP32 BLE keyboard/mouse → Android input
+ESP32 encrypted BLE text → selected device IME → focused text field
 ```
 
 USB is used only for initial APK installation and debugging. Runtime screen
@@ -60,6 +61,13 @@ The App registers its IP, UUID and projection state with ESP so the PC EXE's aut
 discovery can fill connection settings. If the board IP changes, discovery matches the
 selected Bluetooth name instead of silently switching devices. Registration grants no
 HID input rights and does not skip Android screen-sharing consent.
+
+If the LAN listener temporarily fails to start, the App retries after intervals
+of 1, 3 and 10 seconds, then stops automatic retries. Its retry-LAN button can
+recover after the fault clears without reauthorizing an active projection.
+A healthy listener and its connections stay intact; network loss or replacement
+invalidates older retries. Active projection means capture is running, so also
+check the App's LAN connection status and current address.
 
 The Bluetooth guide accepts the controller as ready only when `connected`, `encrypted`,
 `bonded` and `ready` are all true. Just Works pairing needs no typed code; confirm the
@@ -264,29 +272,39 @@ the session and point, and re-entering creates a fresh session. HTTP cannot laun
 events. Identical images cannot establish gain when the system cursor is absent, and simulated target
 markers do not prove actual pointer positions.
 
-## Optional device Unicode input method
+## Device Chinese Input
 
-Updated ESP firmware carries original UTF-8 through its bonded, encrypted BLE link to an optional
-App input method, which calls `InputConnection.commitText` on the current editor. It uses no pinyin
-substitution, clipboard, ADB or network text injection. A transfer supports up to 512 UTF-8 bytes,
-including Chinese, emoji and mixed ASCII; NUL is rejected. The target App may still filter characters
-or length. An ACK confirms the editor API result, so verify the actual result through screen sharing.
+Enable and select **Device Chinese Input** in Android once. Text then travels through encrypted
+ESP BLE to the current input method and is submitted with `InputConnection.commitText` to the
+focused editor. Keep this IME selected for continuous use; after choosing another keyboard,
+select it again. No clipboard, accessibility service, or ADB input is used.
 
-The user must complete the App's **设备中文输入** steps themselves:
+Follow the current prompt in the App's **Device Chinese Input** card:
 
-1. Grant Android 12+ Nearby devices connection permission and select an already bonded QDD controller.
-2. Open system input-method settings and enable **设备中文输入**.
-3. Select it in the system picker, then focus the intended field in the target App.
+1. Allow Nearby devices access on Android 12+ and select the current QDD controller already
+   paired in Android Bluetooth settings.
+2. Initially open **Enable device input method**, enable it in system settings, return to the
+   App, and press **Select device input method**.
+3. Select Device Chinese Input in the system picker, return to the target App, and focus an
+   editable field.
 
-The App lists bonded devices only, without scanning or location permission. It cannot silently enable
-or select the IME. A hardware keyboard may hide the IME window; readiness instead requires a valid
-current InputConnection and subscribed encrypted GATT channel. The service is protected by
-`BIND_INPUT_METHOD`. HTTP has no text-commit, IME-launch or selection endpoint. Editor changes,
-IME shutdown and disconnection clear pending bytes. Text is never saved to preferences, logs or files.
+The App distinguishes disabled, unselected, unfocused, and connection states without asking
+to repeat completed steps. The user confirms enablement and selection in system UI; the App
+does not silently modify the default keyboard. Use the system picker from the IME panel or
+App to return to an everyday keyboard. Screen sharing still provides visual confirmation.
+Only the device IME owns the text GATT connection; the projection service no longer starts a
+competing clipboard receiver.
 
-The service UUID is `9bded201-39ba-4a19-8ff7-25c9d00a0001`; the ESP indication characteristic ends
-in `0002` and encrypted phone-write characteristic in `0003`. Every packet starts with version
-byte 1 and type byte; all remaining integers use little-endian encoding:
+Each request allows at most 512 UTF-8 bytes, including Chinese, emoji and mixed ASCII, but no
+NUL. Editors can filter text or impose length limits: `accepted` only means `commitText`
+accepted the request, not that the App displayed or saved it. Inspect the real phone image.
+Do not blindly resend after missing acknowledgements, timeout, or cancellation. Text is not
+stored in preferences, files, or logs. Locking, losing the editor, changing controller,
+disconnecting, or destroying the IME revokes readiness; late callbacks cannot revive old work.
+
+The service UUID is `9bded201-39ba-4a19-8ff7-25c9d00a0001`; ESP indication ends in `0002`
+and encrypted phone writes in `0003`. BLE packets use version byte **1**; remaining integers
+are little-endian:
 
 | Direction/type | Body |
 | --- | --- |
@@ -297,12 +315,14 @@ byte 1 and type byte; all remaining integers use little-endian encoding:
 | Phone→ESP `81 READY` / `83 NOT_READY` | editor epoch u32 |
 | Phone→ESP `82 ACK` | id u64, status u8, editor epoch u32 |
 
-ACK 0 means `commitText` returned true, 1 means rejected, and 2 means an exception left the result
-uncertain. Nonzero IDs increase as unsigned u64 within each editor epoch. Duplicate data must match
-already received bytes exactly; duplicate COMMIT returns the cached result without another commit.
-Lost confirmation may mean text was already entered: the PC must never replay automatically. State
-and ACK writes are serialized, and text arrives exclusively through ESP BLE. HID/GATT coexistence,
-Service Changed/OEM cache behavior for existing bonds and actual Unicode input still require device acceptance.
+ACK 0 is accepted, 1 rejected, and 2 uncertain. Repeated COMMIT returns the cached result
+without another submission. A changed focus, receiver identity, or epoch prevents submission;
+clipboard v2 packets cannot confirm v1 input. Pure Java protocol, session, and preparation
+state tests run with `npm test --workspace @qdd/android-screen`. These Host checks and APK
+signature validation do not replace device testing of system setup and actual Chinese text.
+
+Platform references: [Android IMEs and system selection](https://developer.android.com/develop/ui/views/touch-and-input/creating-input-method),
+[InputConnection.commitText](https://developer.android.com/reference/android/view/inputmethod/InputConnection#commitText(java.lang.CharSequence,int)).
 
 ## Validation boundary
 

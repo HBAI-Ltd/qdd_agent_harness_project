@@ -44,13 +44,15 @@ bool qdd_text_parse(const char *line, qdd_text_command_t *command) {
     }
     if (*cursor || count < 3 || !decimal(tokens[0], 2147483647u, &command->request_id) || !command->request_id) return false;
     if (!strcmp(tokens[1], "BEGIN")) command->operation = QDD_TEXT_BEGIN;
+    else if (!strcmp(tokens[1], "CLIP_BEGIN")) command->operation = QDD_TEXT_CLIP_BEGIN;
+    else if (!strcmp(tokens[1], "PASTE")) command->operation = QDD_TEXT_PASTE;
     else if (!strcmp(tokens[1], "DATA")) command->operation = QDD_TEXT_DATA;
     else if (!strcmp(tokens[1], "COMMIT")) command->operation = QDD_TEXT_COMMIT;
     else if (!strcmp(tokens[1], "STATUS")) command->operation = QDD_TEXT_STATUS;
     else if (!strcmp(tokens[1], "CANCEL")) command->operation = QDD_TEXT_CANCEL;
     else return false;
     if (!transfer_id(tokens[2], command->operation == QDD_TEXT_STATUS, &command->id)) return false;
-    if (command->operation == QDD_TEXT_BEGIN) {
+    if (command->operation == QDD_TEXT_BEGIN || command->operation == QDD_TEXT_CLIP_BEGIN) {
         uint32_t bytes;
         if (count != 5 || !decimal(tokens[3], UINT32_MAX, &command->editor_epoch) || !command->editor_epoch ||
             !decimal(tokens[4], QDD_TEXT_MAX, &bytes) || !bytes) return false;
@@ -93,6 +95,9 @@ bool qdd_text_utf8(const uint8_t *bytes, size_t length) {
 static bool active(const qdd_text_t *state) {
     return state->status >= QDD_TEXT_RECEIVING && state->status <= QDD_TEXT_AWAITING_ACK;
 }
+static bool clipboard_ticket(const qdd_text_t *state) {
+    return state->status == QDD_TEXT_CLIPBOARD_DISPATCHED || state->status == QDD_TEXT_CLIPBOARD_VERIFIED;
+}
 static void terminal(qdd_text_t *state, qdd_text_status_t status) {
     memset(state->text, 0, sizeof(state->text));
     state->length = state->received = state->tx_offset = 0;
@@ -104,19 +109,25 @@ void qdd_text_abort(qdd_text_t *state, bool link_alive) {
         if (link_alive && queued) state->cancel_id = state->id;
         terminal(state, queued ? QDD_TEXT_UNCERTAIN : QDD_TEXT_CANCELLED);
     }
+    if (clipboard_ticket(state)) state->status = QDD_TEXT_CANCELLED;
+    if (state->status == QDD_TEXT_PASTE_PENDING) state->status = QDD_TEXT_PASTE_UNCERTAIN;
+    // Retain only neutral cleanup after consuming a press, never another pulse.
+    state->paste_stage = 0;
     if (!link_alive) {
         state->ready = false; state->editor_epoch = 0;
         state->in_flight = false; state->flight_token = 0; state->cancel_id = 0;
     }
 }
-void qdd_text_editor(qdd_text_t *state, bool ready, uint32_t epoch) {
-    if (!ready || !epoch || state->editor_epoch != epoch) {
+void qdd_text_editor(qdd_text_t *state, bool ready, uint32_t epoch, uint8_t version) {
+    if (version != 1 && version != 2) ready = false;
+    if (!ready || !epoch || state->editor_epoch != epoch || state->receiver_version != version) {
         const bool receiving = state->status == QDD_TEXT_RECEIVING;
         qdd_text_abort(state, true);
         if (receiving) state->status = QDD_TEXT_REJECTED;
     }
     state->ready = ready && epoch != 0;
     state->editor_epoch = epoch;
+    state->receiver_version = version;
 }
 const char *qdd_text_execute(qdd_text_t *state, const qdd_text_command_t *command, uint64_t now_ms) {
     if (command->operation == QDD_TEXT_STATUS) return !command->id || command->id == state->id ? NULL : "STALE_TRANSFER";
@@ -125,13 +136,26 @@ const char *qdd_text_execute(qdd_text_t *state, const qdd_text_command_t *comman
         qdd_text_abort(state, true); return NULL;
     }
     if (command->operation == QDD_TEXT_COMMIT && command->id == state->id && state->status >= QDD_TEXT_QUEUED) return NULL;
+    if (command->operation == QDD_TEXT_PASTE) {
+        if (command->id != state->id) return "TRANSFER_MISMATCH";
+        if (state->transfer_version != 2) return "MODE_MISMATCH";
+        if (state->status == QDD_TEXT_PASTE_PENDING || state->status == QDD_TEXT_PASTE_SENT ||
+            state->status == QDD_TEXT_PASTE_UNCERTAIN) return NULL;
+        qdd_text_tick(state, now_ms);
+        if (!clipboard_ticket(state)) return "PASTE_NOT_AVAILABLE";
+        if (!state->ready || state->receiver_version != 2 || state->editor_epoch != state->transfer_epoch) return "NOT_READY";
+        state->status = QDD_TEXT_PASTE_PENDING; state->paste_stage = 1;
+        return NULL;
+    }
     if (!state->ready) return "NOT_READY";
-    if (command->operation == QDD_TEXT_BEGIN) {
+    if (command->operation == QDD_TEXT_BEGIN || command->operation == QDD_TEXT_CLIP_BEGIN) {
+        const uint8_t version = command->operation == QDD_TEXT_CLIP_BEGIN ? 2 : 1;
+        if (state->receiver_version != version) return "MODE_MISMATCH";
         if (!command->id || !command->editor_epoch || !command->length || command->length > QDD_TEXT_MAX) return "BAD_COMMAND";
         if (command->editor_epoch != state->editor_epoch) return "NOT_READY";
-        if (active(state) || state->in_flight || state->cancel_id) {
+        if (active(state) || state->in_flight || state->cancel_id || state->status == QDD_TEXT_PASTE_PENDING || state->paste_release_required) {
             if (state->status == QDD_TEXT_RECEIVING && command->id == state->id &&
-                command->editor_epoch == state->transfer_epoch && command->length == state->length) return NULL;
+                command->editor_epoch == state->transfer_epoch && version == state->transfer_version && command->length == state->length) return NULL;
             return "TRANSFER_BUSY";
         }
         if (state->high_epoch == command->editor_epoch && command->id <= state->high_id) return "STALE_TRANSFER";
@@ -139,6 +163,7 @@ const char *qdd_text_execute(qdd_text_t *state, const qdd_text_command_t *comman
         state->transfer_epoch = state->high_epoch = command->editor_epoch;
         state->length = command->length; state->received = state->tx_offset = 0;
         state->stage = 1; state->prepared_kind = 0; state->commit_sent = false;
+        state->transfer_version = version; state->clipboard_verified = false; state->paste_stage = 0;
         memset(state->text, 0, sizeof(state->text)); state->status = QDD_TEXT_RECEIVING;
         return NULL;
     }
@@ -163,6 +188,8 @@ const char *qdd_text_execute(qdd_text_t *state, const qdd_text_command_t *comman
 void qdd_text_tick(qdd_text_t *state, uint64_t now_ms) {
     if (state->status >= QDD_TEXT_QUEUED && state->status <= QDD_TEXT_AWAITING_ACK &&
         (now_ms < state->queued_ms || now_ms - state->queued_ms > QDD_TEXT_RESULT_MS)) qdd_text_abort(state, true);
+    if ((clipboard_ticket(state) || state->status == QDD_TEXT_PASTE_PENDING) &&
+        (now_ms < state->clipboard_ms || now_ms - state->clipboard_ms > QDD_TEXT_RESULT_MS)) qdd_text_abort(state, true);
 }
 static void little(uint8_t *out, uint64_t value, unsigned bytes) {
     for (unsigned i = 0; i < bytes; i++) out[i] = (uint8_t)(value >> (i * 8));
@@ -172,14 +199,14 @@ size_t qdd_text_frame(qdd_text_t *state, uint16_t mtu, uint8_t *out, size_t capa
     const size_t bound = capacity < (size_t)mtu - 3 ? capacity : (size_t)mtu - 3;
     if (state->cancel_id) {
         if (bound < 10) return 0;
-        out[0] = 1; out[1] = 4; little(out + 2, state->cancel_id, 8);
+        out[0] = state->transfer_version; out[1] = 4; little(out + 2, state->cancel_id, 8);
         state->prepared_kind = 4; state->prepared_count = 0; return 10;
     }
     if (state->status != QDD_TEXT_QUEUED && state->status != QDD_TEXT_SENDING) return 0;
-    if (!state->ready || state->editor_epoch != state->transfer_epoch) { qdd_text_abort(state, true); return 0; }
+    if (!state->ready || state->editor_epoch != state->transfer_epoch || state->receiver_version != state->transfer_version) { qdd_text_abort(state, true); return 0; }
     if ((state->stage == 1 && bound < 16) || (state->stage == 2 && bound <= 12) ||
         (state->stage == 3 && bound < 14)) return 0;
-    out[0] = 1; out[1] = state->stage; little(out + 2, state->id, 8);
+    out[0] = state->transfer_version; out[1] = state->stage; little(out + 2, state->id, 8);
     state->prepared_kind = state->stage; state->prepared_count = 0;
     if (state->stage == 1) {
         if (bound < 16) return 0;
@@ -217,22 +244,62 @@ void qdd_text_indication_done(qdd_text_t *state, uint32_t token, bool success) {
         if (state->tx_offset == state->length) state->stage = 3;
     } else if (state->flight_kind == 3) state->status = QDD_TEXT_AWAITING_ACK;
 }
-void qdd_text_ack(qdd_text_t *state, uint64_t id, uint32_t epoch, uint8_t status) {
-    if ((!active(state) && !(state->status == QDD_TEXT_UNCERTAIN && state->commit_sent)) ||
-        id != state->id || epoch != state->transfer_epoch || status > 2 ||
-        (status == 0 && !state->commit_sent)) return;
-    terminal(state, status == 0 ? QDD_TEXT_ACCEPTED : status == 1 ? QDD_TEXT_REJECTED : QDD_TEXT_UNCERTAIN);
+void qdd_text_ack(qdd_text_t *state, uint64_t id, uint32_t epoch, uint8_t version, uint8_t status, uint64_t now_ms) {
+    if (version != state->transfer_version || (version != 1 && version != 2) ||
+        (!active(state) && !(version == 1 && state->status == QDD_TEXT_UNCERTAIN && state->commit_sent)) ||
+        id != state->id || epoch != state->transfer_epoch || status > (version == 2 ? 3 : 2) ||
+        ((status == 0 || status == 3) && !state->commit_sent)) return;
+    if (version == 2 && (!state->ready || state->receiver_version != 2 || state->editor_epoch != epoch)) return;
+    if (version == 2 && (now_ms < state->queued_ms || now_ms - state->queued_ms > QDD_TEXT_RESULT_MS)) {
+        qdd_text_abort(state, true); return;
+    }
+    if (version == 2 && (status == 0 || status == 3)) {
+        terminal(state, status == 3 ? QDD_TEXT_CLIPBOARD_VERIFIED : QDD_TEXT_CLIPBOARD_DISPATCHED);
+        state->clipboard_verified = status == 3; state->clipboard_ms = now_ms;
+    } else terminal(state, status == 0 ? QDD_TEXT_ACCEPTED : status == 1 ? QDD_TEXT_REJECTED : QDD_TEXT_UNCERTAIN);
+}
+qdd_text_paste_action_t qdd_text_paste_action(qdd_text_t *state, uint64_t now_ms) {
+    qdd_text_tick(state, now_ms);
+    if (state->status != QDD_TEXT_PASTE_PENDING) return QDD_TEXT_PASTE_NONE;
+    if (!state->ready || state->receiver_version != 2 || state->editor_epoch != state->transfer_epoch) {
+        qdd_text_abort(state, true); return QDD_TEXT_PASTE_NONE;
+    }
+    if (state->paste_stage >= 2 && now_ms < state->paste_ms) {
+        qdd_text_abort(state, true); return QDD_TEXT_PASTE_NONE;
+    }
+    if (state->paste_stage == 1) {
+        state->paste_stage = 2; state->paste_ms = now_ms; state->paste_release_required = true;
+        return QDD_TEXT_PASTE_PRESS;
+    }
+    if (state->paste_stage == 2 && now_ms >= state->paste_ms && now_ms - state->paste_ms >= QDD_TEXT_PASTE_MS) {
+        state->paste_stage = 3; return QDD_TEXT_PASTE_RELEASE;
+    }
+    return QDD_TEXT_PASTE_NONE;
+}
+void qdd_text_paste_result(qdd_text_t *state, qdd_text_paste_action_t action, bool success, uint64_t now_ms) {
+    if (state->status != QDD_TEXT_PASTE_PENDING) return;
+    if (!success) { state->status = QDD_TEXT_PASTE_UNCERTAIN; state->paste_stage = 0; }
+    else if (action == QDD_TEXT_PASTE_PRESS && state->paste_stage == 2) state->paste_ms = now_ms;
+    else if (action == QDD_TEXT_PASTE_RELEASE && state->paste_stage == 3) {
+        state->status = QDD_TEXT_PASTE_SENT; state->paste_stage = 0; state->paste_release_required = false;
+    }
 }
 void qdd_text_reply(char *out, size_t capacity, uint32_t request_id, const char *error,
     const qdd_text_t *state, bool current_editor) {
     if (error) { (void)snprintf(out, capacity, "QDDTXT/1 %lu ERR %s\n", (unsigned long)request_id, error); return; }
-    static const char *const names[] = {"idle", "receiving", "queued", "sending", "awaiting_ack", "accepted", "rejected", "uncertain", "cancelled"};
+    static const char *const names[] = {"idle", "receiving", "queued", "sending", "awaiting_ack", "accepted", "rejected", "uncertain", "cancelled",
+        "clipboard_dispatched", "clipboard_verified", "paste_pending", "paste_sent", "paste_uncertain"};
+    const bool receiver_only = current_editor && (state->receiver_version != state->transfer_version ||
+        state->editor_epoch != state->transfer_epoch);
+    const uint64_t transfer = receiver_only ? 0 : state->id;
     char id[17]; static const char hex[] = "0123456789abcdef";
-    for (unsigned i = 0; i < 16; i++) id[i] = hex[(state->id >> ((15 - i) * 4)) & 15u];
+    for (unsigned i = 0; i < 16; i++) id[i] = hex[(transfer >> ((15 - i) * 4)) & 15u];
     id[16] = 0;
     (void)snprintf(out, capacity,
-        "QDDTXT/1 %lu OK {\"id\":\"%s\",\"status\":\"%s\",\"editorEpoch\":%lu,\"ready\":%s,\"received\":%u,\"bytes\":%u}\n",
-        (unsigned long)request_id, id, names[state->status],
+        "QDDTXT/1 %lu OK {\"id\":\"%s\",\"status\":\"%s\",\"editorEpoch\":%lu,\"ready\":%s,\"received\":%u,\"bytes\":%u,\"mode\":\"%s\",\"clipboardVerified\":%s,\"pasteSent\":%s}\n",
+        (unsigned long)request_id, id, names[receiver_only ? QDD_TEXT_IDLE : state->status],
         (unsigned long)(current_editor ? state->editor_epoch : state->transfer_epoch),
-        state->ready ? "true" : "false", (unsigned)state->received, (unsigned)state->length);
+        state->ready ? "true" : "false", receiver_only ? 0 : (unsigned)state->received, receiver_only ? 0 : (unsigned)state->length,
+        (current_editor ? state->receiver_version : state->transfer_version) == 2 ? "clipboard" : "ime",
+        !receiver_only && state->clipboard_verified ? "true" : "false", !receiver_only && state->status == QDD_TEXT_PASTE_SENT ? "true" : "false");
 }

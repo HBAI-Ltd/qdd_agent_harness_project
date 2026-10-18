@@ -168,6 +168,8 @@ public final class ScreenService extends Service {
       getSystemService(DisplayManager.class).registerDisplayListener(displayListener, capture);
       displayListenerRegistered = true;
       scheduleRefresh();
+      main.post(() -> {
+      });
       if (stopRequested) releaseProjection();
     } catch (RuntimeException | OutOfMemoryError error) { requestStop("投屏启动失败，请重新授权后再试"); }
   }
@@ -449,11 +451,15 @@ public final class ScreenService extends Service {
     stopRequested = true;
     releaseWifiLock();
     app.frames.stop(generation, message);
-    main.post(() -> { stopForeground(STOP_FOREGROUND_REMOVE); stopSelf(); });
+    main.post(() -> { closeClipboardReceiver(); stopForeground(STOP_FOREGROUND_REMOVE); stopSelf(); });
+  }
+
+  private void closeClipboardReceiver() {
   }
 
   @Override public void onDestroy() {
     stopRequested = true;
+    closeClipboardReceiver();
     releaseWifiLock();
     app.frames.stop(generation, "投屏已停止"); stopForeground(STOP_FOREGROUND_REMOVE);
     capture.post(() -> {

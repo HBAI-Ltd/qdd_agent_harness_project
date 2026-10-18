@@ -210,6 +210,38 @@ static void test_completed_guide_reports_projection_loss_without_restarting_setu
 }
 
 
+static void test_instruction_copy_matches_current_state(void) {
+    qdd_hid_state_t state = {0};
+    qdd_ui_onboarding_t progress = {.require_full = true, .page = 4};
+    const uint32_t passkeys[] = {0, 123456, 999999};
+    for (unsigned i = 0; i < sizeof(passkeys) / sizeof(passkeys[0]); i++) {
+        const qdd_ui_view_t current = qdd_ui_onboarding_model(&state, false,
+            true, true, passkeys[i], 2000, "", 0, &progress);
+        assert(current.show_passkey);
+        assert(strcmp(current.next, "请在手机输入配对码") == 0);
+    }
+    const struct { bool open, visible; uint32_t passkey; } no_passkey[] = {
+        {true, false, 123456}, {false, true, 123456}, {true, true, 1000000}
+    };
+    for (unsigned i = 0; i < sizeof(no_passkey) / sizeof(no_passkey[0]); i++) {
+        const qdd_ui_view_t current = qdd_ui_onboarding_model(&state, false,
+            no_passkey[i].open, no_passkey[i].visible, no_passkey[i].passkey,
+            2000, "", 0, &progress);
+        assert(!current.show_passkey);
+        assert(strcmp(current.next, "手机确认配对，无需输数字") == 0);
+    }
+    progress.page = 1;
+    for (unsigned connected = 0; connected <= 1; connected++) {
+        progress.wifi_connected = connected;
+        const qdd_ui_view_t current = qdd_ui_onboarding_model(&state, false,
+            false, false, 0, 2000, "", 0, &progress);
+        assert(current.onboarding_step == 1 && current.stage == QDD_UI_WIFI);
+        // The same-network instruction already appears inside the Wi-Fi card.
+        assert(strcmp(current.next, "") == 0);
+        assert(strcmp(current.detail, connected ? "网络已连接" : "按确认选择无线网") == 0);
+    }
+}
+
 static void test_explicit_pages_preserve_evidence(void) {
     qdd_hid_state_t state = {0};
     qdd_ui_onboarding_t progress = {.require_full = true, .page = 1};
@@ -254,6 +286,7 @@ static void test_explicit_pages_preserve_evidence(void) {
 }
 
 int main(void) {
+    test_instruction_copy_matches_current_state();
     test_explicit_pages_preserve_evidence();
     test_wifi_precedes_usb_and_connected_wifi_does_not_skip_usb();
     test_pairing_settings_feedback();

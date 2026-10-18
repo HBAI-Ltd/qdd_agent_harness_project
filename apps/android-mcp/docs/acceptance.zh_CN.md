@@ -11,6 +11,374 @@
 本轮仅按新问题范围进行有界传输验证：v26 新板 APK 下载及哈希通过，没有修改 APK 源码，
 也不把下载通过当作手机已安装。
 
+## v61 网页重新连接拒绝——监听恢复、端口默认与状态修正
+
+2026-10-18：用户再次反馈“由于计算机积极拒绝”，并确认在 web 重新连接时出现。
+本轮未取得报错机器的实际目标 IP/端口、EXE 版本或日志，不能将以下复现漏洞当作现场根因。
+本机检查没有 8790/8791/3333/3334 监听，也不能据此推断朋友电脑的运行状态。
+
+- **Android 确定性红绿**：生产 `ScreenApplication` + `FrameServer` 使用真实 loopback TCP，
+  暂时占用端口触发绑定失败，释放后同 IP 回调三次仍连接拒绝，而移除/恢复地址后 HTTP 200。
+  修复为初次失败后按 1/3/10 秒间隔有限重试，次数耗尽后提供“重试内网连接”。
+  相同 IP 回调不刷新重试预算，健康监听/已有连接不重建；断网、换 Network、丢地址取消旧任务，
+  过期回调不会恢复旧地址。已关闭 listener 可检测并手动恢复，不让 accept 循环空转。
+  原有投屏授权、私网绑定、设备输入法和输入安全规则保留。
+- **电脑端口红绿**：只填手机 IP 原先使用 HTTP 默认 80，现使用手机默认 8791。
+  完整 HTTP/HTTPS URL、自定义端口及已有保存 URL 不改义；12 组端口/保存重载与 7 组非法输入覆盖。
+  这不自动修改曾被保存为完整 URL 的错误配置，用户仍应按手机 App 当前地址查找/保存。
+- **网页状态红绿**：重连完成后不再因旧 generation 一直显示“正在连接”；手机视频恢复仅清除
+  该视频自身的错误，不会掩盖较新的控制器 10061。恢复不自动 ARM、不重发文字或点击。
+  “重新连接”仍重试当前配置；切网导致地址变化须从“检查连接设置 / 重新查找”确认后保存。
+- **Host tests: PASS**：Rust 102/102、压缩后 UI 83/83、assets 4/4、正式 EXE 隔离场景 21/21，
+  root typecheck/build PASS。Android 完整 Java/socket 回归 PASS，其中新增恢复测试 35 checks；
+  使用真实 TCP socket，但 Android Network/Handler 是主机替身。独立代码复审无阻断项。
+- **Build: PASS**：EXE `apps/android-mcp-rust/build/windows/v61/设备操作台.exe`，
+  buildId `rust-4759c400886ddeb1`，1,938,944 B，
+  SHA `98ab9e428e5283b705efd35fb23c23d4d0a5d3ee92a6852de0000050941fd688`。
+  ZIP 950,927 B，SHA `5ca009187e903f31dd3ed7f577dbfd518894030bae94d4dcc2ecb77240399050`；
+  同目录源码 ZIP 309,499 B，SHA `a6df1813db88cc4ab64c19419102af7e6cc9c7b4a0dba1d9efb096be2fd024bf`，
+  CRC、源码条目哈希、确切 EXE 身份及排除本地配置核验通过。
+  APK 固定副本 `apps/android-screen/build/v61/qdd-android-screen-debug.apk`，74,282 B，
+  SHA `45ba041dc87731559ead532a65deb7667739d7400c3a86fda1a2761fe1fe451f`，签名/manifest 核验通过。
+- 证据：`apps/android-mcp-rust/build/reconnect-v61-*`、`build/windows/v61/exe-smoke.json`、
+  `transfer-compression-audit.json`、`apps/android-screen/build/listener-refusal-review/repro.log`、
+  `endpoint-v61-{red,green,tests,build}.log`。正式复现入口为 `tools/test-stream.ps1`，其调用
+  `tools/test-endpoint.ps1` 编译生产监听实现及 `tools/endpoint-tests/` 中的主机事件替身。
+- **初始交付 Device / Unverified**：当时未安装 APK，未启动/替换实际操作台，未刷 ESP 或更新板内下载包。
+  需同时更新 APK 和 EXE 才包含两端修复。朋友机器的实际拒绝原因、厂商网络回调、重连效果和
+  中文真实落字仍未验收。本轮保留 v60 输入法实现；历史 MCP 会话/排队取消问题仍为待办，
+  不能把这些连接修复当作全部鲁棒性问题已解决。未提交、push 或发布。
+
+### v61 COM5 刷写补充
+
+2026-10-18：用户随后要求刷入 COM5/6。仅枚举到 COM5 A1BA，esptool 实测 MAC
+`4c:11:ae:2f:a1:b8`、ESP32-C3、8 MB；没有 COM6。
+
+- **Build / Host tests: PASS**：内置电脑 ZIP 路径更新为 v61；完整 ESP 门禁 exit 0，
+  保留既有平台跳过 4/5/12。归档及精确 APK/ZIP 嵌入由两次独立检查确认。
+  bundle `apps/esp/build/firmware/1c0f6ef2db164c73caa7c69ccab8697870fd7deac593920aeb6fa63c604ff149`；
+  app 2,695,888 B，SHA `ef1d78777cb33d339eab2ace0f5094c1d985f1cde05947232a88f39b80fd3fff`；
+  ELF SHA `f48b4a42dcb8e3e6e6c19420fd88e9210adcc4a1554340c9ad312b05c6a633d5`。
+- **Device tests: PASS（刷写/启动专项）**：新读表 MD5 有效，SHA
+  `b4a705f5dcd64100c5c40e0de65b2a2acae70a2827ae56044317575331f4620d`，factory 位于
+  `0x10000/0x7f0000`，没有 assets。仅写 app，扇区擦除范围 `[0x10000,0x2a3000)`，
+  esptool exit 0 / `Hash of data verified`，保留 bootloader、分区表、NVS、PHY。
+  30.031 秒只读观察取得 9 个状态回复，无 fault/OOM；Wi-Fi 恢复，BLE 已加密、绑定、ready，
+  文字通道 ready。未发送文字/点击，未清除设置，串口已关闭。
+- **Unverified**：电脑对首页及 `/api/status` 的请求均约 5 秒后无 HTTP 响应断开，ICMP 0/2。
+  板报告 `192.168.1.221`，电脑 WLAN 为 `10.65.201.80/24`，目标路由选到 Mihomo；
+  未修改网络或代理设置。此环境未完成板上 APK/ZIP 下载校验，不能据此归因于固件。
+  手机和电脑尚未更新 v61，真实网页重连、中文落字及完整 UI 流程仍未验收；刷入下载包不等于安装。
+- 证据：`apps/esp/build/com5-v61-{full-gate.log,artifact-identity.json,layout-read.log,partition-table.bin,flash-plan.json,flash.log,startup.json,download.json,result.json}`。
+
+## v60 设备输入法直写中文——首次选择，单次提交
+
+2026-10-18：用户反馈剪贴板方案不可用，明确禁止无障碍，并选择“设备输入法，接受首次启用和选择”。
+本轮按该选择恢复直接文字通道：不使用剪贴板或无障碍，不自动修改系统输入法，不回退 ADB。
+
+- 手机 App 恢复 `QddInputMethodService` 的系统注册和唯一 v1 加密 BLE 接收通道；
+  `ScreenService` 不再启动剪贴板接收器。选择当前控制器后，界面依次提示首次启用、
+  选择输入法、点击目标输入框；已启用/选中的步骤不会重复催促。保持选中可以连续使用，
+  切换到其他键盘后须重新选中设备输入法，不能承诺永远免选择。
+- 输入事务：`STATUS 0(mode=ime/ready/epoch) → BEGIN/DATA → COMMIT 一次 → STATUS`。
+  混合 Unicode 最多 512 UTF-8 字节；无 CLIP_BEGIN、PASTE、拼音或裸 HID 中文回退。
+  旧剪贴板模式在发送正文前拒绝；分别返回 `TEXT_IME_UNAVAILABLE`、`TEXT_IME_NOT_READY`、
+  `TEXT_IME_REJECTED`。取消、丢 ACK、焦点/事务/版本变化不自动重发。v59 的真实 writer
+  锁后取消、身份及截止时间检查保留，安全时限未放宽。
+- 生命周期：输入连接、锁屏、控制器、连接或编辑器 epoch 变化撤销 ready 和待输入文字。
+  本轮独立审查修复提交期间重入换链的 ACK 接线：回传前再次核对接收器身份和连接版本，
+  不访问已清空对象，也不把旧 ACK 发往新控制器。重复 COMMIT 仅返回已有结果。
+- 确认语义：`accepted` 仅代表 `InputConnection.commitText` 接受，不等于目标 App 显示、
+  保存或完全保留文字；`insertionVerified=false`。网页保留内容并提示查看真实手机结果，
+  不把超时或输入法未就绪报告为输入成功。首次系统启用和选择仍由用户完成。
+- **Host tests: PASS**。Rust **101/101**（IME 红 0/3→绿 3/3，含 21 场景；writer 9/9）；
+  压缩后实际网页 **81/81**、assets **4/4**，根 typecheck/build PASS。
+  exact v60 EXE 独立 loopback **21/21**，覆盖中文、混合符号、512 字节、丢 COMMIT ACK、
+  同 RPC ID 不重放、未就绪/旧模式/明确拒绝。Android 完整 Java/socket PASS，其中
+  v1 协议 **125 checks**、新增 IME 生命周期/准备 **88 checks**、socket **21 cases**，
+  注册/唯一接收器与 ACK 接线红绿通过。既存剪贴板纯模型回归保留，不代表运行时仍走剪贴板。
+- **Host 互操作: PASS，18/18**。生产 C v1 状态机→生产 Java `ImeTextSession`/
+  `Utf8ImeProtocol`→生产 C ACK，覆盖“淮北采耳”12 B、混合文本 32 B、512 B，分别测试
+  accepted/rejected/异常 uncertain/提交前取消/旧 epoch/提交中换焦点；重复 BLE COMMIT
+  最多一次 editor dispatch，Host 重复提交无新 BLE 帧，v2 不混用、v1 PASTE 拒绝。
+  InputConnection 和 ATT 确认是替身，不是实物 BLE 或 Android 输入。
+- **Build: PASS**。EXE buildId `rust-4dc5c96ce4144e92`；
+  `apps/android-mcp-rust/build/windows/v60/设备操作台.exe` **1,938,944 B**，
+  SHA `c99e4dc756c587384c8b0530418eddf0594241204e04336d3b7fb69d101d42bf`；ZIP **950,800 B**，
+  SHA `c99a8d7fff91bdffe580cf6fdda5a663e6e06b8392fe285c2d8d86adf120dcfa`。同目录 Rust 源码 ZIP **308,214 B**，
+  SHA `6ffd3fd30c4c3856a5af96db7c24f0e3c3533a0b871de7d011b6f496c5546fcc`；条目 CRC/哈希、EXE 自测身份及不含本地配置已核验。
+  APK `apps/android-screen/build/qdd-android-screen-debug.apk` **74,282 B**，
+  SHA `15c56274fc29230e7512244c66213a82c37cbbe1fbbd8884882fede011214b17`，本地开发签名/manifest 匹配。
+- **ESP Build: PASS**。仅同步内置下载包到 v60，现有 v1 输入协议无需修改。
+  完整门禁 exit 0；既有平台专属 skipped=4/5/12 不算通过。归档
+  `apps/esp/build/firmware/e022744020956e83890672a2ad03bd5c17b55527a8455e5bc275fd3a3b85f650`，目录名为 full SHA。
+  APP **2695760 B**，SHA `2afaeb72f810cc5a37e802792c803898050d7982fa7bb8f028fa796de3f4cf46`，
+  ELF SHA `88a61e6e7a8334c0ccc84b6804d950bef7ff5836665e23c18767deeba7add28a`。布局 factory `0x10000/0x7f0000`；这是构建布局，
+  不替代真机读取。APP 中恰好各包含一份上述 exact APK/ZIP，归档核验通过。
+- 证据：`apps/android-mcp-rust/build/ime-v60-*.log`、`build/windows/v60/exe-smoke.json`、
+  `transfer-compression-audit.json`、`apps/android-screen/build/ime-v60-*.log`、
+  `apps/esp/build/ime-v60-full-gate.log`、`ime-v60-artifact-identity.json`、
+  `ime-v60-interop/result.json`；前述 v59 及更早历史保留。
+- **Device tests: NOT RUN / Unverified**。本轮 ADB 设备列表和串口枚举均为空；未安装 APK、
+  未启动/替换真实操作台、未刷写控制板、未发送真实业务输入。系统启用/选择 UI、厂商
+  InputConnection/GATT 共存、“淮北采耳”实际落字及真实画面闭环仍未验收，不能当成品通过。
+  原 MCP 鲁棒性审查已保存 SSE 断开销毁会话/POST-only 会话耗尽、排队取消延迟的独立
+  loopback 证据；遵照“先修中文”，这些问题未混入本轮修复，仍待后续处理。
+
+## v59 中文剪贴板输入——无需切换输入法，单次准备与粘贴
+
+2026-10-18：用户选择由投屏 App 写入手机剪贴板，再由 ESP 发送一次 Ctrl+V。
+本轮实现该三端链路；不再要求启用或选中自定义输入法，也不自动切换系统键盘。
+手机仍需在投屏 App 中选择当前控制器并保持投屏，目标 App 需有已聚焦的可编辑输入框。
+
+- 协议与状态：电脑仍使用 `QDDTXT/1`，新增 `CLIP_BEGIN` 与 `PASTE`，STATUS 明确
+  `mode=clipboard/ime`；缺少 mode 按旧 IME 处理。手机 BLE v2 负责剪贴板，旧 v1
+  的 `accepted` 不能证明剪贴板已准备。Rust 默认只走 clipboard，旧 App/固件明确
+  提示更新，不自动回退 IME、猜拼音或另发裸 Ctrl+V。ASCII 保持既有 HID 输入。
+- 单次派发：`CLIP_BEGIN/DATA → COMMIT → STATUS → PASTE → STATUS`。
+  COMMIT 与 PASTE 各尝试一次，等待期间只查询状态；丢 ACK、取消、未知状态、
+  mode/epoch/事务身份变化均不重放。ESP 的短效一次性票据先消费为 `paste_pending`，
+  再发 Ctrl+V，并在 50 ms 后中性释放；取消清理和旧事务不能干扰新的控制预约。
+  不放宽原有 1200 ms ACK 与 1500 ms 安全时限，不自动 ARM。
+- 确认语义：手机 ACK 0 是 `clipboard_dispatched`，仅表示写剪贴板 API 调用完成，
+  不能确认后台/OEM 是否真正写入；ACK 3 是 `clipboard_verified`，表示当时获准读回并
+  核对本事务内容。前者仅允许一次尽力粘贴，返回 `clipboardVerified=false`。
+  显式 AppOps 拒绝返回 rejected，不发送粘贴；不确定结果也不产生可复用票据。
+  `pasteSent=true` 仅确认快捷键派发，`insertionVerified` 始终 false，不能称为目标
+  输入框已收到文字。AI 和用户应查看后续真实画面，超时先观察，不盲目再次发送。
+- 手机生命周期与隐私：投屏停止、锁屏、换控制器或连接世代变化会撤销 ready/更新 epoch，
+  旧回调不能复活票据；仍核对已选择控制器和加密 BLE。写入会覆盖当前剪贴板，不读取、
+  保存或恢复原剪贴板备份；同一事务的迟到/重复帧不能再次写入。网页保留未确认文字，
+  区分剪贴板准备被拒绝与目标输入失败，不要求选择输入法或承诺输入成功。
+- 取消顺序：确定性红测发现两处派发窗口。ESP 原先在解析下一条取消命令前就推进旧
+  按下，现仅在两路输入批次解析后允许首次按下，并覆盖真实 64 B 读取留下 owner 半行
+  的情况。CANCEL、ARM、PAUSE、RELEASE 优先撤销未按下票据；其他来源不能取消或
+  阻塞当前 owner，已按下的键仍按时释放。Rust 原先的阻塞写任务能在外层超时/取消后
+  继续发送旧 COMMIT/PASTE 或 HID 命令；两条路径现取得实际写锁后，再检查请求身份、
+  连接 epoch、取消和绝对截止时间，HID 另核对 sequence/控制轮次。旧 waiter 不能删除
+  复用 ID 的新请求，state 锁不跨 IO。9 项精准 writer 回归通过；已获准进入 IO 的字节
+  在取消后仍按不确定处理，不宣称可以撤回。
+- Host tests：**PASS**。Rust **99/99**、实际压缩 UI **81/81**、assets **4/4**；
+  根 TypeScript typecheck/build 通过。正式 v59 EXE 独立 loopback 场景 **21/21 PASS**，
+  覆盖 dispatched/verified、丢 COMMIT/PASTE ACK、重复 RPC、旧 IME 拒绝与不重放。
+  Android 完整 Java/socket 测试通过，包含剪贴板 **72 checks**、旧 UTF-8 协议
+  **125 checks**、stream socket **21 cases**。C → Java → C 生产协议互操作
+  **12/12 PASS**，覆盖 3/18/512 UTF-8 字节与 ACK 0/1/2/3；剪贴板和 HID 使用 fake，
+  这是 Host 验证，不是真机剪贴板或 BLE 输入。证据：
+  `apps/android-mcp-rust/build/clipboard-v59-{rust-final,all-writer-green,ui-green,assets,root-typecheck,root-build,exe}.log`、
+  `build/windows/v59/exe-smoke.json`、`apps/android-screen/build/clipboard-v59-tests.log`、
+  `apps/esp/build/clipboard-v59-interop/result.json`；相关红测日志保留。
+- Build / 电脑和 APK：**PASS**。Rust buildId **rust-8ffd9a5601b8a295**；
+  `apps/android-mcp-rust/build/windows/v59/设备操作台.exe` **1,942,528 B**，SHA
+  `af3de10d10a58dcb08f58315175a14173c4d966e33318b92516e2bec239d24b4`；
+  `设备操作台.zip` **952,381 B**，SHA
+  `841483ccd1cb84fbaf40d8c561e4247632082b49460ab89f80a8850b745444fb`；
+  `android-mcp-rust-source.zip` **308,508 B**，SHA
+  `f3460a5e542ba57f62c990fa7b4a7892fc76a2f6130f482b6df915cdd1445dac`。
+  同目录 manifest 和 `transfer-compression-audit.json` 核对 EXE/ZIP、CRC、自测 buildId
+  及源码 77 文件/79 条目逐项哈希；不含本地连接配置或凭据。
+  `apps/android-screen/build/qdd-android-screen-debug.apk` **70,188 B**，SHA
+  `1a2ca9683d27c9d391b6f8d43cf94942b7432c2fad3822d5a890592e2256e0bf`，
+  对应 `build/manifest.json`，本地开发签名；构建成功不代表手机已安装。
+- Build / ESP：**PASS**。冻结最终源码后的完整门禁 exit 0，仓库检查、Host tests、
+  ESP-IDF 构建、合并镜像/布局及调试归档核验均通过。既有平台专属跳过仍为三组
+  **4/5/12**，不计作测试通过。局部集成 **4/4**、传输契约 **19/19**、BLE 契约 **9/9**。
+  日志：`apps/esp/build/clipboard-v59-{full-gate,route-red,partial-red,route-green}.log`。
+  最终归档：`apps/esp/build/firmware/82e79c4ec24233b8c1f4959c51bd90afdf87bd12f5c47b735eb1da4201f27461`，
+  目录名即完整镜像 SHA256。APP **2,693,248 B**，SHA
+  `09927da30a3f4145f8faf797e89c102d23ddb19a83040da850d3a8a9fa0b9949`；
+  匹配 ELF SHA `e5efe92de9e4a95b1ccfe0333e6ff48a986fc5dc3f28a4c972a413cbed2ca0b2`。
+  构建布局为 factory `0x10000/0x7f0000`，这不等同于新鲜读取当前板布局，也不授权刷
+  merged 镜像。`apps/esp/build/clipboard-v59-artifact-identity.json` 核对最终 APP
+  字节中恰好各包含一份确切交付 APK/电脑 ZIP，并将 EXE 测试与源码包绑定至最终
+  buildId。没有写 assets 分区。初版候选及日志保留在 history/pre-review 路径；本段
+  最终身份才是待交付候选，不使用审查修复前的包替代。
+- Device / 未验收：COM5 USB 枚举 serial 为 `4C:11:AE:2F:A1:B8`（A1BA），ADB 无设备。
+  没有安装 APK、刷写固件、替换/启动
+  实际服务或发送真实文字。OEM 后台剪贴板行为、原系统键盘保留/恢复、锁屏/投屏恢复和
+  真实 Ctrl+V 插入及画面闭环均 **UNVERIFIED**，目前不能按完整成品验收。
+
+## v58 朋友电脑 EXE——连接错误诊断与恢复入口
+
+2026-10-18：用户明确 10061 出现在朋友电脑的 EXE 网页。本轮没有访问或实测那台电脑，
+不把本机旧地址、服务未启动或板子未联网当作朋友故障的根因。本次修复让连接错误可辨认、
+提供恢复入口，不宣称远端真实故障已经解决。
+
+- 连接诊断：控制器 TCP 连接失败标记 `ESP_CONNECTION_ERROR`，手机画面连接失败标记
+  `SCREEN_CONNECTION_ERROR`。错误说明区分角色、显示校验后的 `host:port`，保留原始
+  OS 错误及错误链。无效地址使用“地址无效”，不回显原始 URL 凭据、路径或查询参数。
+  loopback 拒绝连接回归验证角色区分、原始错误保留及敏感 URL 不回显。
+- 恢复 UI：错误区增加可点击的“检查连接设置 / 重新查找”，指向
+  `/desktop/settings#discover`。已识别的端点错误保留具体角色说明，旧版
+  10061/ECONNREFUSED 也有连接恢复提示；详细错误仍可查看。MCP 不可用或画面连接失败
+  也可显示该入口。重试成功后清除提示；未发送文字保留，恢复过程不重放控制输入。
+- 连接设置：通过 `#discover` 进入时，即使已保存旧地址，也调用既有的有界只读发现。
+  阻止并发查找；多候选需手动选择，迟到结果不覆盖新编辑或已提交配置。发现/选择设备
+  不自动保存、不发输入，用户仍需明确保存所选值。查找超时后可重试或手动填写，不新增
+  自动保存、输入重放，也不放宽协议截止时间。
+- Host tests：**PASS**——Rust **87/87**、生成/压缩 UI **79/79**、assets **4/4**、
+  传输打包检查 **7/7**；覆盖拒绝连接、错误详情、恢复入口、不重放、带旧配置重新发现、
+  多候选、编辑竞态及超时。Build **PASS**。证据包括
+  `apps/android-mcp-rust/build/reconnect-v58-{check,rust-tests,build}.log` 和
+  `apps/android-mcp-rust/tools/fixtures/operator-recovery-cases.js`。
+- 产物身份：`apps/android-mcp-rust/build/windows/v58/manifest.json`，buildId
+  **rust-3c4d8d7ec3f1a10e**；已核对实际 EXE/ZIP 哈希与 manifest 一致：
+  `设备操作台.exe` **1,929,728 B**，SHA
+  `3d8d853da4db028673bb28e7547657b0c22034ef4269b706c1ebc1ca33446846`；
+  `设备操作台.zip` **945,529 B**，SHA
+  `5e45d723630432148031b4e2b63017ce202239be2ed8f96f8abf1c13d5b10ae7`。
+  正式 EXE 验收 **21/21 PASS**，session 75793 exit 0；
+  `reconnect-v58-exe.log` 与 `build/windows/v58/exe-smoke.json` 记录独立 loopback
+  场景，未连接真实设备。源码包 **302,484 B**，SHA
+  `dcbcc265d61d32817a66b9c9830723694f405683046ee9d77b9a22385157c447`。
+  `transfer-compression-audit.json` 核对 ZIP 仅含 EXE、CRC/确切哈希、自测 buildId，
+  源码包 77 个源文件/79 个条目的逐项哈希均通过，不含本机配置或凭据；没有启动实际服务。
+  白名单显式加入恢复 UI 测试夹具，并保持既有文字测试夹具的确切字节。
+- 已打包错误链专项：**2/2 PASS**，确切 v58 EXE 经官方 MCP SDK 分别调用
+  `android_screenshot` 与 `android_hid_status`。Windows 独占绑定但不监听的两个
+  loopback 端口真实返回 `os error 10061`，结果保留正确角色、确切端点及原始原因，
+  每项约 2.08 秒。零输入工具调用、零被接受 TCP 连接；两个 EXE 子进程和端口预留
+  助手均退出，临时目录删除。证据为
+  `apps/android-mcp-rust/build/reconnect-v58-exe-refusal.{mjs,json,log}`。
+- Device / 未验收：朋友电脑、真实拒绝连接的端点、网络状态及恢复效果均为
+  **UNVERIFIED**。主机夹具和打包离线场景不代表真实手机、BLE 或控制器行为通过。
+  v58 是电脑端更新，不更新 APK、ESP 固件或板内 assets，也不替代 v57 的实物验收边界。
+
+## v57 ESP 全界面审查——导航、错误反馈与状态恢复
+
+2026-10-18：用户反馈出现两个“下一步”，要求检查 ESP 全部 UI，并移除 Wi-Fi 扫描
+预计秒数。本轮确认并修复可复现的显示与页面切换问题，不改输入控制权、无线参数或
+协议截止时间。
+
+- 引导导航：第 2、3、5 页原来在中间确认行和底部翻页行同时显示“下一步”。中间行
+  现按页写明动作或目的地：“选择无线网、安装手机软件、连接手机蓝牙、开始配对、
+  检查设备连接、进入主页”。保留三条独立竖排选项；第一页“上一步”置灰，末页底部
+  改为“完成引导”。实体按键与手动翻页语义保持不变，完成引导不代表设备已就绪。
+- 扫描与设置反馈：保留扫描动画和返回操作，去掉秒数预估。“完成输入”页的密码
+  校验错误现在可见，避免确认“连接网络”后无反馈；没有选中 SSID 的错误页显示
+  “返回网络列表”，不再误导用户“重新输入密码”。后台扫描失败只在当前仍为网络
+  列表时显示错误，用户已进入菜单、下载、帮助、配对、重置或密码页时不会被抢跳。
+  保留 CONNECTING 的成功/失败原语义。抽取生产 worker 分支的新增回归先在旧代码
+  失败，加入 LIST 条件后通过。
+- 状态恢复：兼容数字配对码、二维码、电脑安装说明页来回切换时，正确恢复字号与
+  提示位置。显示配对码时改为“请在手机输入配对码”，不再同时说“无需输数字”。
+  第一步保留卡片内同网提示，清除卡片外重复说明。审查包含菜单箭头、固定返回、
+  密码各页、重置、配对反馈及隐藏/残留内容。
+- 下载网页：明确选择电脑 ZIP 续传时，安装说明切换到 Windows，不受浏览器最初
+  识别为 Android 或未知平台影响。续传期间阻止并发点击原生 APK/ZIP 下载链接，
+  被阻止的点击不会改变安装平台；传输结束后链接恢复。保存包不自动翻页、不宣称
+  已安装。本轮修改既有内网页面，不改传输协议或普通直接下载流程。
+- Host tests：**PASS**。根 TypeScript typecheck/build、下载页 JS **21/21**、
+  transport 契约 **19/19**、字体 **3/3**、UI 模型测试均通过。**83 帧主机渲染**使用
+  真实 LVGL 渲染器与应用字体，覆盖字形、范围、标签重叠、页面往返和缓存刷新。
+  不变刷新无 flush，页面替换检查保持分配稳定；LVGL 峰值 **17,632 B / 24 KiB**。
+  这些是模拟状态下的渲染，不是真机屏幕照片或实体像素验收。
+  证据：`apps/esp/build/ui-audit-v57/` 的红/绿日志与预览、
+  `ui-v57-scan-routing-{red,green}.log`、`ui-v57-model-passkey-red.log`、
+  `ui-v57-model-wifi-copy-red.log`、`ui-v57-model-copy-green.log`、
+  `ui-v57-root-typecheck.log`、`ui-v57-root-build.log`。
+- Build：**PASS**。完整 ESP 门禁 `apps/esp/build/ui-v57-full-gate.log` exit 0，
+  保留既有平台跳过 **4 + 5 + 12**。已验证归档：
+  `apps/esp/build/firmware/3ac256edad7a95ae136fc1645079f52734eb00b612921d4154ac9bb319088648`，
+  目录名即完整镜像 SHA。APP **2,677,872 B**，SHA
+  `66867063be5e421cc49012edcc805ad19bd3be96de80c807cbcdc25d702196ec`；匹配 ELF SHA
+  `4493334320a658f6029cee4c73efb51eecb7e2b00c6389fb76536c78b3880363`。
+- Flash Device：**PASS，仅限精确 app-only 范围**。新鲜枚举确认当前为 COM6 /
+  MAC `4c:11:ae:31:32:6c`，COM5 未枚举。新读分区表 SHA
+  `bd386c960f8b827e812dd238af37d469c319d7e9ecc2d7501d00296c46804a4f`，MD5 正确；
+  OTA 数据 sequence 1 / state 2、CRC 正确，选中 OTA0 `0x20000`，容量 `0x2f0000`。
+  首次高速 stub 读表出现 `The chip stopped responding`，改用 115200 ROM loader
+  后读表、读取 OTA 数据和刷写成功。刷写 session **9962 exit 0**，在 `0x20000`
+  实际写入补齐后的 **2,678,784 B**，写入数据哈希校验通过；擦除范围截至不含
+  **0x2ae000 / 2,809,856**。证据为 `apps/esp/build/com6-v57-flash-plan.json` 和
+  `com6-v57-{layout-read,layout-read-rom,otadata-read,flash}.log`，失败日志保留。
+  本轮写入范围不含 bootloader、分区表、OTA 数据、NVS、PHY、`assets`、OTA1，
+  不能据此宣称旧配置已自动恢复。不更新 EXE/APK 产物或 assets 分区。固件保留内嵌 v56
+  备用包，但这块 COM6 的原 assets 分区仍在，未核对实际选用内容前不能说板上下载
+  的电脑包一定是 v56。
+- Startup Device：**PASS，仅限有界启动与只读查询**。
+  `apps/esp/build/com6-v57-startup.json` 记录 **30.000 秒 / 9 次查询全部回应**，
+  无 fault、error 或观察到的 OOM，串口已关闭。STATUS 名称为 `QDD-Passport-326E`；
+  Wi-Fi **configured=false / connected=false**、无 IP，BLE 未连接/未就绪，
+  `TEXT_STATUS` **ready=false**。没有发送控制输入、PING 或配对命令。该专项不代表
+  网络/蓝牙恢复、实际按键导航、实体显示像素或手机反馈通过；UI 证据仍为 83 帧主机渲染。
+- COM5 追加刷写：2026-10-18 用户最初指定 COM6，实际两次只读枚举仅发现
+  COM5 / `4c:11:ae:2f:a1:b8`，经用户明确改为“刷当前 COM5（A1BA）”后执行。
+  同一 v57 归档重新 verify PASS；新读表 SHA
+  `b4a705f5dcd64100c5c40e0de65b2a2acae70a2827ae56044317575331f4620d`、MD5 正确，
+  本板为 factory `0x10000 / 0x7f0000`，没有 assets 分区。仅写上述确切 APP 到
+  `0x10000`，擦除结束 exclusive `0x29e000`；session **51338 exit 0**，
+  **2,677,872 B / 12.7 秒**，Hash of data verified，保留 bootloader、表、NVS、PHY。
+  `com5-v57-startup.json` 记录 **30.000 秒 / 9/9 只读回复**、无 fault/OOM，串口关闭；
+  Wi-Fi 已连接 `192.168.1.221`，BLE encrypted/bonded/ready=true，armed/locked=false。
+  `TEXT_STATUS ready=false / editorEpoch=0`，未发送控制或文字，不能算中文输入通过。
+  本机对 `http://192.168.1.221:3334/` 一次 3 秒 GET **超时**，不宣称下载页已可达；
+  没有据此修改网络参数或重刷。证据：`apps/esp/build/com5-v57-{flash-plan.json,`
+  `layout-read.log,flash.log,startup.json,http.json}`。这次没有改固件或重跑旧门禁，
+  没有把 v58 电脑包写入板上。
+- 未验收：实体显示与按键导航、当前板新版内网页面、真实中文输入及完整手机控制
+  反馈仍为独立检查。用户新报朋友电脑出现 10061 正另行排查，不把本机历史连接配置
+  或当前板未连接 Wi-Fi 当作远端故障根因。
+
+## v56 发送文字支持中文——操作台修复，真实中文输入待验证
+
+2026-10-18：用户再次反馈发送输入无法中文。本轮定位到 Rust 操作台前端仍保留
+ASCII-only 正则：点击“发送文字”时，中文在发出 `android_type` 之前即被拒绝。
+既有 Rust MCP / ESP UTF-8 / Android 输入法通道已实现；本次不把前端修复当作
+这些通道已在真实输入框完成闭环。
+
+- 修复：发送按钮允许中文、英文与 emoji 混合文字，原样交给既有 `android_type`。
+  包含非 ASCII 的整串文字继续限制为 **512 UTF-8 字节**，不是 512 个字符；发送前
+  拒绝 NUL、未配对 UTF-16 代理项，以及纯 ASCII 输入中不支持的控制字符。没有改协议、ACK
+  截止、输入控制权或失败重试策略，也没有加入拼音/HID/ADB 中文回退。
+- UI：输入框说明支持中文；未准备好时明确提示在手机“设备投屏”的“设备中文输入”中
+  选择当前控制器、启用并选中该输入法，再点选目标输入框。不写死旧设备名。错误结果
+  保留 `textTransfer.status`；`uncertain` 优先于取消提示，明确“文字可能已输入，
+  不要重复发送”。成功、失败或画面恢复都不自动重发，失败与未知结果保留原输入文字。
+  独立复审发现 `IME` 子串会误匹配 `TIMEOUT` / `MIME`，新增红测后改为完整单词匹配。
+- Host：**PASS**。根 TypeScript typecheck/build、Rust **83/83**、生成 UI **74/74**、
+  资源检查 **4/4**、传输打包 **7/7**、EXE **21/21** 均通过。前端旧基线新增六例红测；
+  修复后实际压缩资源验证混合文字原样派发、UTF-8 边界、无效输入不 ARM、延迟期间
+  连点只派发一次、IME 未就绪提示、未知结果与文字保留、画面恢复不重放。
+  证据：`apps/android-mcp-rust/build/unicode-v56-ui-red.log`、
+  `unicode-v56-ime-match-red.log`、`unicode-v56-ui-green.log`、`unicode-v56-assets.log`；
+  EXE 夹具结果为 `apps/android-mcp-rust/build/windows/v56/exe-smoke.json`。
+  这些夹具不连接实际手机或控制器，不代表真实中文已输入。
+- Build / 产物：**PASS**。目录 `apps/android-mcp-rust/build/windows/v56/`，
+  buildId **`rust-f76f812ff75498de`**。EXE **1,925,120 B**，SHA
+  `bfe8e442298a8d63dea957d88f084178e91392ea7f5a69274f32ea22f69c1663`；
+  ZIP **943,612 B**，SHA
+  `bcdd5b96f07f9ab689ccb3fb7d2c87217cec24a8f699c579fa0d916ce5db334c`。
+  源码包 **296,919 B**，SHA
+  `21071300c3838d33f139d67758ad64b83453d3dbe1a5117d4f28216f3f56f8d0`。
+  源码打包白名单显式加入本轮 `tools/fixtures/operator-text-cases.js`，保持测试夹具
+  的确切字节和清单哈希；不扩大为任意 JS 目录，也不包含本地连接配置或凭据。
+  Rust 构建从自身 canonical assets 生成压缩资源，不从 Node 产品复制旧页面。
+- ESP Build / Host：**PASS**。内置 ZIP 引用更新为 v56，完整门禁 exit 0，保留既有平台
+  跳过 4 + 5 + 12，独立归档校验通过。日志：`apps/esp/build/unicode-v56-full-gate.log`。
+  归档目录 `apps/esp/build/firmware/c9a7cebf9499a491b2178b40378af87497e3cc5a8d81cc763ad53ceaa1ee6ed8`，
+  目录名即完整镜像 SHA。APP **2,677,808 B**，SHA
+  `73a53c7b0a689c3d772abee1d5b8efa615d83ef6753c4567dda256c333a53fb5`；匹配 ELF SHA
+  `b8018f393e469edd8f5e7f250c62762a4a4fdb61d7a2e89d4cc99a9b55f438a6`。
+  本轮只更新固件打包引用，未改 ESP 输入协议或无线参数。
+- Device：**刷写、只读启动和包身份专项 PASS**。重新枚举及 ROM 确认 COM5 /
+  MAC `4c:11:ae:2f:a1:b8` / ESP32-C3 / 8 MB；新读分区表 MD5 正确，SHA
+  `b4a705f5dcd64100c5c40e0de65b2a2acae70a2827ae56044317575331f4620d`。
+  当前 QDD-Passport-A1BA 无 `assets`，与历史 COM6 / 326E 不同。仅写 exact APP 到
+  `0x10000`，擦除结束 exclusive `0x29e000`，刷写 exit 0 且 Hash of data verified；
+  保留 bootloader、分区表、NVS、PHY。证据：`apps/esp/build/com5-v56-{flash-plan.json,flash.log}`。
+  30.000 秒只读观察无故障或 OOM，原蓝牙绑定已恢复 encrypted/bonded/ready。
+  但无线网 configured=true、connected=false、无 IP，中文 TEXT_STATUS ready=false、
+  editorEpoch=0；蓝牙 ready 不等于中文输入法 ready。未发 ARM、HID 或文本。
+  `browser-usb-v56-info.json` 的一次 INFO 完成板内完整 ZIP SHA 核验：943,612 B 与
+  上述 v56 ZIP 匹配，随后 CANCEL 成功且串口关闭。此为只读诊断，不改变内网页面下载流程。
+  当前无无线网连接，未运行新包 LAN 下载检查，也未宣称网络稳定性或中文端到端通过。
+- 运行状态与未验收：本轮只读检查 ADB 未枚举设备，电脑 `8790` 拒绝连接。
+  未启动或替换实际服务，未绕过此前 App 启动/配置被自动审批拒绝的动作，未发送真实
+  中文、未确认目标输入框内容。新版 APK 安装、当前控制器选择、系统输入法启用/选中、
+  真实加密 BLE 文本与 `commitText` 后画面反馈仍须验证；不能将本轮 Host PASS 当作
+  完整成品或真实中文输入验收通过。
+
 ## v55 内网直接安装与免输配对码
 
 2026-10-18：ESP、电脑和被控手机连接同一无线网。用户的 OPPO 热点仅为测试网络，
@@ -40,7 +408,32 @@
   11/11 均通过。Edge 153 在 1040/390 宽度验证原生单次 GET、手动上下步、无 JS 可读、
   旧路径跳转，使用隔离夹具，不等同于真机：
   `apps/esp/build/ui-browser-v55/landing-lan-report.json`。
-- Build/device：最终固件完整门禁与 COM5 app-only 验证进行中，产物身份和实际传输结果待补。
+  最终三行选项的六页 LVGL 渲染通过独立行边界、圆角与 128 px 二维码检查；18 项按键
+  契约、3 项字体检查通过，24 KiB 主机 LVGL 池峰值 17,520 B。预览：
+  `apps/esp/build/ui-hotspot-v55/wireless-guide-three-rows-six-v55.png`。
+- Build：PASS，完整门禁 exit 0（保留既有平台跳过 4 + 5 + 12），独立归档校验通过。
+  日志：`apps/esp/build/wireless-v55-three-row-full-gate-final.log`。
+  归档：`apps/esp/build/firmware/0782b7e1672fa098f7487cea23f4c3350dc7880202d72149da187c13cfc1dc00`，
+  目录名即完整镜像 SHA。APP **2,677,360 B**，SHA
+  `2ce943c90c194ef30fe4ba69bfd2d155b84a969bfd3e836b9033724a7e04414c`；
+  匹配 ELF SHA `ac00ecb7f64ed23440e7bc526a20386983800f1655218b0619a686690d9113a2`。
+  前一轮检查发现旧兼容下载器源码仅发生 CRLF 转换；恢复 18 个源文件原始 LF 字节后，
+  与未修改的产物清单完全匹配，再运行上述完整门禁通过，没有放宽身份校验。
+- Device：以下有限专项 PASS。新鲜枚举及 ROM 身份核对 COM5 / MAC
+  `4c:11:ae:2f:a1:b8` / ESP32-C3 / 8 MB；新读分区表 MD5 正确，SHA
+  `b4a705f5dcd64100c5c40e0de65b2a2acae70a2827ae56044317575331f4620d`。
+  仅将确切 APP 写入 `0x10000`，擦除结束 exclusive `0x29e000`，刷写 exit 0、哈希验证通过。
+  没有写 bootloader、分区表、NVS 或 PHY。30.015 秒只读启动观察确认无线网恢复，
+  原绑定恢复 encrypted/bonded/ready；无故障或分配失败。串口已关闭，未发送 ARM、配对或 HID。
+  证据位于 `apps/esp/build/`：`com5-v55-flash-plan.json`、`com5-v55-startup.json`、
+  `com5-v55-flash.log`。
+- 真机内网传输：`http://10.65.201.147:3334/` 返回与已测页面完全相同的 HTML，耗时
+  **547 ms**；旧路径跳回 `/`。各单次非 Range GET、无重试，完整 ZIP **943,153 B / 39.219 秒**，
+  新 APK **66,090 B / 4.282 秒**。ZIP SHA、CRC、单 EXE 条目与解压 EXE SHA 均匹配 v50；
+  APK SHA 匹配新清单。ZIP 完成诊断 result 0、busy=false。下载后无线网与加密蓝牙仍正常，
+  分配失败为零，当前空闲堆 39,120 B，观察到的最低值 10,560 B。证据：
+  `com5-v55-download.json`、`com5-v55-post-download-health.json`。
+  此时长不能证明吞吐提速，本次检查没有启动或安装下载包。
 - 未验收：新手机首次免码配对、实体按键/显示、真实投屏输入反馈及长期无线稳定性仍需
   独立验证。本轮不将此前高频 LAN 失败或模拟性能改记为完整成品通过。
 

@@ -35,7 +35,7 @@ class TransportContractTest(unittest.TestCase):
         self.assertLess(startup.index("bsp_lvgl_init_with_buffer_rows(20)"), startup.index("qdd_ble_start()"))
 
     def test_expired_tcp_owner_is_closed_after_pause(self):
-        sync = self.main.split("static void sync_safety(void)", 1)[1].split("static bool write_reply", 1)[0]
+        sync = self.main.split("static void sync_safety(bool start_paste)", 1)[1].split("static bool write_reply", 1)[0]
         self.assertRegex(sync, re.compile(r"previous_owner = s_control.owner;.*?qdd_control_tick.*?qdd_hid_pause\(&s_state, false\);\s*s_state.heartbeat_seen = false;\s*if \(previous_owner == QDD_SOURCE_TCP\) qdd_wifi_close_client\(\);", re.S))
 
     def test_new_tcp_epoch_drops_owner_and_partial_line(self):
@@ -61,7 +61,7 @@ class TransportContractTest(unittest.TestCase):
         self.assertIn("qdd_control_usb_live(&s_usb_presence, usb_serial_jtag_is_connected(), now_ms())", presence)
         controller = self.main.split("static bool controller_live(void) {", 1)[1].split("static void drop_controller", 1)[0]
         self.assertIn("QDD_SOURCE_USB ? usb_live()", controller)
-        sync = self.main.split("static void sync_safety(void)", 1)[1].split("static bool write_reply", 1)[0]
+        sync = self.main.split("static void sync_safety(bool start_paste)", 1)[1].split("static bool write_reply", 1)[0]
         self.assertIn("qdd_control_tick(&s_control, usb_live(),", sync)
         loop = self.main.split("for (;;) {", 2)[2]
         self.assertIn("if (!usb_live())", loop)
@@ -110,6 +110,102 @@ class TransportContractTest(unittest.TestCase):
         self.assertIn("qdd_hid_pause(&s_state, false)", setup_exit)
         self.assertNotIn("qdd_hid_unlock", setup_exit)
         self.assertNotIn("qdd_hid_execute", setup_exit)
+
+    def test_background_scan_failure_preserves_the_users_current_page(self):
+        # Execute the actual worker branch with the real setup model. Scanning
+        # may continue after its UI is dismissed; its completion cannot own a
+        # later page, while an active connection keeps its existing transitions.
+        loop = c_block(self.main, "void app_main(void)").split("for (;;) {", 1)[1]
+        start = loop.index("if (atomic_load(&s_configuring))")
+        end = loop.index("    sync_safety(false);", start)
+        transition = loop[start:end]
+        self.assertIn("s_was_scanning = wifi.scanning;", transition)
+        source = r"""
+#include <assert.h>
+#include <stdatomic.h>
+#include <stdbool.h>
+#include <string.h>
+#include "qdd_setup_model.h"
+#include "qdd_wifi.h"
+static qdd_setup_model_t s_setup;
+static atomic_bool s_configuring;
+static bool s_was_scanning;
+static unsigned exit_count, connected_notice_count;
+static void setup_action(qdd_setup_action_t action) {
+  assert(action == QDD_SETUP_EXIT);
+  exit_count++;
+}
+static void ui_feedback(const char *message) {
+  assert(strcmp(message, "WIFI_CONNECTED") == 0);
+  connected_notice_count++;
+}
+static void poll_wifi(qdd_wifi_view_t wifi) {
+""" + transition + r"""
+}
+static void reset(qdd_setup_page_t page) {
+  memset(&s_setup, 0, sizeof(s_setup)); s_setup.page = page;
+  atomic_store(&s_configuring, true); s_was_scanning = false;
+  exit_count = connected_notice_count = 0;
+}
+int main(void) {
+  const qdd_wifi_view_t scanning = {.scanning = true};
+  const qdd_wifi_view_t scan_failed = {.failed = true};
+  const qdd_setup_page_t unrelated[] = {
+    QDD_SETUP_MENU, QDD_SETUP_DOWNLOAD, QDD_SETUP_USB_DOWNLOAD,
+    QDD_SETUP_HELP, QDD_SETUP_PAIR, QDD_SETUP_RESET,
+    QDD_SETUP_PASSWORD, QDD_SETUP_ACTIONS, QDD_SETUP_ERROR
+  };
+  for (unsigned i = 0; i < sizeof(unrelated) / sizeof(unrelated[0]); i++) {
+    reset(QDD_SETUP_HOME);
+    assert(qdd_setup_enter(&s_setup) == QDD_SETUP_SCAN);
+    poll_wifi(scanning);
+    assert(s_was_scanning && s_setup.page == QDD_SETUP_LIST);
+    assert(qdd_setup_key(&s_setup, QDD_SETUP_OK, 0, true) == QDD_SETUP_NONE);
+    assert(s_setup.page == QDD_SETUP_MENU);
+    s_setup.page = unrelated[i]; s_setup.selection = 1;
+    const qdd_setup_model_t before = s_setup;
+    poll_wifi(scan_failed);
+    assert(memcmp(&s_setup, &before, sizeof(before)) == 0);
+    assert(!s_was_scanning && !exit_count && !connected_notice_count);
+  }
+  reset(QDD_SETUP_LIST); poll_wifi(scanning); poll_wifi(scan_failed);
+  assert(s_setup.page == QDD_SETUP_ERROR && s_setup.error);
+  assert(!exit_count && !connected_notice_count && !s_was_scanning);
+  // An old failed snapshot is not a newly completed scan.
+  reset(QDD_SETUP_LIST); poll_wifi(scan_failed);
+  assert(s_setup.page == QDD_SETUP_LIST && !s_setup.error);
+  reset(QDD_SETUP_LIST); poll_wifi(scanning);
+  poll_wifi((qdd_wifi_view_t){.failed = true, .scanning = true});
+  assert(s_setup.page == QDD_SETUP_LIST && !s_setup.error && s_was_scanning);
+  poll_wifi((qdd_wifi_view_t){0});
+  assert(s_setup.page == QDD_SETUP_LIST && !s_setup.error && !s_was_scanning);
+  reset(QDD_SETUP_CONNECTING); poll_wifi(scan_failed);
+  assert(s_setup.page == QDD_SETUP_ERROR && s_setup.error);
+  reset(QDD_SETUP_CONNECTING);
+  poll_wifi((qdd_wifi_view_t){.failed = true, .connecting = true});
+  assert(s_setup.page == QDD_SETUP_CONNECTING && !s_setup.error);
+  reset(QDD_SETUP_CONNECTING); s_was_scanning = true;
+  poll_wifi((qdd_wifi_view_t){.connected = true, .failed = true});
+  assert(s_setup.page == QDD_SETUP_HOME && !s_setup.error);
+  assert(exit_count == 1 && connected_notice_count == 1);
+  reset(QDD_SETUP_LIST); s_was_scanning = true;
+  atomic_store(&s_configuring, false); poll_wifi(scan_failed);
+  assert(s_setup.page == QDD_SETUP_LIST && !s_setup.error && !s_was_scanning);
+  assert(!exit_count && !connected_notice_count);
+  return 0;
+}
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            source_path = Path(directory) / "scan_navigation.c"
+            executable = Path(directory) / ("scan_navigation.exe" if os.name == "nt" else "scan_navigation")
+            source_path.write_text(source, encoding="utf8")
+            compiled = subprocess.run([os.environ.get("CC", "cc"), "-std=c11", "-Wall", "-Wextra", "-Werror",
+                "-I", str(ROOT / "main"), "-I", str(ROOT / "tests/qdd_wifi_host"), str(source_path),
+                str(ROOT / "main/qdd_setup_model.c"), str(ROOT / "main/qdd_net_config.c"),
+                "-o", str(executable)], capture_output=True, text=True)
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            checked = subprocess.run([str(executable)], capture_output=True, text=True)
+            self.assertEqual(checked.returncode, 0, checked.stderr)
 
     def test_neutral_usb_download_diagnostic_shares_bounded_snapshot(self):
         net = c_block(self.main, "static void on_net_line(")
@@ -161,7 +257,7 @@ class TransportContractTest(unittest.TestCase):
         self.assertIn("atomic_fetch_xor(&s_home_selection, 1u)", callback)
         self.assertRegex(callback, re.compile(r"qdd_ui_home_action\(guide_step,\s*atomic_load\(&s_home_selection\), atomic_load\(&s_physical_stop\)\)", re.S))
         self.assertIn("action == QDD_UI_HOME_UNLOCK", callback)
-        sync = self.main.split("static void sync_safety(void)", 1)[1].split("static bool write_reply", 1)[0]
+        sync = self.main.split("static void sync_safety(bool start_paste)", 1)[1].split("static bool write_reply", 1)[0]
         unlock = sync.split("if ((events & EVENT_UNLOCK)", 1)[1]
         self.assertIn("!(events & (EVENT_STOP | EVENT_MENU))", unlock)
         self.assertIn("qdd_hid_unlock(&s_state)", unlock)
@@ -295,7 +391,7 @@ int main(void) {
         self.assertIn("lv_color_hex(ACCENT)", rail)
         self.assertNotIn("0xFFFFFF", rail)
         self.assertIn("0xD4380D", ui)
-        sync = self.main.split("static void sync_safety(void)", 1)[1].split("static bool write_reply", 1)[0]
+        sync = self.main.split("static void sync_safety(bool start_paste)", 1)[1].split("static bool write_reply", 1)[0]
         self.assertIn("qdd_setup_menu(&s_setup)", sync)
         exit_action = self.main.split("action == QDD_SETUP_EXIT", 1)[1].split("static void setup_key", 1)[0]
         self.assertLess(exit_action.index("atomic_store(&s_home_selection, 0)"), exit_action.index("atomic_store(&s_configuring, false)"))
@@ -307,7 +403,7 @@ int main(void) {
         self.assertNotIn("EVENT_WIFI_SETUP", confirm)
         self.assertNotIn("qdd_wifi_", callback)
         self.assertNotIn("qdd_ble_", callback)
-        sync = c_block(self.main, "static void sync_safety(void)")
+        sync = c_block(self.main, "static void sync_safety(bool start_paste)")
         self.assertIn("s_guide_pair_requested", sync)
         self.assertIn("events & EVENT_GUIDE_PAIR", sync)
         self.assertIn("if (events & EVENT_WIFI_SETUP) setup_action(qdd_setup_enter(&s_setup))", sync)

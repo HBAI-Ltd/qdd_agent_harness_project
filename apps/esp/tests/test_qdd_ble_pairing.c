@@ -52,7 +52,7 @@ static atomic_bool s_new_peer;
 static qdd_ble_status_t s_status;
 static qdd_ble_policy_t s_policy;
 static qdd_hid_subscriptions_t s_subscriptions;
-static bool s_suspended, s_text_subscribed;
+static bool s_suspended, s_text_subscribed, s_text_neutral, s_text_cancelled;
 static qdd_ble_text_events_t s_text_events;
 static uint16_t s_input_handles[2][4];
 static struct ble_gap_conn_desc peer;

@@ -165,14 +165,64 @@ function wizardFixture(platform = "windows") {
     const value = { id, hidden: false, disabled: false, textContent: "", listeners: new Map(),
       getAttribute: name => attributes[name] ?? null,
       addEventListener(type, handler) { this.listeners.set(type, handler); },
-      click() { this.listeners.get("click")?.({ preventDefault() { assert.fail("Native download must not be intercepted"); } }); } };
+      setAttribute(name, value) { attributes[name] = value; },
+      removeAttribute(name) { delete attributes[name]; },
+      click(event = { preventDefault() { assert.fail("Native download must not be intercepted"); } }) { return this.listeners.get("click")?.(event); } };
     nodes.set(id, value); return value;
   };
   node("download-wizard", { "data-platform": platform });
   for (const id of ["install-step-1", "install-step-2", "install-step-3", "install-previous", "install-next", "install-counter", "install-navigation", "install-windows", "install-android", "install-download-note"]) node(id);
   const links = [node("zip", { "data-install-platform": "windows" }), node("apk", { "data-install-platform": "android" })];
-  return { nodes, links, document: { getElementById: id => nodes.get(id), querySelectorAll: selector => selector === "[data-install-platform]" ? links : [] } };
+  return { nodes, links, node, document: { getElementById: id => nodes.get(id), querySelectorAll: selector => selector === "[data-install-platform]" ? links : [] } };
 }
+
+test("computer resume keeps the complete wizard on Windows instructions and blocks competing native downloads", async context => {
+  const f = wizardFixture("android"), el = id => f.nodes.get(id), transfer = fixture(), saves = [];
+  const resume = f.node("resume");
+  for (const id of ["driver-download-status", "driver-download-progress", "driver-download-cancel", "driver-download-retry"]) f.node(id);
+  let release, pending;
+  const paused = new Promise(resolve => { release = resolve; });
+  const previousDocument = globalThis.document, previousFetch = globalThis.fetch;
+  const nativeTimeout = globalThis.setTimeout;
+  context.mock.method(globalThis, "setTimeout", (handler, delay, ...args) =>
+    delay === 60000 ? (handler(...args), 0) : nativeTimeout(handler, delay, ...args));
+  globalThis.document = {...f.document, readyState: "complete", body: {append() {}},
+    querySelectorAll: selector => selector === "[data-driver-resume]" ? [resume] : f.document.querySelectorAll(selector),
+    createElement: () => ({click() { saves.push({href: this.href, name: this.download}); }, remove() {}})};
+  globalThis.fetch = async (...args) => { await paused; return transfer.fetchImpl(...args); };
+  try {
+    await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}#resume-wizard`);
+    assert.equal(transfer.calls.length, 0, "Opening the page must not download.");
+    el("install-next").click();
+    assert(!el("install-step-2").hidden);
+    let intercepted = 0;
+    pending = resume.click({preventDefault() { intercepted++; }});
+    assert(el("install-next").disabled && el("install-previous").disabled);
+    assert(!el("install-windows").hidden && el("install-android").hidden,
+      "The explicit computer resume action must select Windows instructions even on Android/unknown UA.");
+    for (const link of f.links) link.click({preventDefault() { intercepted++; }});
+    assert.equal(intercepted, 3, "Busy resume must prevent both native APK and ZIP requests.");
+    assert(!el("install-windows").hidden && el("install-android").hidden,
+      "A blocked Android click must not switch the active installation platform.");
+    release();
+    await pending;
+    assert.equal(saves.length, 1); assert.equal(saves[0].name, "设备操作台.zip");
+    assert(!el("install-step-2").hidden, "Saving a verified ZIP must never advance the guide automatically.");
+    assert(!el("install-next").disabled);
+    el("install-next").click();
+    assert(!el("install-step-3").hidden && !el("install-windows").hidden && el("install-android").hidden);
+    el("install-previous").click();
+    f.links[1].click();
+    assert(el("install-windows").hidden && !el("install-android").hidden,
+      "After resume finishes, ordinary native downloads must be usable again.");
+  } finally {
+    el("driver-download-cancel").click();
+    release();
+    await pending;
+    if (previousDocument === undefined) delete globalThis.document; else globalThis.document = previousDocument;
+    globalThis.fetch = previousFetch;
+  }
+});
 
 test("download wizard navigates only by explicit next/previous without claiming download completion", () => {
   for (const platform of ["windows", "android"]) {

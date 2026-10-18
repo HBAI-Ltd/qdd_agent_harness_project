@@ -22,6 +22,9 @@ $sources += Join-Path $projectRoot "src/cn/qdd/screenbridge/PreviewProfile.java"
 $sources += Join-Path $projectRoot "src/cn/qdd/screenbridge/CaptureConsent.java"
 $sources += Join-Path $projectRoot "src/cn/qdd/screenbridge/PointerCalibration.java"
 $sources += Join-Path $projectRoot "src/cn/qdd/screenbridge/Utf8ImeProtocol.java"
+$sources += Join-Path $projectRoot "src/cn/qdd/screenbridge/ClipboardTextSession.java"
+$sources += Join-Path $projectRoot "src/cn/qdd/screenbridge/ImeTextSession.java"
+$sources += Join-Path $projectRoot "src/cn/qdd/screenbridge/ImeSetupState.java"
 $sources += Join-Path $projectRoot "src/cn/qdd/screenbridge/BoardBluetooth.java"
 & $javac -encoding UTF-8 -d $output @sources
 if ($LASTEXITCODE -ne 0) { throw "Stream test compilation failed." }
@@ -49,3 +52,10 @@ if ($LASTEXITCODE -ne 0) { throw "Board BLE readiness regression failed." }
 if ($LASTEXITCODE -ne 0) { throw "Pointer calibration regression failed." }
 & $java -cp $output cn.qdd.screenbridge.Utf8ImeProtocolTest
 if ($LASTEXITCODE -ne 0) { throw "UTF-8 IME protocol regression failed." }
+& $java -cp $output cn.qdd.screenbridge.ClipboardTextSessionTest
+if ($LASTEXITCODE -ne 0) { throw "Clipboard session regression failed." }
+& $java -cp $output cn.qdd.screenbridge.ImeTextSessionTest
+if ($LASTEXITCODE -ne 0) { throw "IME lifecycle and preparation regression failed." }
+& $java -cp $output cn.qdd.screenbridge.ImeRegistrationTest $projectRoot
+if ($LASTEXITCODE -ne 0) { throw "IME registration regression failed." }
+& (Join-Path $PSScriptRoot "test-endpoint.ps1") -JavaHome $JavaHome

@@ -46,7 +46,7 @@ let sourceSequence = 0, snapshotRequests = 0, previewProfile = "standard", armed
 let holdNextStatus = false, delayedStatus;
 const reports = [];
 const textReports = [];
-let imeReplyMode = "accepted", pressAckDelay = 0;
+let textReplyMode = "accepted", pressAckDelay = 0;
 const profiles = ["turbo", "fast", "standard", "original"];
 const previewImages = Object.fromEntries(profiles.map((profile) => {
   // Preserve a genuine JPEG while distinguishing preview bytes from the
@@ -116,17 +116,18 @@ const esp = createTcpServer((socket) => {
     for (;;) {
       const end = buffered.indexOf("\n"); if (end < 0) break;
       const line = buffered.slice(0, end); buffered = buffered.slice(end + 1);
-      const textMatch = /^QDDTXT\/1 (\d+) ([A-Z]+) (.*)$/.exec(line);
+      const textMatch = /^QDDTXT\/1 (\d+) ([A-Z_]+) (.*)$/.exec(line);
       if (textMatch) {
         const [, id, op, body] = textMatch, args = body.split(" ");
         textReports.push({ op, args });
+        assert.ok(!["CLIP_BEGIN", "PASTE"].includes(op), "IME text never prepares a clipboard or sends a paste.");
         if (op === "BEGIN") { textId = args[0]; textBytes = Number(args[2]); textReceived = 0; textPhase = "receiving"; textPolls = 0; }
         if (op === "DATA") { assert.equal(args[0], textId); assert.equal(Number(args[1]), textReceived); textReceived += Buffer.from(args[2], "hex").length; }
-        if (op === "COMMIT") { assert.equal(textReceived, textBytes); textPhase = "queued"; if (imeReplyMode === "lost-commit") continue; }
-        if (op === "STATUS" && ["queued", "awaiting_ack"].includes(textPhase)) textPhase = ++textPolls >= 2 ? "accepted" : "awaiting_ack";
+        if (op === "COMMIT") { assert.equal(textReceived, textBytes); textPhase = "queued"; if (textReplyMode === "lost-commit") continue; }
+        if (op === "STATUS" && ["queued", "awaiting_ack"].includes(textPhase)) textPhase = ++textPolls >= 2 ? (textReplyMode === "rejected" ? "rejected" : "accepted") : "awaiting_ack";
         if (op === "CANCEL") textPhase = "cancelled";
-        if (["accepted", "rejected", "uncertain", "cancelled"].includes(textPhase)) { textBytes = 0; textReceived = 0; }
-        socket.write(`QDDTXT/1 ${id} OK ${JSON.stringify({ id: textId, status: textPhase, editorEpoch: 7, ready: true, received: textReceived, bytes: textBytes })}\n`);
+        if (!["idle", "receiving", "queued", "sending", "awaiting_ack"].includes(textPhase)) { textBytes = 0; textReceived = 0; }
+        socket.write(`QDDTXT/1 ${id} OK ${JSON.stringify({ id: textId, status: textPhase, editorEpoch: 7, ready: textReplyMode !== "not-ready", received: textReceived, bytes: textBytes, mode: textReplyMode === "clipboard" ? "clipboard" : "ime", clipboardVerified: false, pasteSent: false, insertionVerified: false })}\n`);
         continue;
       }
       const match = /^QDDHID\/1 (\d+) ([A-Z_]+)(.*)$/.exec(line); assert.ok(match);
@@ -271,22 +272,31 @@ try {
   assert.deepEqual(delayedKeys.map(({ args }) => args), [[0, 4], [0, 0]]);
   assert.ok(delayedKeys[1].at - delayedKeys[0].at >= 40 && delayedKeys[1].at - delayedKeys[0].at < 200);
   results.push({ name: "packaged ASCII key release occurs after a short hold without waiting for delayed press ACK; no report replay", pass: true });
-  const unicodeStart = textReports.length;
-  const unicode = metadata(await client.callTool({ name: "android_type", arguments: { text: "中文🙂" } })).value;
-  assert.equal(unicode.textTransfer.status, "accepted");
-  const unicodeWire = textReports.slice(unicodeStart);
-  assert.equal(unicodeWire.filter(({ op }) => op === "COMMIT").length, 1);
-  assert.ok(unicodeWire.filter(({ op }) => op === "STATUS").length >= 3);
-  assert.equal(Buffer.concat(unicodeWire.filter(({ op }) => op === "DATA").map(({ args }) => Buffer.from(args[2], "hex"))).toString("utf8"), "中文🙂");
-  results.push({ name: "packaged Unicode text uses QDDTXT UTF-8 bytes, commits once and waits past queued until a simulated phone acceptance", pass: true });
+  for (const text of ["淮北采耳", "中文，Hello 🙂\n第二行", "中".repeat(170) + "ab"]) {
+    textReplyMode = "accepted";
+    const unicodeStart = textReports.length, hidStart = reports.length;
+    const unicode = metadata(await client.callTool({ name: "android_type", arguments: { text } })).value;
+    assert.equal(unicode.textTransfer.status, "accepted");
+    assert.equal(unicode.textTransfer.mode, "ime");
+    assert.equal(unicode.textTransfer.pasteSent, false);
+    assert.equal(unicode.textTransfer.insertionVerified, false);
+    const unicodeWire = textReports.slice(unicodeStart);
+    assert.equal(unicodeWire.filter(({ op }) => op === "BEGIN").length, 1);
+    assert.equal(unicodeWire.filter(({ op }) => op === "COMMIT").length, 1);
+    assert.ok(unicodeWire.every(({ op }) => !["PASTE", "CLIP_BEGIN"].includes(op)));
+    assert.ok(unicodeWire.filter(({ op }) => op === "STATUS").length >= 3);
+    assert.equal(Buffer.concat(unicodeWire.filter(({ op }) => op === "DATA").map(({ args }) => Buffer.from(args[2], "hex"))).toString("utf8"), text);
+    assert.ok(reports.slice(hidStart).every(({op}) => op !== "KEY"), "Unicode goes directly through the selected IME, without HID typing/paste fallback.");
+  }
+  results.push({ name: "packaged selected-IME Chinese, mixed Unicode and 512-byte flows each commit once without claiming verified target insertion", pass: true });
   // A raw MCP request simulates retransmission after the COMMIT ACK is lost.
   // The same id must not dispatch again after the uncertain result completes.
-  imeReplyMode = "lost-commit";
+  textReplyMode = "lost-commit";
   const rawTransport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`));
   const rawClient = new Client({ name: "exe-replay-boundary", version: "1" }); clients.push(rawClient);
   await rawClient.connect(rawTransport);
   metadata(await rawClient.callTool({ name: "android_hid_arm" }));
-  const rawMessage = { jsonrpc: "2.0", id: "unicode-retransmit-v44", method: "tools/call", params: { name: "android_type", arguments: { text: "中文" } } };
+  let rawMessage = { jsonrpc: "2.0", id: "unicode-retransmit-v60", method: "tools/call", params: { name: "android_type", arguments: { text: "中文" } } };
   const rawCall = async (message) => {
     const response = await fetch(`http://127.0.0.1:${port}/mcp`, { method: "POST",
       headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", "Mcp-Session-Id": rawTransport.sessionId },
@@ -304,10 +314,23 @@ try {
   assert.equal(repeated.error.code, -32600);
   assert.equal(textReports.length, afterUncertain);
   assert.equal(textReports.slice(uncertainStart).filter(({ op }) => op === "COMMIT").length, 1);
-  imeReplyMode = "accepted";
+  for (const reply of ["not-ready", "clipboard", "rejected"]) {
+    textReplyMode = reply;
+    metadata(await rawClient.callTool({ name: "android_hid_arm" }));
+    const invalidStart = textReports.length;
+    const invalid = await rawClient.callTool({ name: "android_type", arguments: { text: "中文" } });
+    assert.equal(invalid.isError, true);
+    const expected = reply === "not-ready" ? "TEXT_IME_NOT_READY" : reply === "clipboard" ? "TEXT_IME_UNAVAILABLE" : "TEXT_IME_REJECTED";
+    assert.ok(invalid.content[0].text.includes(expected), invalid.content[0].text);
+    const invalidWire = textReports.slice(invalidStart);
+    if (reply !== "rejected") assert.ok(invalidWire.every(({op}) => op === "STATUS"), "Not-ready or wrong-mode receivers must not receive text.");
+    else assert.equal(invalidWire.filter(({op}) => op === "COMMIT").length, 1);
+    assert.ok(invalidWire.every(({op}) => !["CLIP_BEGIN", "PASTE"].includes(op)));
+  }
+  textReplyMode = "accepted";
   await rawClient.close();
   metadata(await client.callTool({ name: "android_hid_arm" }));
-  results.push({ name: "packaged lost COMMIT ACK reports uncertain, never repeats text and rejects the same completed MCP request id without new wire input", pass: true });
+  results.push({ name: "packaged IME lost COMMIT ACK and duplicate RPC never replay; not-ready, clipboard mode and explicit rejection fail with actionable errors", pass: true });
   const profileOrigin = `http://127.0.0.1:${port}`;
   assert.equal((await (await fetch(`${profileOrigin}/screen/profile`)).json()).profile, "standard");
   const previewAbort = new AbortController();

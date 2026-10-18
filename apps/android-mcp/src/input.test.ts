@@ -31,6 +31,47 @@ class FakeBridge implements SerialBridge {
   async close(): Promise<void> {}
 }
 
+test("a click waits 350 ms after the last movement ACK instead of becoming a micro-drag", async () => {
+  const bridge = new FakeBridge(), input = new InputController(bridge, { width: 100, height: 200 });
+  await input.arm(); bridge.reportDelay = 30;
+  await input.move(20, 15); await input.click();
+  const movement = bridge.records.findIndex(({ op, args }) => op === "MOVE" && args[0] === 20);
+  const press = bridge.records.findIndex(({ op, args }) => op === "MOVE" && args[3] === 1);
+  assert.ok(bridge.times[press]! - bridge.times[movement]! >= 370, "Wait from successful movement ACK, not dispatch.");
+  assert.equal(bridge.records.filter(({ op, args }) => op === "MOVE" && args[0] === 20).length, 1, "Never replay the movement.");
+});
+
+test("pausing during click settling never sends a later button-down", async () => {
+  const bridge = new FakeBridge(), input = new InputController(bridge, { width: 100, height: 200 });
+  await input.arm(); await input.move(10, 10);
+  const click = assert.rejects(input.click(), /abort|paused|cancel/i);
+  await delay(70); await input.pause(); await click;
+  assert.ok(!bridge.records.some(({ op, args }) => op === "MOVE" && args[3] === 1));
+  assert.equal(input.state.armed, false);
+});
+
+test("already settled motion does not add another full click delay", async () => {
+  const bridge = new FakeBridge(), input = new InputController(bridge, { width: 100, height: 200 });
+  await input.arm(); await input.move(10, 10); await delay(370);
+  const start = Date.now(); await input.click();
+  const press = bridge.records.findIndex(({ op, args }) => op === "MOVE" && args[3] === 1);
+  assert.ok(bridge.times[press]! - start < 200, "Previously elapsed settling time must count.");
+});
+
+test("coordinate tap and drag start wait for motion settling before pressing", async () => {
+  for (const action of ["tap", "pointer", "swipe"] as const) {
+    const bridge = new FakeBridge(), input = new InputController(bridge, { width: 100, height: 200 });
+    input.setCalibration(1, 1); await input.arm(); await input.homePointer();
+    if (action === "tap") await input.tap(20, 30);
+    else if (action === "pointer") await input.pointerTo(20, 30, 1);
+    else await input.swipe(20, 30, 40, 50);
+    const press = bridge.records.findIndex(({ op, args }) => op === "MOVE" && args[3] === 1);
+    const movement = bridge.records.findLastIndex(({ op, args }, index) => index < press && op === "MOVE" && (args[0] !== 0 || args[1] !== 0));
+    assert.ok(bridge.times[press]! - bridge.times[movement]! >= 340, `${action} must settle before its press.`);
+    await input.pause();
+  }
+});
+
 for (const unknownPosition of [false, true]) test(`hover releases an old mouse hold before neutral positioning${unknownPosition ? " from an unknown position" : ""}`, async () => {
   const bridge = new FakeBridge();
   const input = new InputController(bridge, { width: 100, height: 200 });
@@ -901,7 +942,7 @@ test("nearby fractional taps remove the old repeated-home report and waiting cos
   const oldHomes = Math.ceil(2400 * 1.25 / 127) + 2;
   const oldPositionReports = splitMove(Math.round(542 * 1.25), Math.round(1202 * 1.25)).length;
   assert.equal(oldHomes + oldPositionReports + 2, 40);
-  context.diagnostic(`1080x2400 scale 1.25, tap (541,1201) then (542,1202): second tap uses 3 MOVE reports instead of the old unknown-position path's ${oldHomes} home + ${oldPositionReports} position + 2 button reports = 40. Scheduled waiting is 100 + 50 = 150ms instead of 550 + ${oldPositionReports}*100 + 50 = 1800ms (1650ms saved), excluding bridge/phone time.`);
+  context.diagnostic(`1080x2400 scale 1.25, tap (541,1201) then (542,1202): second tap uses 3 MOVE reports instead of the old unknown-position path's ${oldHomes} home + ${oldPositionReports} position + 2 button reports = 40. Scheduled waiting includes the 350ms motion-to-press floor: 100 + 250 + 50 = 400ms versus 550 + ${oldPositionReports}*100 + 250 + 50 = 2050ms (1650ms saved), excluding bridge/phone time.`);
 });
 
 test("pause, release, calibration and phone or rotation changes invalidate reusable positions", async (context) => {

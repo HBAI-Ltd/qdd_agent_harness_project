@@ -18,15 +18,21 @@ typedef struct { lv_obj_t *object; char text[96]; } cached_label_t;
 typedef enum { MAIN, GUIDE, SETUP } screen_kind_t;
 static screen_kind_t s_kind;
 static cached_label_t s_header, s_battery, s_computer, s_phone, s_title, s_detail, s_next;
-static cached_label_t s_pairing, s_value, s_hint, s_notice, s_rows[5];
-static cached_label_t s_home_rows[2];
-static unsigned s_home_selection, s_home_action_selection;
-static bool s_home_action_locked, s_home_action_guide, s_home_action_skip, s_require_onboarding;
-static bool s_skip_app, s_skip_bluetooth;
+static cached_label_t s_pairing, s_value, s_hint, s_notice, s_rows[5], s_usb_note;
+static cached_label_t s_home_rows[2], s_guide_confirm;
+static unsigned s_home_selection, s_home_action_selection, s_home_action_step;
+static bool s_home_action_locked, s_require_onboarding;
+static bool s_skip_desktop, s_skip_app, s_skip_bluetooth;
+static qdd_driver_usb_view_t s_driver, s_usb_last_driver;
+static bool s_usb_cached, s_usb_last_guide, s_usb_last_connected;
+static char s_usb_last_ip[16];
 static bool s_onboarding_complete;
 static char s_onboarding_ip[16];
-static atomic_uint s_visible_guide_step;
-static lv_obj_t *s_keyboard, *s_qrcode, *s_card, *s_scan_spinner;
+// One atomic input source: 0 automatic entry, 1..6 selected instructions,
+// 7 leaving the guide, 8 dismissed. Render snapshots never overwrite input.
+static atomic_uint s_requested_guide_step;
+static bool s_display_events_registered, s_finish_after_refresh;
+static lv_obj_t *s_keyboard, *s_qrcode, *s_card, *s_scan_spinner, *s_menu_more, *s_menu_previous;
 static qdd_setup_model_t s_keyboard_model, s_last_setup;
 static qdd_setup_page_t s_setup_page;
 static qdd_wifi_view_t s_wifi;
@@ -92,56 +98,134 @@ static void scan_activity(bool active) {
     // LVGL owns the two arc animations, independently of the cached UI view.
     lv_spinner_set_anim_params(s_scan_spinner, 1000, 200);
 }
+static void menu_more_draw(lv_event_t *event) {
+    lv_area_t area; lv_obj_get_coords(lv_event_get_target_obj(event), &area);
+    lv_layer_t *layer = lv_event_get_layer(event);
+    lv_draw_line_dsc_t line; lv_draw_line_dsc_init(&line);
+    line.color = lv_color_hex(0xF58C6C); line.width = 2;
+    line.round_start = true; line.round_end = true;
+    const int center = (area.x1 + area.x2) / 2;
+    if (lv_event_get_user_data(event)) {
+        line.p1 = (lv_point_precise_t){center, area.y2 - 1};
+        line.p2 = (lv_point_precise_t){center, area.y1 + 2}; lv_draw_line(layer, &line);
+        line.p1 = (lv_point_precise_t){area.x1 + 1, area.y2 - 7}; lv_draw_line(layer, &line);
+        line.p1 = (lv_point_precise_t){area.x2 - 1, area.y2 - 7}; lv_draw_line(layer, &line);
+        return;
+    }
+    // Draw the requested down arrow without depending on an absent font glyph.
+    line.p1 = (lv_point_precise_t){center, area.y1 + 1};
+    line.p2 = (lv_point_precise_t){center, area.y2 - 2}; lv_draw_line(layer, &line);
+    line.p1 = (lv_point_precise_t){area.x1 + 1, area.y1 + 7}; lv_draw_line(layer, &line);
+    line.p1 = (lv_point_precise_t){area.x2 - 1, area.y1 + 7}; lv_draw_line(layer, &line);
+}
 static lv_obj_t *new_screen(void) {
+    s_finish_after_refresh = false;
+    s_usb_cached = false;
     scan_activity(false);
     lv_obj_t *screen = lv_obj_create(NULL); lv_obj_set_style_bg_color(screen, lv_color_hex(BG), 0);
     lv_obj_set_style_pad_all(screen, 0, 0); lv_obj_set_style_border_width(screen, 0, 0); lv_obj_remove_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_t *old = lv_screen_active(); lv_screen_load(screen); if (old && old != screen) lv_obj_delete(old);
+    s_menu_more = s_menu_previous = NULL;
     lv_obj_add_event_cb(screen, sidebar_draw, LV_EVENT_DRAW_POST, NULL);
     return screen;
 }
-static void home_actions(bool locked, bool guide, bool can_skip) {
-    const unsigned selected = guide && !can_skip ? 0 : s_home_selection;
-    if (s_home_action_selection == selected && s_home_action_locked == locked &&
-        s_home_action_guide == guide && s_home_action_skip == can_skip) return;
-    s_home_action_selection = selected; s_home_action_locked = locked;
-    s_home_action_guide = guide; s_home_action_skip = can_skip;
-    text(&s_home_rows[0], guide ? (can_skip ? "跳过此步" : "设置") : locked ? "取消急停" : "紧急停止");
+static void home_actions(bool locked, unsigned guide_step) {
+    const unsigned choices = qdd_ui_home_choices(guide_step);
+    const unsigned selected = choices == 1 ? 0 : s_home_selection;
+    if (s_home_action_selection == selected && s_home_action_locked == locked && s_home_action_step == guide_step) return;
+    s_home_action_selection = selected; s_home_action_locked = locked; s_home_action_step = guide_step;
+    if (guide_step) {
+        const char *action = guide_step == 1 ? "选择无线网" : guide_step == 4 ? "开始配对" :
+            guide_step == 6 ? "进入主页" : "下一步";
+        text(&s_home_rows[1], action);
+        lv_point_t size;
+        lv_text_get_size(&size, action, &qdd_cjk_14, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+        const int left = (224 - 40 - 10 - size.x) / 2;
+        lv_obj_set_x(s_guide_confirm.object, left);
+        lv_obj_set_x(s_home_rows[1].object, left + 50);
+        lv_obj_set_width(s_home_rows[1].object, size.x);
+        return;
+    }
+    text(&s_home_rows[0], locked ? "取消急停" : "紧急停止");
     text(&s_home_rows[1], "设置");
     for (unsigned i = 0; i < 2; i++) {
-        if (guide && !can_skip && i == 1) lv_obj_add_flag(s_home_rows[i].object, LV_OBJ_FLAG_HIDDEN);
+        if (choices == 1 && i == 1) lv_obj_add_flag(s_home_rows[i].object, LV_OBJ_FLAG_HIDDEN);
         else lv_obj_remove_flag(s_home_rows[i].object, LV_OBJ_FLAG_HIDDEN);
         lv_obj_set_style_bg_color(s_home_rows[i].object, lv_color_hex(i == selected ? ACCENT : PANEL), 0);
     }
 }
+static void guide_keys_draw(lv_event_t *event) {
+    lv_layer_t *layer = lv_event_get_layer(event);
+    lv_draw_rect_dsc_t key; lv_draw_rect_dsc_init(&key);
+    key.bg_opa = LV_OPA_TRANSP; key.border_color = lv_color_hex(0x65534B);
+    key.border_width = 1; key.radius = 4;
+    // Small physical-key outlines, with transparent navigation text alongside.
+    const lv_area_t up = {21, 273, 42, 293}, down = {127, 273, 148, 293};
+    lv_draw_rect(layer, &key, &up); lv_draw_rect(layer, &key, &down);
+}
 static void home_actions_create(lv_obj_t *screen, bool guide) {
+    if (guide) {
+        lv_obj_add_event_cb(screen, guide_keys_draw, LV_EVENT_DRAW_MAIN, NULL);
+        label(&s_home_rows[0], screen, 25, 275, 91, "上  上一步", &qdd_cjk_14, MUTED, false);
+        fixed_label(screen, 131, 275, 91, "下  下一步", &qdd_cjk_14, MUTED, false);
+        label(&s_guide_confirm, screen, 0, 297, 40, "确认", &qdd_cjk_14, INK, true);
+        lv_obj_set_height(s_guide_confirm.object, 20);
+        lv_obj_set_style_radius(s_guide_confirm.object, 4, 0);
+        lv_obj_set_style_bg_color(s_guide_confirm.object, lv_color_hex(ACCENT), 0);
+        lv_obj_set_style_bg_opa(s_guide_confirm.object, LV_OPA_COVER, 0);
+        label(&s_home_rows[1], screen, 0, 297, 100, "", &qdd_cjk_14, INK, false);
+        s_home_action_selection = 2; home_actions(false, 1);
+        return;
+    }
     for (unsigned i = 0; i < 2; i++) {
-        label(&s_home_rows[i], screen, 12, (guide ? 272 : 189) + (int)i * (guide ? 23 : 36), 200,
-            guide || i ? "设置" : "紧急停止", &qdd_cjk_14, INK, false);
-        lv_obj_set_height(s_home_rows[i].object, guide ? 21 : 31);
+        label(&s_home_rows[i], screen, 12, 189 + (int)i * 36, 200,
+            i ? "设置" : "紧急停止", &qdd_cjk_14, INK, false);
+        lv_obj_set_height(s_home_rows[i].object, 31);
         lv_obj_set_style_pad_left(s_home_rows[i].object, 10, 0);
-        lv_obj_set_style_pad_top(s_home_rows[i].object, guide ? 0 : 5, 0);
+        lv_obj_set_style_pad_top(s_home_rows[i].object, 5, 0);
         lv_obj_set_style_radius(s_home_rows[i].object, 7, 0);
         lv_obj_set_style_bg_opa(s_home_rows[i].object, LV_OPA_COVER, 0);
     }
-    s_home_action_selection = 2; home_actions(false, guide, false);
+    s_home_action_selection = 2; home_actions(false, 0);
 }
 void qdd_ui_require_onboarding(bool required) {
     s_require_onboarding = required;
-    s_skip_app = s_skip_bluetooth = false;
-    if (required) {
-        s_onboarding_complete = false;
-        atomic_store(&s_visible_guide_step, 1);
+    s_skip_desktop = s_skip_app = s_skip_bluetooth = false;
+    atomic_store(&s_requested_guide_step, required ? 1 : 0);
+    if (required) s_onboarding_complete = false;
+}
+void qdd_ui_onboarding_skips(bool desktop, bool app, bool bluetooth) { s_skip_desktop = desktop; s_skip_app = app; s_skip_bluetooth = bluetooth; }
+void qdd_ui_driver(qdd_driver_usb_view_t view) { s_driver = view; }
+unsigned qdd_ui_guide_step(void) {
+    const unsigned requested = atomic_load(&s_requested_guide_step);
+    return requested == 8 ? 0 : requested;
+}
+void qdd_ui_guide_navigate(bool forward) {
+    unsigned current = atomic_load(&s_requested_guide_step);
+    while (current >= 1 && current <= 6) {
+        const unsigned target = qdd_ui_guide_target(current, forward);
+        if (atomic_compare_exchange_weak(&s_requested_guide_step, &current, target)) return;
     }
 }
-void qdd_ui_onboarding_skips(bool app, bool bluetooth) { s_skip_app = app; s_skip_bluetooth = bluetooth; }
-unsigned qdd_ui_guide_step(void) { return atomic_load(&s_visible_guide_step); }
+static void main_refresh_ready(lv_event_t *event) {
+    (void)event;
+    if (!s_finish_after_refresh || s_kind != MAIN) return;
+    s_finish_after_refresh = false;
+    // REFR_READY follows every rendered area, unlike a screen DRAW_POST which
+    // can run for the first tile. Keep double-confirm neutral until then.
+    unsigned leaving = 7;
+    atomic_compare_exchange_strong(&s_requested_guide_step, &leaving, 8);
+}
 void qdd_ui_home_selection(unsigned selection) { s_home_selection = selection == 1 ? 1 : 0; }
 static void battery(int value) {
     char display[12]; if (value < 0 || value > 100) strcpy(display, "--%"); else snprintf(display, sizeof(display), "%d%%", value);
     text(&s_battery, display);
 }
 void qdd_ui_create(void) {
+    if (!s_display_events_registered) {
+        lv_display_add_event_cb(lv_display_get_default(), main_refresh_ready, LV_EVENT_REFR_READY, NULL);
+        s_display_events_registered = true;
+    }
     lv_obj_t *screen = new_screen(); s_kind = MAIN; s_cached = false;
     label(&s_header, screen, 14, 15, 152, "设备控制器", &qdd_cjk_20, INK, false);
     label(&s_battery, screen, 166, 19, 44, "--%", &qdd_cjk_14, MUTED, false);
@@ -178,12 +262,63 @@ static bool download_qr_update(const char *ip) {
     if (lv_qrcode_update(s_qrcode, url, (uint32_t)strlen(url)) != LV_RESULT_OK) return false;
     strcpy(s_qr_url, url); return true;
 }
+// Presentation consumes only a locked snapshot. Transfer completion cannot
+// mark software installed, advance onboarding or start network scanning.
+static void usb_refresh(bool guide) {
+    if (s_usb_cached && s_usb_last_guide == guide && s_usb_last_connected == s_wifi.connected &&
+        strcmp(s_usb_last_ip, s_wifi.ip) == 0 && memcmp(&s_usb_last_driver, &s_driver, sizeof(s_driver)) == 0) return;
+    s_usb_cached = true; s_usb_last_guide = guide; s_usb_last_connected = s_wifi.connected;
+    memcpy(s_usb_last_ip, s_wifi.ip, sizeof(s_usb_last_ip)); s_usb_last_driver = s_driver;
+    const char *phase = "等待USB接收页连接", *progress = "只需局域网，无需互联网";
+    char amount[48], note[96];
+    switch (s_driver.phase) {
+    case QDD_DRIVER_USB_CHECKING: phase = "正在校验安装包"; progress = "校验通过后开始传输"; break;
+    case QDD_DRIVER_USB_TRANSFERRING:
+        phase = "安装包传输中";
+        snprintf(amount, sizeof(amount), "已传输 %lu%%", (unsigned long)(s_driver.total_bytes ?
+            (uint64_t)(s_driver.transferred_bytes > s_driver.total_bytes ? s_driver.total_bytes : s_driver.transferred_bytes) * 100 / s_driver.total_bytes : 0));
+        progress = amount; break;
+    case QDD_DRIVER_USB_SENT: phase = "安装包已发送"; progress = "传输完成不等于已安装"; break;
+    case QDD_DRIVER_USB_CANCELLED: phase = "传输已取消"; progress = "可重新打开USB接收页"; break;
+    case QDD_DRIVER_USB_ERROR:
+        phase = "安装包传输失败";
+        progress = s_driver.error == QDD_DRIVER_USB_ERROR_ASSET ? "安装包校验未通过" :
+            s_driver.error == QDD_DRIVER_USB_ERROR_DISCONNECTED ? "电脑连接已断开" :
+            s_driver.error == QDD_DRIVER_USB_ERROR_CONTROL ? "退出电脑控制后重试" :
+            s_driver.error == QDD_DRIVER_USB_ERROR_EXPIRED || s_driver.error == QDD_DRIVER_USB_ERROR_CLOCK ?
+                "请重新连接USB接收页" : "请检查USB线后重试";
+        break;
+    case QDD_DRIVER_USB_IDLE: break;
+    }
+    if (s_driver.phase == QDD_DRIVER_USB_SENT) strcpy(note, "请在电脑确认保存\n解压后启动设备操作台");
+    else if (s_wifi.connected && s_wifi.ip[0]) snprintf(note, sizeof(note), "http://%s:3334/", s_wifi.ip);
+    else strcpy(note, "已有接收页可直接打开\n首次下载请先连接无线网");
+    text(&s_detail, phase);
+    // Long instructions live in Flash. Do not expand every label's 96-byte
+    // cache or allocate another mutable copy on this no-PSRAM target.
+    static const char steps[] = "1 电脑打开下方网址\n2 选择USB备用下载\n3 按网页提示接USB线\n4 保存后解压并打开";
+    if (strcmp(lv_label_get_text(s_value.object), steps) != 0) lv_label_set_text_static(s_value.object, steps);
+    s_value.text[0] = '\0'; // Following shorter pages must replace the static copy.
+    lv_obj_set_style_text_font(s_value.object, &qdd_cjk_14, 0);
+    lv_obj_set_style_text_align(s_value.object, LV_TEXT_ALIGN_LEFT, 0);
+    lv_obj_set_pos(s_value.object, 22, guide ? 105 : 80); lv_obj_set_width(s_value.object, 180);
+    if (guide) {
+        s_passkey = false;
+        lv_obj_add_flag(s_qrcode, LV_OBJ_FLAG_HIDDEN); lv_obj_remove_flag(s_card, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_pos(s_card, 12, 98); lv_obj_set_size(s_card, 200, 126);
+        lv_obj_set_pos(s_hint.object, 22, 203); text(&s_hint, progress);
+        lv_obj_set_pos(s_next.object, 14, 225); text(&s_next, note); text(&s_notice, "");
+    } else {
+        lv_obj_set_pos(s_notice.object, 22, 174); lv_obj_set_width(s_notice.object, 180); text(&s_notice, progress);
+        text(&s_usb_note, note);
+    }
+}
 static void guide_create(void) {
     lv_obj_t *screen = new_screen(); s_kind = GUIDE; s_guide_step = 0; s_cached = false;
     lv_obj_add_event_cb(screen, guide_progress, LV_EVENT_DRAW_MAIN, NULL);
     label(&s_header, screen, 14, 10, 152, "连接助手 1/6", &qdd_cjk_14, 0xF58C6C, false);
     label(&s_battery, screen, 166, 10, 44, "--%", &qdd_cjk_14, MUTED, false);
-    label(&s_title, screen, 14, 42, 196, "连接无线网络", &qdd_cjk_20, INK, true);
+    label(&s_title, screen, 14, 42, 196, "连接无线网", &qdd_cjk_20, INK, true);
     label(&s_detail, screen, 14, 72, 196, "", &qdd_cjk_14, INK, true);
     s_card = card(screen, 12, 110, 200, 102, PANEL);
     download_qr_create(screen, 94);
@@ -198,16 +333,35 @@ static void guide_refresh(const qdd_ui_view_t *view, qdd_ble_status_t ble, int c
     if (s_guide_step != view->onboarding_step) { s_guide_step = view->onboarding_step; lv_obj_invalidate(lv_screen_active()); }
     char value[64]; snprintf(value, sizeof(value), "连接助手 %u/6", view->onboarding_step); text(&s_header, value); battery(charge);
     text(&s_title, view->title);
+    if (view->onboarding_step == 2) {
+        text(&s_detail, view->detail); text(&s_next, view->next); text(&s_notice, "长按确认：设置");
+        lv_obj_add_flag(s_qrcode, LV_OBJ_FLAG_HIDDEN); lv_obj_remove_flag(s_card, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_pos(s_card, 12, 110); lv_obj_set_size(s_card, 200, 102);
+        lv_obj_set_pos(s_value.object, 22, 131); lv_obj_set_width(s_value.object, 180);
+        lv_obj_set_style_text_font(s_value.object, &qdd_cjk_14, 0);
+        lv_obj_set_style_text_align(s_value.object, LV_TEXT_ALIGN_CENTER, 0);
+        if (s_wifi.connected && s_wifi.ip[0]) snprintf(value, sizeof(value), "http://%s:3334/", s_wifi.ip);
+        else strcpy(value, "请先连接无线网");
+        text(&s_value, value); lv_obj_set_pos(s_hint.object, 22, 181); text(&s_hint, "电脑和手机连同一无线网");
+        lv_obj_set_pos(s_next.object, 14, 228);
+        return;
+    }
+    if (s_usb_cached) {
+        s_usb_cached = false;
+        lv_obj_set_pos(s_card, 12, 110); lv_obj_set_size(s_card, 200, 102);
+        lv_obj_set_pos(s_hint.object, 22, 171);
+        lv_obj_set_style_text_align(s_value.object, LV_TEXT_ALIGN_CENTER, 0);
+    }
     if (view->show_qr) {
         // Write only the final QR copy: setting generic text before overriding
         // it would invalidate an unchanged page on every presentation tick.
-        text(&s_detail, "扫码或浏览器打开地址下载"); (void)download_qr_update(s_wifi.ip);
+        text(&s_detail, view->detail); (void)download_qr_update(s_wifi.ip);
         lv_obj_remove_flag(s_qrcode, LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(s_card, LV_OBJ_FLAG_HIDDEN);
         lv_obj_set_y(s_value.object, 225); snprintf(value, sizeof(value), "%s:3334", s_wifi.ip); text(&s_value, value);
         lv_obj_set_pos(s_next.object, 14, 249); lv_obj_set_width(s_next.object, 196);
-        text(&s_next, "手机/电脑/ESP同一局域网"); text(&s_hint, ""); text(&s_notice, "");
+        text(&s_next, "手机也连接同一无线网"); text(&s_hint, ""); text(&s_notice, "");
     } else {
-        text(&s_detail, view->detail); text(&s_next, view->next); text(&s_notice, view->notice);
+        text(&s_detail, view->detail); text(&s_next, view->next); text(&s_notice, *view->notice ? view->notice : "长按确认：设置");
         lv_obj_add_flag(s_qrcode, LV_OBJ_FLAG_HIDDEN); lv_obj_remove_flag(s_card, LV_OBJ_FLAG_HIDDEN);
         lv_obj_set_y(s_value.object, 131); lv_obj_set_pos(s_next.object, 14, 228); lv_obj_set_width(s_next.object, 196);
         bool passkey = view->onboarding_step == 4 && view->show_passkey;
@@ -217,14 +371,19 @@ static void guide_refresh(const qdd_ui_view_t *view, qdd_ble_status_t ble, int c
             text(&s_value, value); text(&s_hint, passkey ? "在手机输入配对码" : "手机蓝牙中选择本设备");
         } else if (view->onboarding_step == 5 && !view->wait_projection) {
             snprintf(value, sizeof(value), "%s:%u", s_wifi.ip, s_wifi.port); text(&s_value, value); text(&s_hint, "电脑可自动发现");
-        } else { text(&s_value, view->wait_projection ? "手机App：开始投屏" : "上下选设置，确认进入"); text(&s_hint, view->wait_projection ? "允许系统共享屏幕" : "选择无线网络进行设置"); }
+        } else if (view->onboarding_step == 6) {
+            text(&s_value, view->computer); text(&s_hint, view->phone);
+        } else if (view->onboarding_step == 3) {
+            text(&s_value, "请先连接无线网"); text(&s_hint, "上键返回前面的步骤");
+        } else { text(&s_value, view->wait_projection ? "手机App：开始投屏" : s_wifi.connected ? "无线网已连接" : "确认后选择无线网"); text(&s_hint, view->wait_projection ? "允许系统共享屏幕" : "电脑和手机连同一无线网"); }
     }
 }
 void qdd_ui_refresh(const qdd_hid_state_t *state, qdd_ble_status_t ble, bool computer_live, int charge, uint64_t now, const char *feedback, uint64_t feedback_ms) {
     if (s_kind == SETUP) {
+        if (s_setup_page == QDD_SETUP_USB_DOWNLOAD) usb_refresh(false);
         if (s_setup_page == QDD_SETUP_PAIR) {
             const qdd_ui_pairing_view_t pair = qdd_ui_pairing_model(ble.connected,
-                ble.encrypted && ble.authenticated && ble.bonded, ble.ready,
+                ble.encrypted && ble.bonded, ble.ready,
                 ble.pairing_open, ble.passkey_visible, ble.passkey, now, feedback, feedback_ms);
             char value[48]; if (pair.show_passkey) snprintf(value, sizeof(value), "%06lu", (unsigned long)ble.passkey); else snprintf(value, sizeof(value), "%s", qdd_ble_name());
             if (s_passkey != pair.show_passkey) { s_passkey = pair.show_passkey; lv_obj_set_style_text_font(s_value.object, pair.show_passkey ? &qdd_cjk_20 : &qdd_cjk_14, 0); }
@@ -238,23 +397,35 @@ void qdd_ui_refresh(const qdd_hid_state_t *state, qdd_ble_status_t ble, bool com
         return;
     }
     const qdd_onboarding_view_t onboarding = qdd_onboarding_view();
-    const qdd_ui_onboarding_t progress = {.require_full = s_require_onboarding, .wifi_connected = s_wifi.connected, .downloaded = onboarding.downloaded,
+    unsigned requested = atomic_load(&s_requested_guide_step);
+    qdd_ui_onboarding_t progress = {.require_full = s_require_onboarding, .wifi_connected = s_wifi.connected, .downloaded = onboarding.downloaded,
         .phone_seen = onboarding.phone_seen, .phone_fresh = onboarding.phone_fresh, .pc_fresh = onboarding.pc_fresh,
         .projecting = onboarding.phone_projecting,
-        .skip_app = s_skip_app, .skip_bluetooth = s_skip_bluetooth, .completed = s_onboarding_complete};
-    const qdd_ui_view_t view = qdd_ui_onboarding_model(state, computer_live, ble.pairing_open, ble.passkey_visible, ble.passkey, now, feedback, feedback_ms, &progress);
-    if (view.onboarding_step == 6) s_onboarding_complete = true;
-    const bool guide = view.onboarding_step > 0 && view.onboarding_step < 6;
-    atomic_store(&s_visible_guide_step, guide ? view.onboarding_step : 0);
-    if (guide) { guide_refresh(&view, ble, charge); home_actions(false, true, view.can_skip); return; }
+        .skip_desktop = s_skip_desktop, .skip_app = s_skip_app, .skip_bluetooth = s_skip_bluetooth,
+        .completed = s_onboarding_complete || requested >= 7, .page = requested <= 6 ? requested : 0};
+    qdd_ui_view_t view = qdd_ui_onboarding_model(state, computer_live, ble.pairing_open, ble.passkey_visible, ble.passkey, now, feedback, feedback_ms, &progress);
+    if (!requested && view.onboarding_step > 0 && view.onboarding_step < 6) {
+        // Existing complete installations bypass setup. Once any instructions
+        // are shown, their first page becomes an explicit navigation choice.
+        unsigned automatic = 0;
+        if (atomic_compare_exchange_strong(&s_requested_guide_step, &automatic, view.onboarding_step)) {
+            requested = progress.page = view.onboarding_step;
+            view = qdd_ui_onboarding_model(state, computer_live, ble.pairing_open,
+                ble.passkey_visible, ble.passkey, now, feedback, feedback_ms, &progress);
+        }
+    }
+    if (!requested && view.onboarding_step == 6) s_onboarding_complete = true;
+    const bool guide = view.onboarding_step > 0 && (view.onboarding_step < 6 || progress.page != 0);
+    if (guide) { guide_refresh(&view, ble, charge); home_actions(false, view.onboarding_step); return; }
     if (s_kind != MAIN) qdd_ui_create();
     battery(charge); text(&s_computer, view.computer); text(&s_phone, view.phone); text(&s_title, view.title); text(&s_detail, *view.notice ? view.notice : view.detail);
-    home_actions(state->locked, false, false);
+    home_actions(state->locked, 0);
     text(&s_pairing, view.pairing);
     char value[48]; if (view.show_passkey) snprintf(value, sizeof(value), "%06lu", (unsigned long)ble.passkey);
     else snprintf(value, sizeof(value), "%s", qdd_ble_name());
     text(&s_value, value);
     if (s_accent != view.accent) { s_accent = view.accent; lv_obj_set_style_text_color(s_title.object, lv_color_hex(s_accent), 0); }
+    s_finish_after_refresh = requested == 7;
 }
 static bool ssid_display(char *output, size_t capacity, const char *ssid, unsigned number,
                          const uint8_t bssid[6], int content_width) {
@@ -355,11 +526,12 @@ static void setup_create(qdd_setup_page_t page) {
     lv_obj_t *screen = new_screen(); s_kind = SETUP; s_setup_page = page;
     memset(s_rows, 0, sizeof(s_rows)); s_keyboard = NULL;
     if (page == QDD_SETUP_DOWNLOAD) card(screen, 12, 70, 200, 176, PANEL);
+    if (page == QDD_SETUP_USB_DOWNLOAD) card(screen, 12, 72, 200, 131, PANEL);
     label(&s_header, screen, 14, 14, 196, "设备设置", &qdd_cjk_20, INK, false);
     label(&s_detail, screen, 14, 47, 196, "", &qdd_cjk_14, MUTED, false);
     label(&s_value, screen, 14, 74, 196, "", &qdd_cjk_14, 0xF58C6C, false);
     for (unsigned i = 0; i < 5; i++) {
-        if ((page == QDD_SETUP_RESET && i > 1) || page == QDD_SETUP_PASSWORD || (i != 4 && (page == QDD_SETUP_HELP || page == QDD_SETUP_DOWNLOAD || page == QDD_SETUP_CONNECTING ||
+        if ((page == QDD_SETUP_RESET && i > 1) || page == QDD_SETUP_PASSWORD || (i != 4 && (page == QDD_SETUP_HELP || page == QDD_SETUP_DOWNLOAD || page == QDD_SETUP_USB_DOWNLOAD || page == QDD_SETUP_CONNECTING ||
             ((page == QDD_SETUP_PAIR || page == QDD_SETUP_ERROR) && i > 0) ||
             (page == QDD_SETUP_ACTIONS && i > 3)))) continue;
         label(&s_rows[i], screen, 12, i == 4 ? 251 : 108 + (int)i * 35, 200, "", &qdd_cjk_14, INK, false);
@@ -373,8 +545,21 @@ static void setup_create(qdd_setup_page_t page) {
     }
     label(&s_hint, screen, 14, 290, 196, "上下选择 · 确认进入", &qdd_cjk_14, MUTED, false);
     label(&s_notice, screen, 14, 265, 196, "", &qdd_cjk_14, 0xF58C6C, false);
+    if (page == QDD_SETUP_MENU) {
+        s_menu_more = lv_obj_create(screen); lv_obj_remove_style_all(s_menu_more);
+        lv_obj_set_pos(s_menu_more, 216, 228); lv_obj_set_size(s_menu_more, 12, 14);
+        lv_obj_remove_flag(s_menu_more, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_flag(s_menu_more, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_event_cb(s_menu_more, menu_more_draw, LV_EVENT_DRAW_MAIN, NULL);
+        s_menu_previous = lv_obj_create(screen); lv_obj_remove_style_all(s_menu_previous);
+        lv_obj_set_pos(s_menu_previous, 216, 90); lv_obj_set_size(s_menu_previous, 12, 14);
+        lv_obj_remove_flag(s_menu_previous, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_flag(s_menu_previous, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_event_cb(s_menu_previous, menu_more_draw, LV_EVENT_DRAW_MAIN, (void *)1);
+    }
     s_passkey = false; s_cached = false; memset(&s_keyboard_model, 0, sizeof(s_keyboard_model));
     if (page == QDD_SETUP_DOWNLOAD) download_qr_create(screen, 74);
+    if (page == QDD_SETUP_USB_DOWNLOAD) label(&s_usb_note, screen, 14, 207, 196, "", &qdd_cjk_14, MUTED, false);
     if (page == QDD_SETUP_HELP) {
         lv_obj_add_event_cb(screen, guide_device_draw, LV_EVENT_DRAW_MAIN, NULL);
         fixed_label(screen, 58, 128, 54, "设备", &qdd_cjk_20, 0xF58C6C, true);
@@ -421,7 +606,7 @@ void qdd_ui_wifi(const qdd_setup_model_t *setup, qdd_wifi_view_t wifi) {
         }
         // Back remains on the last page rather than jumping to page one.
         const unsigned visible = setup->selection < wifi.count + 1u ? setup->selection : wifi.count;
-        snprintf(title, sizeof(title), "无线网络 %u/%u", visible / QDD_SETUP_VISIBLE_ROWS + 1,
+        snprintf(title, sizeof(title), "连接无线网 %u/%u", visible / QDD_SETUP_VISIBLE_ROWS + 1,
             (wifi.count + QDD_SETUP_VISIBLE_ROWS) / QDD_SETUP_VISIBLE_ROWS);
         snprintf(value, sizeof(value), "共%u个网络 · 上下翻页", wifi.count);
         text(&s_header, title); text(&s_detail, value); text(&s_value, "");
@@ -438,8 +623,12 @@ void qdd_ui_wifi(const qdd_setup_model_t *setup, qdd_wifi_view_t wifi) {
         }
     } else if (setup->page == QDD_SETUP_MENU) {
         text(&s_header, "设备设置"); text(&s_detail, "上下选择，确认进入"); text(&s_value, "");
+    } else if (setup->page == QDD_SETUP_USB_DOWNLOAD) {
+        text(&s_header, "USB备用下载"); s_usb_cached = false; usb_refresh(false); text(&s_hint, "确认返回");
+        lv_obj_remove_flag(s_rows[4].object, LV_OBJ_FLAG_HIDDEN); text(&s_rows[4], "返回设置");
+        lv_obj_set_style_bg_color(s_rows[4].object, lv_color_hex(ACCENT), 0); return;
     } else if (setup->page == QDD_SETUP_DOWNLOAD) {
-        text(&s_header, "手机投屏下载"); text(&s_detail, "扫码或浏览器打开地址下载");
+        text(&s_header, "驱动下载"); text(&s_detail, "扫码或电脑打开下方网址");
         lv_obj_set_style_text_align(s_value.object, LV_TEXT_ALIGN_CENTER, 0);
         if (wifi.connected && wifi.ip[0]) {
             if (download_qr_update(wifi.ip)) lv_obj_remove_flag(s_qrcode, LV_OBJ_FLAG_HIDDEN);
@@ -447,9 +636,9 @@ void qdd_ui_wifi(const qdd_setup_model_t *setup, qdd_wifi_view_t wifi) {
             lv_obj_set_y(s_value.object, 207); snprintf(value, sizeof(value), "%s:3334", wifi.ip); text(&s_value, value);
         } else {
             lv_obj_add_flag(s_qrcode, LV_OBJ_FLAG_HIDDEN); s_qr_url[0] = '\0';
-            lv_obj_set_y(s_value.object, 131); text(&s_value, "请先连接无线网络");
+            lv_obj_set_y(s_value.object, 131); text(&s_value, "请先连接无线网");
         }
-        lv_obj_set_y(s_notice.object, 229); text(&s_notice, "手机/电脑/ESP同一局域网");
+        lv_obj_set_y(s_notice.object, 229); text(&s_notice, "手机也连接同一无线网");
         text(&s_hint, "确认返回");
         lv_obj_remove_flag(s_rows[4].object, LV_OBJ_FLAG_HIDDEN); text(&s_rows[4], "返回设置");
         lv_obj_set_style_bg_color(s_rows[4].object, lv_color_hex(ACCENT), 0); return;
@@ -488,9 +677,25 @@ void qdd_ui_wifi(const qdd_setup_model_t *setup, qdd_wifi_view_t wifi) {
     if (setup->page == QDD_SETUP_CONNECTING) selected = 0;
     const unsigned visible_index = selected < regular ? selected : regular ? regular - 1 : 0;
     const unsigned start = visible_index / QDD_SETUP_VISIBLE_ROWS * QDD_SETUP_VISIBLE_ROWS;
+    if (s_menu_more) {
+        if (start + QDD_SETUP_VISIBLE_ROWS < regular) lv_obj_remove_flag(s_menu_more, LV_OBJ_FLAG_HIDDEN);
+        else lv_obj_add_flag(s_menu_more, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (s_menu_previous) {
+        if (start) lv_obj_remove_flag(s_menu_previous, LV_OBJ_FLAG_HIDDEN);
+        else lv_obj_add_flag(s_menu_previous, LV_OBJ_FLAG_HIDDEN);
+    }
     for (unsigned i = 0; i < 4; i++) {
         const unsigned index = start + i; value[0] = '\0'; if (index >= regular) continue;
-        if (setup->page == QDD_SETUP_MENU) { static const char *items[] = {"无线网络", "手机蓝牙配对", "按键指南", "重置设备", "手机投屏下载"}; strcpy(value, items[index]); }
+        if (setup->page == QDD_SETUP_MENU) {
+            static const char *items[] = {
+                [QDD_SETUP_MENU_WIFI] = "连接无线网", [QDD_SETUP_MENU_PAIR] = "手机蓝牙配对",
+                [QDD_SETUP_MENU_DOWNLOAD] = "驱动下载", [QDD_SETUP_MENU_HELP] = "按键指南",
+                [QDD_SETUP_MENU_RESET] = "重置设备"
+            };
+            _Static_assert(sizeof(items) / sizeof(items[0]) == QDD_SETUP_MENU_ITEMS - 1, "Settings labels must match navigation");
+            strcpy(value, items[index]);
+        }
         else if (setup->page == QDD_SETUP_ACTIONS) { static const char *items[] = {"连接网络", "继续输入", "删除一位", "清空密码"}; strcpy(value, items[index]); }
         else if (setup->page == QDD_SETUP_LIST) {
             if (index < wifi.count) {

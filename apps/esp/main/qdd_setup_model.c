@@ -217,26 +217,29 @@ qdd_setup_action_t qdd_setup_key(qdd_setup_model_t *model, qdd_setup_key_t key,
     case QDD_SETUP_MENU:
         if (navigate) model->selection = step(model->selection, QDD_SETUP_MENU_ITEMS, backwards);
         else if (key == QDD_SETUP_OK) {
-            if (model->selection == 0) return qdd_setup_enter(model);
-            if (model->selection == 1) return qdd_setup_pair(model);
-            if (model->selection == 2) qdd_setup_help(model);
-            else if (model->selection == 3) { qdd_setup_menu(model); model->page = QDD_SETUP_RESET; }
-            else if (model->selection == 4) { model->page = QDD_SETUP_DOWNLOAD; model->selection = 0; }
+            if (model->selection == QDD_SETUP_MENU_WIFI) return qdd_setup_enter(model);
+            if (model->selection == QDD_SETUP_MENU_PAIR) return qdd_setup_pair(model);
+            if (model->selection == QDD_SETUP_MENU_HELP) qdd_setup_help(model);
+            else if (model->selection == QDD_SETUP_MENU_RESET) { qdd_setup_menu(model); model->page = QDD_SETUP_RESET; }
+            else if (model->selection == QDD_SETUP_MENU_USB_DOWNLOAD) { model->page = QDD_SETUP_USB_DOWNLOAD; model->selection = 0; }
+            else if (model->selection == QDD_SETUP_MENU_DOWNLOAD) { model->page = QDD_SETUP_DOWNLOAD; model->selection = 0; }
             else { qdd_setup_exit(model); return QDD_SETUP_EXIT; }
         }
         break;
+    case QDD_SETUP_USB_DOWNLOAD:
     case QDD_SETUP_DOWNLOAD:
         // Display-only settings page: never restart provisioning or issue a
         // networking/storage/control action on entry, navigation or return.
         if (key == QDD_SETUP_OK || key == QDD_SETUP_LONG_OK) {
-            model->page = QDD_SETUP_MENU; model->selection = 4;
+            model->selection = QDD_SETUP_MENU_DOWNLOAD;
+            model->page = QDD_SETUP_MENU;
         }
         break;
     case QDD_SETUP_RESET:
         if (navigate) model->selection = step(model->selection, 2, backwards);
         else if (key == QDD_SETUP_OK && model->selection == 1) return QDD_SETUP_RESET_DEVICE;
         else if (key == QDD_SETUP_OK || key == QDD_SETUP_LONG_OK) {
-            qdd_setup_menu(model); model->selection = 3;
+            qdd_setup_menu(model); model->selection = QDD_SETUP_MENU_RESET;
         }
         break;
     case QDD_SETUP_HELP:
@@ -244,12 +247,12 @@ qdd_setup_action_t qdd_setup_key(qdd_setup_model_t *model, qdd_setup_key_t key,
             if (key == QDD_SETUP_OK) { qdd_setup_exit(model); return QDD_SETUP_EXIT; }
             break;
         }
-        if (key == QDD_SETUP_OK || key == QDD_SETUP_LONG_OK) { qdd_setup_menu(model); model->selection = 2; }
+        if (key == QDD_SETUP_OK || key == QDD_SETUP_LONG_OK) { qdd_setup_menu(model); model->selection = QDD_SETUP_MENU_HELP; }
         break;
     case QDD_SETUP_PAIR:
         if (navigate) model->selection = step(model->selection, 2, backwards);
         else if (key == QDD_SETUP_LONG_OK || (key == QDD_SETUP_OK && model->selection == 1)) {
-            qdd_setup_menu(model); model->selection = 1;
+            qdd_setup_menu(model); model->selection = QDD_SETUP_MENU_PAIR;
         } else if (key == QDD_SETUP_OK) return QDD_SETUP_PAIR_PHONE;
         break;
     case QDD_SETUP_LIST:

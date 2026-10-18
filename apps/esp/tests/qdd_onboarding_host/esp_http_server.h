@@ -11,6 +11,9 @@ typedef struct {
     const char *body;
     const char *content_type;
     const char *origin;
+    const char *user_agent;
+    const char *range;
+    const char *if_match;
     size_t received;
 } httpd_req_t;
 typedef struct {
@@ -42,3 +45,7 @@ esp_err_t httpd_resp_send_chunk(httpd_req_t *request, const char *body, ssize_t 
 size_t httpd_req_get_hdr_value_len(httpd_req_t *request, const char *key);
 esp_err_t httpd_req_get_hdr_value_str(httpd_req_t *request, const char *key, char *value, size_t size);
 int httpd_req_recv(httpd_req_t *request, char *body, size_t size);
+int httpd_send(httpd_req_t *request, const char *body, size_t size);
+esp_err_t httpd_req_async_handler_begin(httpd_req_t *request, httpd_req_t **copy);
+esp_err_t httpd_req_async_handler_complete(httpd_req_t *request);
+esp_err_t httpd_sess_trigger_close(httpd_handle_t server, int descriptor);

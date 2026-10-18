@@ -21,6 +21,9 @@ This directory contains AI Passport engineering rules and reusable workflows, gr
 - [lvgl-chinese-fonts.md](engineering/lvgl-chinese-fonts.md): step-by-step CJK configuration, font generation/linking, fallback examples, glyph checks, and troubleshooting.
 - [wifi-provisioning.md](engineering/wifi-provisioning.md): Bluetooth-based Wi-Fi setup using the BLUFI reference branch, the companion mini program, and integration checks.
 
+- [Unicode text channel](engineering/qdd-text.md): authenticated, bounded phone-editor commits and device validation boundaries.
+- [Driver downloads](engineering/download-assets.md): independent assets resource images and low-memory HTTP downloads.
+
 ## CI
 
 - [CI-validation.md](ci/CI-validation.md): pull-request and main-branch checks.

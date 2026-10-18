@@ -8,6 +8,7 @@ import type { AdbCapture, AdbDevice } from "./adb.js";
 import { asciiKey, InputController, parseKeyCombo, splitMove } from "./input.js";
 import { renderTargetPreview } from "./target-preview-client.js";
 import { MAX_SCREEN_FRAME_AGE_MS } from "./screen.js";
+import type { PointerCalibrationState } from "./screen.js";
 
 type Arguments = Record<string, unknown>;
 type Properties = Record<string, Record<string, unknown>>;
@@ -46,8 +47,8 @@ export const ANDROID_TOOLS: Tool[] = [
   tool("android_hid_arm", "Explicitly arm authenticated BLE keyboard/mouse input. A physical stop lock must first be cleared on the device controller: select Cancel emergency stop and confirm there. The computer cannot unlock it."),
   tool("android_hid_pause", "Immediately cancel queued computer input, release all held keys/buttons and disarm. Does not clear the physical stop lock."),
   tool("android_release", "Cancel queued input and release all held keyboard keys, mouse buttons and consumer keys."),
-  tool("android_pointer_calibration", "Convenient two-stage estimated pointer calibration. probe requires frameId, prepares input, reveals the cursor, and returns labeled BEFORE and AFTER original images from one small diagonal movement. finish takes the observed cursor centers in those two images and computes HID counts per pixel automatically, without moving again. Use the latest frameId from this session; no input may intervene. This does not remove Android mouse acceleration or guarantee pixel accuracy.", {
-    phase: { type: "string", enum: ["probe", "finish"] }, frameId,
+  tool("android_pointer_calibration", "Use auto when Android omits the system cursor from screenshots: first manually open the screen-sharing App's Pointer calibration page and leave it in the foreground. auto measures actual mouse events from that dedicated page, sends only two small ESP BLE mouse movements and computes scales without clicking. It never opens the App/page remotely. probe returns BEFORE/AFTER images for devices with a visible cursor; finish uses the observed centers without further movement. If the images match, probe is not measurable and produces no finish ticket. All modes retain acceleration/estimated-coordinate limits.", {
+    phase: { type: "string", enum: ["auto", "probe", "finish"] }, frameId,
     direction: { type: "string", enum: ["up-left", "up-right", "down-left", "down-right"], default: "up-left" },
     counts: integer("Probe HID counts on each axis, default 96", 16, 127),
     probeId: string("This session's pending calibration probeId"),
@@ -115,7 +116,8 @@ function json(value: unknown): CallToolResult {
 export type AndroidCapture = AdbCapture & { mimeType?: "image/jpeg" | "image/png";
   deviceWidth?: number; deviceHeight?: number; previewProfile?: "turbo" | "fast" | "standard" | "original" };
 interface CaptureClient { listDevices(): Promise<AdbDevice[]>; capture(serial?: string, signal?: AbortSignal): Promise<AndroidCapture>;
-  preview?(serial?: string): Promise<AndroidCapture> }
+  preview?(serial?: string): Promise<AndroidCapture>;
+  getPointerCalibration?(serial?: string, signal?: AbortSignal): Promise<PointerCalibrationState> }
 interface Frame extends AndroidCapture { frameId: string; observedAt: number; epoch: number }
 interface Observation {
   serial: string;
@@ -340,14 +342,14 @@ export class AndroidTools {
       }
       const result = this.snapshot({ ...capture, ...(frameAgeMs === undefined ? {} : { frameAgeMs }) }, {
         action: "preview_tap", simulatedTarget: true, realMouseMoved: false, realClickSent: false,
-        target: { x, y, coordinateSpace: "pixels" }, crop: rendered.crop,
+        target: { x, y, coordinateSpace: "pixels" }, crop: rendered.crop, annotation: rendered.annotation,
         zoomTarget: { x: (x - rendered.crop.x) * rendered.crop.scale,
           y: (y - rendered.crop.y) * rendered.crop.scale, coordinateSpace: "zoomPixels" },
         sourceMimeType, sourceSha256: createHash("sha256").update(capture.png).digest("hex"),
         annotatedImageSha256: createHash("sha256").update(rendered.png).digest("hex"),
         zoomImageSha256: createHash("sha256").update(rendered.zoomPng).digest("hex"),
         mimeType: "image/png", imageOrder: ["simulated_target_original", "simulated_target_zoom"],
-        note: "SIMULATED TARGET marks the proposed pixel only; no real mouse movement or click was sent. The source sha256 identifies the unmodified real phone image, while annotated image hashes identify the two returned PNGs. Inspect the marker and local zoom before tapping. It does not prove physical mouse accuracy; calibrated hover returns the actual cursor before a separate click.",
+        note: "Both PNG footers visibly show PHONE PX X/Y in original phone pixels and SIMULATED TARGET. Annotation sourceRect identifies the unchanged-resolution image area; the footer and any right padding are not phone pixels. SIMULATED TARGET marks the proposed pixel only; no real mouse movement or click was sent. The source sha256 identifies the unmodified real phone image, while annotated image hashes identify the two returned PNGs. Inspect the marker and local zoom before tapping. It does not prove physical mouse accuracy; calibrated hover returns the actual cursor before a separate click.",
       });
       const metadata = result.structuredContent!;
       metadata["tapArguments"] = { action: "tap", frameId: metadata["frameId"], x, y, coordinateSpace: "pixels" };
@@ -514,6 +516,93 @@ export class AndroidTools {
     return task;
   }
 
+  private async automaticPointerCalibration(args: Arguments, signal?: AbortSignal): Promise<CallToolResult> {
+    if (Object.keys(args).some((key) => !["phase", "frameId", "counts"].includes(key))) throw new Error("Unexpected automatic calibration argument.");
+    const frame = this.requireFrame(args), count = int(args, "counts", 96);
+    if (count < 16 || count > 127) throw new Error("Calibration counts must be in 16..127.");
+    if (frame.previewProfile !== undefined && frame.previewProfile !== "original"
+      || (frame.deviceWidth ?? frame.width) !== frame.width || (frame.deviceHeight ?? frame.height) !== frame.height) {
+      throw new Error("Pointer calibration requires original-resolution images, not scaled previews.");
+    }
+    if (!this.adb.getPointerCalibration) throw new Error("Update the screen-sharing App, manually open its Pointer calibration page, then use phase auto. The computer cannot open it remotely.");
+    let inputEpoch = this.input.controlEpoch, revision = this.input.inputRevision;
+    const epoch = this.observation.epoch;
+    let preparing = false, movementAttempted = false;
+    const owned = () => this.observation.inputOwner === this && this.input.controlEpoch === inputEpoch;
+    const check = (expectedRevision = revision) => {
+      signal?.throwIfAborted(); this.requireFrame(args);
+      if (!owned() || this.observation.epoch !== epoch || this.input.inputRevision !== expectedRevision) {
+        throw new Error("Input, owner or phone changed during automatic calibration; observe again.");
+      }
+    };
+    const state = async (session?: string): Promise<PointerCalibrationState> => {
+      check(); const value = await this.adb.getPointerCalibration!(frame.serial, signal); check();
+      if (!value.active || !value.sessionId) throw new Error("Manually open the screen-sharing App's Pointer calibration page and leave it in the foreground. Calibration sends no clicks.");
+      if (value.deviceId !== frame.serial || value.width !== frame.width || value.height !== frame.height
+        || value.rotation !== (frame.rotation ?? this.input.state.screen.rotation ?? 0) || session !== undefined && value.sessionId !== session) {
+        throw new Error("Calibration page, phone or geometry changed; leave the calibration page in the foreground and observe again.");
+      }
+      return value;
+    };
+    const nextPoint = async (session: string, previous: number) => {
+      const deadline = performance.now() + 1000;
+      do {
+        const value = await state(session), point = value.point;
+        if (performance.now() > deadline) break;
+        if (point && point.sequence > previous && point.ageMs <= 1000 && point.ageMs >= 0) return point;
+        await delay(40, undefined, { signal }); check();
+      } while (performance.now() < deadline);
+      throw new Error("No fresh actual mouse event arrived on the calibration page. Do not infer coordinates from an unchanged image or repeat movements blindly.");
+    };
+    const stop = () => { if (preparing && owned()) void this.input.stop().catch(() => {}); };
+    signal?.addEventListener("abort", stop, { once: true }); this.calibrationProbe = undefined;
+    try {
+      const initial = await state();
+      await this.readLiveFrame(signal); check();
+      const releasing = this.input.releaseAll(); inputEpoch = this.input.controlEpoch; preparing = true; revision += 1;
+      await releasing; check();
+      const arming = this.input.arm(signal); inputEpoch = this.input.controlEpoch; await arming; check();
+      const move = async (x: number, y: number) => {
+        await state(initial.sessionId!); check(); movementAttempted = true;
+        const previous = revision, moving = this.input.move(x, y, 0, 0, signal, () => check(previous)); revision += 1;
+        await moving; check(); await delay(this.calibrationSettle, undefined, { signal }); check();
+      };
+      await move(1, 1);
+      const start = await nextPoint(initial.sessionId!, initial.point?.sequence ?? 0);
+      // Match the coordinate path's 550 ms velocity-control reset so earlier
+      // fast manual movement does not leak acceleration into this measurement.
+      await delay(550, undefined, { signal }); check();
+      const resting = await state(initial.sessionId!);
+      if (resting.point?.sequence !== start.sequence || resting.point.x !== start.x || resting.point.y !== start.y) {
+        throw new Error("Actual pointer changed during calibration settling; keep the calibration page foreground and the pointer still.");
+      }
+      const dx = start.x < frame.width / 2 ? count : -count, dy = start.y < frame.height / 2 ? count : -count;
+      await move(dx, dy);
+      const end = await nextPoint(initial.sessionId!, start.sequence);
+      const deltaX = end.x - start.x, deltaY = end.y - start.y;
+      if (Math.abs(deltaX) < 12 || Math.abs(deltaY) < 12 || deltaX * dx <= 0 || deltaY * dy <= 0
+        || end.x < 8 || end.y < 8 || end.x >= frame.width - 8 || end.y >= frame.height - 8) {
+        throw new Error("Actual pointer movement is too small, reversed or edge-clipped; calibration was not changed.");
+      }
+      const after = await this.afterActionFrame(frame, performance.now(), signal); check();
+      if (after.serial !== frame.serial || after.width !== frame.width || after.height !== frame.height
+        || (after.rotation ?? 0) !== (frame.rotation ?? 0)) throw new Error("Phone geometry changed before calibration completed.");
+      const final = await state(initial.sessionId!);
+      if (final.point?.sequence !== end.sequence || final.point.ageMs > 1000 || final.point.x !== end.x || final.point.y !== end.y) {
+        throw new Error("Actual pointer changed or became stale before calibration completed.");
+      }
+      const scaleX = dx / deltaX, scaleY = dy / deltaY;
+      check(); const input = this.input.setCalibration(scaleX, scaleY);
+      return this.snapshot(after, { phase: "auto", calibrated: true, measurementSource: "android-mouse-events",
+        sessionId: initial.sessionId, counts: { dx, dy }, start, end, scaleX, scaleY, input,
+        realClickSent: false, note: "Measured actual mouse events on the dedicated foreground page. No system cursor screenshot is required. Coordinates remain estimates under acceleration; recalibrate after rotation or pointer settings change. Use system Back to leave the calibration page." });
+    } catch (error) {
+      if (preparing && owned()) await this.input.stop().catch(() => {});
+      return { ...json({ phase: "auto", calibrated: false, movementAttempted, realClickSent: false,
+        message: `${error instanceof Error ? error.message : String(error)}${movementAttempted ? " Movement may already have occurred; observe again rather than replay it." : ""}` }), isError: true };
+    } finally { signal?.removeEventListener("abort", stop); }
+  }
+
   private pointerCalibration(args: Arguments, signal?: AbortSignal): Promise<CallToolResult> {
     const task = this.observation.controls.then(async (): Promise<CallToolResult> => {
       const original = (frame: AndroidCapture) => {
@@ -523,6 +612,7 @@ export class AndroidTools {
         }
       };
       const phase = text(args, "phase");
+      if (phase === "auto") return this.automaticPointerCalibration(args, signal);
       if (phase === "finish") {
         if (Object.keys(args).some((key) => !["phase", "frameId", "probeId", "startX", "startY", "endX", "endY"].includes(key))) {
           throw new Error("Unexpected calibration finish argument.");
@@ -565,7 +655,7 @@ export class AndroidTools {
         return json({ phase, probeId: ticket!.id, calibrated: true, scaleX, scaleY, input,
           note: "Measured HID counts per pixel; coordinates remain estimates under mouse acceleration. The next absolute action retains its normal pointer homing." });
       }
-      if (phase !== "probe") throw new Error("Calibration phase must be probe or finish.");
+      if (phase !== "probe") throw new Error("Calibration phase must be auto, probe or finish.");
       if (Object.keys(args).some((key) => !["phase", "frameId", "direction", "counts"].includes(key))) throw new Error("Unexpected calibration probe argument.");
       const frame = this.requireFrame(args);
       original(frame);
@@ -613,6 +703,18 @@ export class AndroidTools {
           || before.height !== frame.height || after.height !== frame.height || (before.rotation ?? 0) !== (after.rotation ?? 0)
           || (after.rotation ?? this.input.state.screen.rotation ?? 0) !== (frame.rotation ?? this.input.state.screen.rotation ?? 0)) {
           throw new Error("Calibration images no longer match the observed phone geometry.");
+        }
+        if (before.png.equals(after.png)) {
+          if (owned()) await this.input.stop();
+          const result = this.snapshot(after, { phase, measurable: false, measurementAvailable: false, reason: "identical_images",
+            calibrated: false, measurementSource: "cursor-images", imageOrder: ["before", "after"],
+            counts: { dx, dy }, direction, realClickSent: false,
+            message: "The BEFORE and AFTER images are identical, so the cursor is not measurable. No finish ticket was issued. Manually open the updated screen-sharing App's Pointer calibration page and use phase auto. This is a measurement limitation, not a failure of the business app." });
+          return { ...result, content: [{ type: "text", text: JSON.stringify(result.structuredContent) },
+            { type: "text", text: "BEFORE: actual phone image, cursor measurement unavailable." },
+            { type: "image", mimeType: before.mimeType ?? "image/png", data: before.png.toString("base64") },
+            { type: "text", text: "AFTER: identical image; do not guess a cursor position." },
+            { type: "image", mimeType: after.mimeType ?? "image/png", data: after.png.toString("base64") }] };
         }
         const probeId = randomUUID();
         const result = this.snapshot(after, { phase, probeId, counts: { dx, dy }, direction,
@@ -761,7 +863,7 @@ export function createMcpSession(tools: AndroidTools, requestSignal?: (id: strin
 } {
   const sessionTools = tools.fork();
   const server = new Server({ name: "qdd-android-hid", version: "0.0.0" }, { capabilities: { tools: {} }, instructions:
-    "Observe the device with android_screenshot, then prefer android_control with that frameId: it prepares input, executes one action, and returns a real newer image captured after the action completed. Continue using the returned frameId. Before a coordinate tap, call android_preview_tap with frameId/x/y to inspect a SIMULATED TARGET marker and 2x local zoom without sending HID or requiring calibration. Read target/tapArguments in original phone pixels, not zoom pixels or resized image display pixels. This confirms the chosen UI target, not mouse accuracy. If physical accuracy is uncertain, use calibrated android_control action hover, inspect the real cursor in its returned image, then action click at the current position. Hover sends movement only. Relative move/click, key, scroll, home and back need no calibration. For tap/hover/swipe, prefer android_pointer_calibration phase probe: it returns labeled BEFORE/AFTER original images from a small mouse movement. Observe both cursor centers, then phase finish computes the scales without further movement. Keep the probeId and latest frameId; any intervening input invalidates the probe. Choose another diagonal direction if the cursor hits an edge. Manual android_calibrate_pointer remains available. Coordinates remain estimates under mouse acceleration. All input is through the ESP32 BLE keyboard/mouse, connected over Wi-Fi TCP or USB serial. Never use ADB input as a fallback. Legacy individual input tools require android_hid_arm and a separate screenshot afterward. If an action completed but the image failed, do not repeat it blindly; observe again. Input cancellation/failure releases input; read-only target preview failures do not change another input owner. Clear physical emergency stop only on the board. Text typing is US-layout ASCII. No model API or API key is required by this MCP server.",
+    "Observe the device with android_screenshot, then prefer android_control with that frameId: it prepares input, executes one action, and returns a real newer image captured after the action completed. Continue using the returned frameId. Before a coordinate tap, call android_preview_tap with frameId/x/y to inspect a SIMULATED TARGET marker and 2x local zoom without sending HID or requiring calibration. Read target/tapArguments in original phone pixels, not zoom pixels or resized image display pixels. This confirms the chosen UI target, not mouse accuracy. If the system cursor is captured, calibrated android_control action hover can reveal its real position before action click. Hover sends movement only. An absent cursor cannot prove hover accuracy. Relative move/click, key, scroll, home and back need no calibration. For tap/hover/swipe on devices whose screenshots omit the cursor, have the user manually open the screen-sharing App's Pointer calibration page, observe that page, then call android_pointer_calibration phase auto. It reads actual mouse events on the dedicated foreground page, rests 550 ms before the measured movement, and sets measured scales without clicking. The API never opens that App/page remotely. For a visibly captured cursor, phase probe returns labeled BEFORE/AFTER images; observe both actual cursor centers and use phase finish without further movement. Identical images return measurable:false with no finish ticket; do not guess cursor coordinates. Different image hashes alone also do not establish a cursor position. Keep the probeId and latest frameId; intervening input invalidates the probe. Manual android_calibrate_pointer remains available. Coordinates remain estimates under mouse acceleration. All input is through the ESP32 BLE keyboard/mouse, connected over Wi-Fi TCP or USB serial. Never use ADB input as a fallback. Legacy individual input tools require android_hid_arm and a separate screenshot afterward. If an action completed but the image failed, do not repeat it blindly; observe again. Input cancellation/failure releases input; read-only target preview failures do not change another input owner. Clear physical emergency stop only on the board. Text typing is US-layout ASCII. No model API or API key is required by this MCP server.",
   });
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: ANDROID_TOOLS }));
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {

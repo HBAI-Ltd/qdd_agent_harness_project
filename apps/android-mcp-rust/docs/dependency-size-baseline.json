@@ -1,0 +1,42 @@
+{
+  "measuredAt": "2026-10-18T01:58:36.889Z",
+  "purpose": "Dependency and codec baseline measured before creating the Rust package; not a complete product",
+  "target": "x86_64-pc-windows-msvc",
+  "rustc": "1.87.0",
+  "exeBytes": 1027584,
+  "zipBytes": 518862,
+  "exeSha256": "caea2246713239469c23247a616cb0cb4f378d512e81f8315c72fea005619d55",
+  "embeddedWebAssetBytes": 79185,
+  "dependencies": {
+    "serde": "1.0.219",
+    "serde_json": "1.0.140",
+    "base64": "0.22.1",
+    "sha2": "0.10.8",
+    "httparse": "1.10.1",
+    "tungstenite": "0.26.2",
+    "serialport": "4.7.3",
+    "image": "0.25.6",
+    "tokio": "1.44.2",
+    "tokio-util": "0.7.14"
+  },
+  "retainedPaths": [
+    "JSON-RPC stdio",
+    "HTTP client/server",
+    "WebSocket handshake and frame I/O",
+    "serial enumeration/open/read/write code (no real port opened)",
+    "JPEG and PNG decode, target marker/crop, 2x PNG output",
+    "Tokio TCP/timer/channel actor and cancellation"
+  ],
+  "verification": [
+    "JSON/image/actor selftest",
+    "loopback HTTP and JSON-RPC initialize",
+    "loopback WebSocket handshake/echo"
+  ],
+  "notIncluded": [
+    "Full 22 MCP tools and state logic",
+    "Full input ownership, calibrated timing and safety",
+    "Final desktop/discovery/TLS implementation"
+  ],
+  "realDeviceOperations": false,
+  "builtAt": "2026-10-18T01:42:41.843Z"
+}

@@ -12,6 +12,28 @@ static bool report(uint8_t id, const uint8_t *data, size_t size, void *context) 
     return true;
 }
 
+static void test_wifi_precedes_usb_and_connected_wifi_does_not_skip_usb(void) {
+    qdd_hid_state_t state = {0};
+    qdd_ui_onboarding_t progress = {.require_full = true};
+    qdd_ui_view_t guide = qdd_ui_onboarding_model(&state, false, false, false, 0, 2000, "", 0, &progress);
+    assert(guide.onboarding_step == 1 && guide.stage == QDD_UI_WIFI);
+    assert(strcmp(guide.title, "连接无线网") == 0 && !guide.show_qr && !guide.can_skip);
+    progress.wifi_connected = true;
+    guide = qdd_ui_onboarding_model(&state, false, false, false, 0, 2000, "", 0, &progress);
+    assert(guide.onboarding_step == 2 && guide.stage == QDD_UI_USB_INSTALL);
+    assert(strcmp(guide.title, "下载电脑软件") == 0 && !guide.show_qr);
+    progress.pc_fresh = progress.phone_seen = progress.phone_fresh = progress.projecting = true;
+    guide = qdd_ui_onboarding_model(&state, false, false, false, 0, 2000, "", 0, &progress);
+    assert(guide.onboarding_step == 2); // Network/device observation cannot claim installation.
+    progress.skip_desktop = true;
+    guide = qdd_ui_onboarding_model(&state, false, false, false, 0, 2000, "", 0, &progress);
+    assert(guide.onboarding_step == 4);
+    progress.wifi_connected = false;
+    guide = qdd_ui_onboarding_model(&state, false, false, false, 0, 2000, "", 0, &progress);
+    assert(guide.onboarding_step == 1 && !guide.can_skip);
+    assert(!state.armed && !state.heartbeat_seen);
+}
+
 static void test_pairing_settings_feedback(void) {
     qdd_ui_pairing_view_t pair = qdd_ui_pairing_model(false, false, false, true, false, 0, 1000, "PAIRING", 1000);
     assert(strcmp(pair.detail, "配对已开启，等待手机") == 0);
@@ -48,18 +70,21 @@ static void test_guide_actions_and_skip_safety(void) {
                 assert(action != QDD_UI_HOME_STOP && action != QDD_UI_HOME_UNLOCK);
             }
         }
-        assert(qdd_ui_home_choices(step) == (step >= 2 && step <= 4 ? 2u : 1u));
+        assert(qdd_ui_home_choices(step) == 1u);
     }
-    assert(qdd_ui_home_action(2, 0, false) == QDD_UI_HOME_SKIP_APP);
-    assert(qdd_ui_home_action(3, 0, false) == QDD_UI_HOME_SKIP_APP);
-    assert(qdd_ui_home_action(4, 0, false) == QDD_UI_HOME_SKIP_BLUETOOTH);
+    assert(qdd_ui_home_action(1, 0, false) == QDD_UI_HOME_WIFI_SETUP);
+    assert(qdd_ui_home_action(2, 0, false) == QDD_UI_HOME_NEXT);
+    assert(qdd_ui_home_action(2, 1, false) == QDD_UI_HOME_NEXT);
+    assert(qdd_ui_home_action(1, 1, false) == QDD_UI_HOME_WIFI_SETUP);
+    assert(qdd_ui_home_action(3, 0, false) == QDD_UI_HOME_NEXT);
+    assert(qdd_ui_home_action(4, 0, false) == QDD_UI_HOME_PAIR);
     assert(qdd_ui_home_action(0, 0, false) == QDD_UI_HOME_STOP);
     assert(qdd_ui_home_action(0, 0, true) == QDD_UI_HOME_UNLOCK);
     assert(qdd_ui_home_action(0, 1, true) == QDD_UI_HOME_SETTINGS);
     qdd_hid_state_t state = {0};
-    qdd_ui_onboarding_t progress = {.require_full = true, .wifi_connected = true};
+    qdd_ui_onboarding_t progress = {.require_full = true, .skip_desktop = true, .wifi_connected = true};
     qdd_ui_view_t guide = qdd_ui_onboarding_model(&state, false, false, false, 0, 2000, "", 0, &progress);
-    assert(guide.onboarding_step == 2 && guide.can_skip && guide.show_qr);
+    assert(guide.onboarding_step == 3 && guide.can_skip && guide.show_qr);
     progress.skip_app = true;
     guide = qdd_ui_onboarding_model(&state, false, false, false, 0, 2000, "", 0, &progress);
     assert(guide.onboarding_step == 4 && guide.can_skip && !guide.show_qr);
@@ -81,7 +106,7 @@ static void test_guide_actions_and_skip_safety(void) {
     state.locked = false;
     progress.skip_app = progress.skip_bluetooth = false; // RAM reset/configuration restores normal setup.
     guide = qdd_ui_onboarding_model(&state, true, false, false, 0, 2000, "", 0, &progress);
-    assert(guide.onboarding_step == 2 && guide.can_skip && guide.show_qr);
+    assert(guide.onboarding_step == 3 && guide.can_skip && guide.show_qr);
     progress.phone_seen = progress.phone_fresh = progress.projecting = true;
     progress.skip_bluetooth = true;
     guide = qdd_ui_onboarding_model(&state, true, false, false, 0, 2000, "", 0, &progress);
@@ -91,7 +116,7 @@ static void test_guide_actions_and_skip_safety(void) {
 static void test_completed_guide_preserves_real_status(void) {
     qdd_hid_state_t state = {.connected = true, .encrypted = true, .authenticated = true, .bonded = true,
         .ready = true, .heartbeat_seen = true, .last_ping_ms = 1900};
-    qdd_ui_onboarding_t progress = {.require_full = true, .wifi_connected = true, .phone_seen = true,
+    qdd_ui_onboarding_t progress = {.require_full = true, .skip_desktop = true, .wifi_connected = true, .phone_seen = true,
         .phone_fresh = true, .projecting = true, .completed = true};
     qdd_ui_view_t guide = qdd_ui_onboarding_model(&state, true, false, false, 0, 2000, "", 0, &progress);
     assert(guide.onboarding_step == 6 && guide.stage == QDD_UI_ENABLED && guide.computer_online);
@@ -123,7 +148,7 @@ static void test_completed_guide_preserves_real_status(void) {
 static void test_pc_registration_is_visible_without_a_control_lease(void) {
     qdd_hid_state_t state = {.connected = true, .encrypted = true, .authenticated = true,
         .bonded = true, .ready = true};
-    qdd_ui_onboarding_t progress = {.require_full = true, .wifi_connected = true,
+    qdd_ui_onboarding_t progress = {.require_full = true, .skip_desktop = true, .wifi_connected = true,
         .phone_seen = true, .phone_fresh = true, .projecting = true};
     const qdd_hid_state_t before = state;
     // The operation console registers before control: observation sends no PING.
@@ -148,13 +173,13 @@ static void test_pc_registration_is_visible_without_a_control_lease(void) {
     progress.completed = false;
     progress.phone_seen = progress.phone_fresh = progress.projecting = false;
     guide = qdd_ui_onboarding_model(&state, false, false, false, 0, 2000, "", 0, &progress);
-    assert(guide.onboarding_step == 2 && guide.show_qr); // PC alone does not fake phone setup.
+    assert(guide.onboarding_step == 3 && guide.show_qr); // PC alone does not fake phone setup.
 }
 
 static void test_completed_guide_reports_projection_loss_without_restarting_setup(void) {
     qdd_hid_state_t state = {.connected = true, .encrypted = true, .authenticated = true,
         .bonded = true, .ready = true};
-    qdd_ui_onboarding_t progress = {.require_full = true, .wifi_connected = true,
+    qdd_ui_onboarding_t progress = {.require_full = true, .skip_desktop = true, .wifi_connected = true,
         .phone_seen = true, .phone_fresh = true, .pc_fresh = true, .projecting = false, .completed = true};
     const qdd_hid_state_t before = state;
     qdd_ui_view_t guide = qdd_ui_onboarding_model(&state, false, false, false, 0,
@@ -184,7 +209,53 @@ static void test_completed_guide_reports_projection_loss_without_restarting_setu
     assert(guide.stage == QDD_UI_COMPUTER && !guide.wait_projection);
 }
 
+
+static void test_explicit_pages_preserve_evidence(void) {
+    qdd_hid_state_t state = {0};
+    qdd_ui_onboarding_t progress = {.require_full = true, .page = 1};
+    assert(qdd_ui_guide_target(1, false) == 1);
+    assert(qdd_ui_guide_target(6, true) == 7);
+    assert(qdd_ui_guide_target(0, true) == 0);
+    assert(qdd_ui_guide_target(7, false) == 7);
+    for (unsigned page = 1; page <= 6; page++) {
+        progress.page = page;
+        const qdd_hid_state_t before = state;
+        const qdd_ui_onboarding_t evidence = progress;
+        qdd_ui_view_t current = qdd_ui_onboarding_model(&state, false, false, false, 0, 2000, "", 0, &progress);
+        assert(current.onboarding_step == page && !current.show_qr && !current.can_skip);
+        assert(current.stage != QDD_UI_ENABLED);
+        assert(memcmp(&before, &state, sizeof(state)) == 0);
+        assert(memcmp(&evidence, &progress, sizeof(progress)) == 0);
+        if (page > 1) assert(qdd_ui_guide_target(page, false) == page - 1);
+    }
+    progress.page = 1; progress.wifi_connected = true;
+    qdd_ui_view_t current = qdd_ui_onboarding_model(&state, false, false, false, 0, 2000, "", 0, &progress);
+    assert(current.onboarding_step == 1); // Connection changes cannot jump to downloads.
+    progress.page = 3;
+    current = qdd_ui_onboarding_model(&state, false, false, false, 0, 2000, "", 0, &progress);
+    assert(current.show_qr && current.onboarding_step == 3);
+    progress.phone_seen = progress.phone_fresh = progress.projecting = progress.pc_fresh = true;
+    state.connected = state.encrypted = state.bonded = state.ready = true;
+    state.authenticated = false; // Just Works remains encrypted and bonded, without a MITM claim.
+    current = qdd_ui_onboarding_model(&state, false, false, false, 0, 2000, "", 0, &progress);
+    assert(current.onboarding_step == 3 && current.phone_secure && !state.authenticated);
+    progress.page = 6;
+    current = qdd_ui_onboarding_model(&state, false, false, false, 0, 2000, "", 0, &progress);
+    assert(current.onboarding_step == 6 && current.stage == QDD_UI_ENABLED);
+    progress.phone_fresh = false;
+    current = qdd_ui_onboarding_model(&state, false, false, false, 0, 2000, "", 0, &progress);
+    assert(current.onboarding_step == 6 && current.stage != QDD_UI_ENABLED);
+    progress.page = 0; progress.completed = true; progress.phone_seen = false;
+    current = qdd_ui_onboarding_model(&state, false, false, false, 0, 2000, "", 0, &progress);
+    assert(current.stage != QDD_UI_ENABLED); // Finishing instructions is not readiness.
+    state.encrypted = false; progress.page = 4;
+    current = qdd_ui_onboarding_model(&state, false, false, false, 0, 2000, "", 0, &progress);
+    assert(!current.phone_secure && !state.armed);
+}
+
 int main(void) {
+    test_explicit_pages_preserve_evidence();
+    test_wifi_precedes_usb_and_connected_wifi_does_not_skip_usb();
     test_pairing_settings_feedback();
     test_guide_actions_and_skip_safety();
     test_completed_guide_preserves_real_status();
@@ -205,7 +276,7 @@ int main(void) {
     state.connected = true;
     state.encrypted = true;
     state.bonded = true;
-    assert(view(&state, true).stage == QDD_UI_PHONE); // Encryption is not MITM authentication.
+    assert(view(&state, true).stage == QDD_UI_HID); // Just Works encryption plus bonding; no MITM claim.
     state.authenticated = true;
     assert(view(&state, true).stage == QDD_UI_HID);
     state.ready = true;
@@ -252,7 +323,10 @@ int main(void) {
     assert(guide.onboarding_step == 1 && guide.stage == QDD_UI_WIFI && !guide.show_qr);
     onboarding.wifi_connected = true;
     guide = qdd_ui_onboarding_model(&state, false, false, false, 0, 2000, "", 0, &onboarding);
-    assert(guide.onboarding_step == 2 && guide.show_qr);
+    assert(guide.onboarding_step == 2 && guide.stage == QDD_UI_USB_INSTALL && !guide.show_qr);
+    onboarding.skip_desktop = true;
+    guide = qdd_ui_onboarding_model(&state, false, false, false, 0, 2000, "", 0, &onboarding);
+    assert(guide.onboarding_step == 3 && guide.show_qr);
     onboarding.downloaded = true;
     guide = qdd_ui_onboarding_model(&state, false, false, false, 0, 2000, "", 0, &onboarding);
     assert(guide.onboarding_step == 3 && guide.show_qr);
@@ -308,8 +382,9 @@ int main(void) {
     guide = qdd_ui_onboarding_model(&state, true, false, false, 0, 2000, "", 0, &onboarding);
     assert(guide.onboarding_step == 1); // Fresh/reset boards never take the legacy bypass.
     onboarding.wifi_connected = true;
+    onboarding.skip_desktop = true;
     guide = qdd_ui_onboarding_model(&state, true, false, false, 0, 2000, "", 0, &onboarding);
-    assert(guide.onboarding_step == 2 && guide.show_qr);
+    assert(guide.onboarding_step == 3 && guide.show_qr);
     onboarding.phone_seen = onboarding.phone_fresh = onboarding.projecting = true;
     guide = qdd_ui_onboarding_model(&state, true, false, false, 0, 2000, "", 0, &onboarding);
     assert(guide.onboarding_step == 6); // New onboarding still completes normally.

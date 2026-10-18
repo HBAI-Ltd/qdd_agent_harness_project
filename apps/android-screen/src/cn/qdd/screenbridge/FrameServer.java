@@ -128,6 +128,10 @@ final class FrameServer implements AutoCloseable {
       if (request[1].equals("/health")) {
         send(socket, 200, "OK", "application/json; charset=utf-8", app.health().getBytes(StandardCharsets.UTF_8), ""); return;
       }
+      if (request[1].equals("/pointer/calibration")) {
+        send(socket, 200, "OK", "application/json; charset=utf-8",
+            app.pointerCalibration.status(app.deviceId(), SystemClock.elapsedRealtime()).getBytes(StandardCharsets.UTF_8), ""); return;
+      }
       if (request[1].equals("/diagnostic")) {
         send(socket, 200, "OK", "text/html; charset=utf-8", DIAGNOSTIC_HTML,
             "Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'\r\n"); return;

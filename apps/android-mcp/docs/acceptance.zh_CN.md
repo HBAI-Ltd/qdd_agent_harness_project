@@ -11,6 +11,845 @@
 本轮仅按新问题范围进行有界传输验证：v26 新板 APK 下载及哈希通过，没有修改 APK 源码，
 也不把下载通过当作手机已安装。
 
+## v55 内网直接安装与免输配对码
+
+2026-10-18：ESP、电脑和被控手机连接同一无线网。用户的 OPPO 热点仅为测试网络，
+不写成产品 UI 的指定步骤。普通安装流程改回打开 ESP 根 HTML 页面直接下载安装包，
+无需保存本地接收 HTML 或选择 USB 串口。
+
+- UI：网页三步手动操作（无线网、下载、安装打开），原生 Windows ZIP / Android APK
+  链接，上一步/下一步，不自动下载、不虚报安装完成。旧 `/usb-receiver` 固定 307
+  跳到同源 `/`，请求参数不能指定目标。ESP 六页手动引导不会被连接事件抢跳；设置依次为
+  驱动下载、连接无线网、手机蓝牙、按键指南、重置。旧 USB 端点/协议保留兼容，普通
+  导航中不再出现。原先像两条大按钮的提示改为小型实体键提示和独立确认动作。
+- 存储：当前 COM5 没有 `assets` 分区。v54 热点基线复现根页/APK 200、ZIP 503；
+  新版无该分区时使用应用内置、已校验的 v50 ZIP（943,153 B）。已有分区损坏仍明确失败。
+  SHA 和读取共用 2 KiB 缓存，不重新分区、不把整包放入 RAM。
+- 蓝牙：显式配对窗口使用 Just Works，无需数字 PIN，仍要求加密、绑定和实际 16 字节
+  链路密钥。保留旧绑定，`authenticated` 仍如实表示 MITM；设备全名放入 30 B 主广播。
+  Android 接受 encrypted/bonded/ready 且 authenticated=false 的连接。保留控制权、
+  急停与输入时限。新 APK **66,090 B**，SHA
+  `9ed39d723773852bd070b034aa29bb6b794b07244c58aaa9c2a5d1bd7ac5683a`。
+- 对抗审查：修复双份页码状态竞态，退出引导等主界面完成刷新后再提交，快速双确认保持
+  中性。实际 HID/中文自定义通知也检查密钥长度，不仅依赖 GATT 权限；生产函数回归
+  拒绝 7/15 字节、接受 16 字节。删除“被控手机自己开热点”的默认说明，不声称 APK
+  已支持热点提供端接口。
+- Host 证据：根 TypeScript typecheck/build、Android 主机/构建/签名，BLE 9/9、
+  文本集成 4/4、HTTP C mocks、JS 20/20、接收页 18/18、内置 ZIP 准备器 4/4、资源格式
+  11/11 均通过。Edge 153 在 1040/390 宽度验证原生单次 GET、手动上下步、无 JS 可读、
+  旧路径跳转，使用隔离夹具，不等同于真机：
+  `apps/esp/build/ui-browser-v55/landing-lan-report.json`。
+- Build/device：最终固件完整门禁与 COM5 app-only 验证进行中，产物身份和实际传输结果待补。
+- 未验收：新手机首次免码配对、实体按键/显示、真实投屏输入反馈及长期无线稳定性仍需
+  独立验证。本轮不将此前高频 LAN 失败或模拟性能改记为完整成品通过。
+
+## v54 局域网取页面、USB 收安装包——WiFi 优先引导
+
+2026-10-18：按用户最新要求，按键指南之后先连接 WiFi，再进入电脑 USB 安装步骤。
+电脑与 ESP 在同一局域网，通过已有 `3334` 端口获取单文件 HTML，再在本地 Chrome/Edge
+打开，通过 USB 接收板载 ZIP；整个流程不依赖互联网。普通设备 IP HTTP 只能展示页面和
+提供附件，不能直接使用 Web Serial，未添加不安全来源例外或改变浏览器安全设置。
+
+- 页面与源码：`/usb-receiver` 内联展示，`/qdd-usb-receiver.html` 下载相同 HTML。
+  最终接收页 `apps/android-mcp-rust/build/usb-browser/v54/设备USB接收.html` 为 **16,674 B**，
+  SHA `de88e84316ea479d2cc6149bd7532ba3bdcc31746ab812b071939404dc8bed3c`；
+  确定性 gzip **7,452 B**，SHA `26fae9381627760dfb41127070a5a864a5183b55af860bc67811e5a13b1f41e4`。
+  已核对五项源码身份。JS/CSS 全内联、无 CDN；旧原生下载器入口兼容保留，首页改推浏览器接收页。
+- Host：接收器 **16/16 PASS**。CRC 与 SHA guard 移除均触发真实红测；独立审查复现
+  “取得 reader 后获取 writer 失败，关闭时 reader 锁残留”，红测后修复并通过。
+  只读重试受次数与总时间限制，校验 session/offset/CRC/整包 SHA，取消或失败不保存残缺 ZIP，
+  关闭时释放流锁与端口；不会发送 HID、改变串口信号或启动 EXE。
+  ESP HTTP 生产处理器 mock、接收页准备器和兼容 helper 准备器通过。
+- UI/浏览器 Host：WiFi 优先模型实红 exit 3 后转绿，17 项编译后按键契约通过；
+  字库覆盖 238 个非 ASCII 字形，3 项检查通过。8 个实际 LVGL 渲染入口通过，
+  100 次状态不变刷新零重绘，24 KiB 主机内存池峰值 17,064 B；长 IP/端口/路径分两行完整显示。
+  最终 `de88...` 在 Edge 153 的 1040/390 宽度无横向溢出，file 环境可用原生 Web Serial；
+  文档 IP 的 HTTP 夹具不可访问串口，保存入口正确显示，未发实际网络或串口请求。
+  证据：`ui-wifi-first-v54/ui-wifi-first-v54-report.json`，接收页目录的 `browser-final-host.json`。
+- Browser/Device 专项：真实 Edge 153 在本地 HTML 中使用原生 `navigator.serial`，无 shim/fixture。
+  本轮 Computer Use 无法确认浏览器 URL，停止了自动选择串口；随后请求实际获准并完成传输。
+  测试页面是文案更新前的 `b8b9df13...`，目标是保留 v53 固件的 COM6。完整收到并保存
+  **943,153 B** ZIP，SHA `100f4ce0924f1310e878aaa62c9887745ddc14d7fb0283617f5e08a6ca4d7494`；
+  ZIP CRC、单条目与内含 EXE **1,924,096 B** / SHA `12a80feda10d24043afdb2c8bcbef9644bba3b04b731fe605258a44ed3dc17f6`
+  全部匹配，未执行 EXE。页面显示 **180.6 KB/s**；150,509ms 包含等待串口授权，不能当传输时长。
+  无页面错误、外部 HTTP 请求；测试浏览器已关闭。最终 `de88...` 只改两处流程/提示文字，
+  不把旧页面实测伪记为新页面完整物理流程。证据：`apps/esp/build/browser-usb-v54-device.json`、
+  `browser-usb-v54-zip-verify.json`；旧 gzip 身份固定在 `build/history/usb-browser-v54/b8b9df.../`。
+  `html-copy-delta.json` 记录净增 33 B 的两处文案变化；CSS 字节不变，JS 统一提示字符串后
+  经相同解析器规范化字节相同，协议和关闭逻辑未改变。
+- Build：完整 `tools/idf.ps1 --validate` **PASS**，session 63265 exit 0，
+  `browser-usb-v54-full-gate.log`；主机门禁含现有平台 skips **4+5+12**，没有声称零跳过。
+  根 TypeScript typecheck/build 通过。归档独立 verify 通过；full SHA / 目录名为
+  `d873ac803143742aa21289335f06784feab27eadac0626d0369d8dc63d0c9d98`，APP **1,731,040 B**，
+  SHA `509efd668e7294a36cc69ac52656668532260755439daf366ac614d171ff3a20`，匹配 ELF
+  `8bbe7f4695c1b21e6bcab3093fef0b81162da0c0497ebb43df4e03937787cda4`。
+- Flash Device：**PASS**。重新读取 COM6，确认 MAC `4c:11:ae:31:32:6c` / ESP32-C3 / 8MB，
+  实际表 SHA `bd386c960f8b827e812dd238af37d469c319d7e9ecc2d7501d00296c46804a4f` 与 MD5 有效，
+  只写 OTA0 `0x20000`；擦除范围 `[0x20000, 0x1c7000)`，session 87454 exit 0、
+  `Hash of data verified`。没有写入 NVS、bootloader、分区表、otadata、PHY、assets 或 OTA1。
+  证据为 `com6-v54-{layout-read.log,partition-table.bin,flash-plan.json,flash.log}`。
+- COM5 刷写交接：用户明确要求刷入 COM5，新鲜枚举为 VID/PID `303A:1001`、MAC
+  `4c:11:ae:2f:a1:b8`、ESP32-C3 rev1.1 / 8MB Flash。实际分区表与 COM6 不同：SHA
+  `b4a705f5dcd64100c5c40e0de65b2a2acae70a2827ae56044317575331f4620d`，MD5 有效，
+  NVS `0x9000/0x6000`、PHY `0xf000/0x1000`、唯一 factory 应用 `0x10000/0x7f0000`，
+  **没有 assets 分区**。同一份独立核验的 v54 应用只写 `0x10000`，擦除范围
+  `[0x10000,0x1b7000)`，session 69526 exit 0，`Hash of data verified`。
+  未写 bootloader、分区表、NVS、PHY，未重新分区或使用 merged 镜像。30.032 秒只读观察
+  **9/9 回复**，未观察到 fault 或分配失败，串口正常关闭。原有蓝牙绑定恢复为
+  `QDD-Passport-A1BA`，三次样本均 encrypted/bonded/ready，armed/locked 均 false。
+  WiFi 仍为已配置但未连接、IP 为空，未测试网页。启动/协议专项通过，WiFi、UI 与完整流程待核验。
+  因缺少 assets 分区，该板无法通过 USB 提供板载 Windows ZIP；本次应用刷写未授权或执行
+  存储布局迁移。未修改 APK、EXE 或源码。证据：
+  `com5-v54-{layout-read.log,partition-table.bin,flash-plan.json,flash.log,startup.json}`。
+- 初次固件 Device 状态：30 秒只读观察 **9/9 回复**，无 fault/OOM，串口已关闭。
+  但设备报告 **WiFi configured=false / connected=false**，BLE 未连接/未就绪，因此启动观察的
+  整体 `pass=false`；当时 `192.168.101.75:3334` HTTP 请求未通过。
+  `com6-v53-startup.json` 在 06:01 UTC 曾确认已配置、BLE ready，但本次写入前未采配置对照，
+  不能从 app-only 写入范围推断配置仍在，也不能把未配置原因归咎为固件回归或用户重置。
+  未做猜测性存储/配对修复，已请用户按新引导连接 WiFi。新固件另一次中立 INFO/CANCEL
+  187ms/47ms 通过，板载 ZIP **943,153 B / 100f4ce0...7494** 仍一致；会话与串口正常关闭。
+  证据：`com6-v54-startup.json`、`browser-usb-v54-http.initial-unconfigured.json`、`browser-usb-v54-info.json`。
+- 配网后 Device 复验：用户反馈已完成 WiFi 配置后，**06:42:37 UTC** 单次只读 `WIFI_STATUS`
+  在 47ms 返回 configured/connected 均为 true，IP `192.168.101.75`，控制端口 3333；
+  COM6 已关闭，未复位或发送控制输入。电脑是 `192.168.100.160/23`，Windows 选择 WLAN
+  直连路由，两者属于同一网段。随后诊断为 RSSI -61dBm、信道 11、网络 up，无断连或
+  beacon 丢失事件，内存分配失败为零。但接收页 HTTP 请求仍触发 10 秒截止；TCP3334
+  超时，单次 TCP3333 握手在 359ms 成功，单次 UDP3335 发现及两次 ICMP 也超时。
+  目前不能唯一定位为 HTTP、ESP、电脑或 AP 原因，未猜测修改固件/网络参数或重刷。
+  **WiFi 连接通过，真实 HTTP 页面端口验收仍失败**；首次未配置是历史结果，不再描述当前 WiFi 状态。
+  证据：`com6-v54-wifi-connected.json`、`com6-v54-connected-diag.json`、
+  `com6-v54-connected-tcp.json`、`com6-v54-connected-udp.json`、
+  `browser-usb-v54-http.connected-timeout.json` / `browser-usb-v54-http.json`。
+  随后在已核对的 WLAN 网卡进行了 8 秒、非混杂模式的 Npcap 包头观察：客户端发出三次 SYN，
+  3,084ms 才观察到服务端 SYN/ACK，请求报文重复发送，首个服务端载荷到 6,541ms 才出现，
+  已超过该探针的 5 秒绝对截止。因此 HTTP 端口有响应，但探针未在截止前收到状态/正文，
+  不能据此认定监听未启动或 HTML 处理器有缺陷。未保存包载荷或 pcap，抓包句柄和请求 socket
+  均正常关闭。证据：`capture-v54-http-headers.json`、`capture-v54-http-headers-summary.json`。
+  用户随后确认同一 WiFi 的手机也打不开页面，故实际失败不只限于电脑探针。为读取先前观察到的
+  延迟 HTTP 状态，又做了一次诊断请求：8,563ms 建立连接，12 秒内仍未收到响应头。
+  `com6-v54-late-http-status.json` 保留失败结果；旧错误文案写了五秒，实际诊断预算以
+  `timeoutSeconds=12`、`durationMs=12000` 为准。产品 ACK/看门狗/HTTP 截止没有修改。
+  已停止相同条件下的重复请求，射频/AP 链路与 ESP 运行态仍未定位。现有本地单文件 HTML
+  仍可独立用于 USB 接收，但这不能替代失败的设备网页获取步骤。
+- Unverified：最终板上按键、WiFi 配置、保存页面、授权串口、安装程序的整条用户流程仍需实物核验。
+  不证明 U 盘挂载、自动安装、所有浏览器/系统兼容、真实投屏/HID 全闭环或旧高频 LAN 时延问题通过。
+  现有主操作台 PID 111040 / v47 路径与 health 200 已核对，未退出/替换服务。
+  未修改 APK 或板载 v50 ZIP，未请求重置、清除网络或配对；不提交、不发布。
+
+## v53 USB 优先的设备引导与设置——Build/Host/USB Device PASS，实物 UI 待核验
+
+2026-10-18：设备引导现将**电脑 USB 安装放在 WiFi 设置之前**。首次引导与设置 USB 页
+统一展示四步：接 USB 数据线、运行已有的**设备USB下载器**、保存并解压 ZIP、启动设备操作台。
+离线页说明安装准备不需要 WiFi；如果尚无小下载器，也明确其获取前提，不暗示插线即出现 U 盘、
+自动运行或自动安装。只有用户选择**“已安装，下一步”**才进入 WiFi，扫描仍需显式确认；
+传输状态不会自行推进引导或授权 HID。
+
+- 展示 / snapshot：worker 提供加锁的 **16B** 只读快照，表示 idle/checking/transferring/
+  sent/cancelled/error 与有界字节进度，不新增 task/分配。SENT 仅指 ESP 已发送帧，
+  不等于电脑已保存/校验/安装；UI 明示**“传输完成不等于已安装”**，让用户在电脑确认保存和解压。
+  CONTROL_BUSY 明示**“退出电脑控制后重试”**，避免把进入设置/暂停等同于释放旧 owner。
+  设置顺序为**电脑 USB / 手机 App / WiFi / 手机蓝牙 / 按键指南 / 重置**，固定返回入口，
+  上下箭头表示分页；USB 返回只改变页面。手机 App 页保留根配置/下载 QR 入口及重入/IP/离线行为。
+- 专项 Host：**PASS**。旧模型对新增离线 USB 首步断言实红，修改后绿；worker snapshot
+  状态转移有 **红 exit 3 → 绿 exit 0**。setup model、快照/清理/安全契约及 HID 状态不变检查通过。
+  证据：`apps/esp/build/ui-v53-model-{red,green}.log`、`usb-driver-ui-v53-focused.json`、
+  `setup-usb-v53-focused.json`。USB 协议与 **1200ms ACK / 1500ms 安全看门狗**保持。
+- 字体：**PASS**，旧字库真实**红 exit 1 → 3/3 绿**。使用已有缓存的 **lv_font_conv 1.5.3**
+  完全离线生成 Source Han Sans SC **14/20px、4bpp、无压缩**子集，
+  **219 → 230** 个非 ASCII 字形，两种字号均加 **95** 个可打印 ASCII；字表、授权源元数据、
+  生成哈希与实际控件选用字体一致。证据：`apps/esp/build/usb-ui-v53-font-{red,generate,green}.log`
+  和 `usb-ui-v53-font-host-report.json`。
+- 独立 LVGL Host / 视觉：**PASS**，完整套件加 **7** 个专项入口
+  （`usb/intro/menu/download/guide/pair/scan`）通过。首版 USB 页的 **100 次不变刷新**缓存
+  断言实际失败，修正生产缓存后恢复 **0 flush / 分配稳定**，原红测日志/EXE 保留；
+  既有 **120** 次页面替换仍通过。**24KiB 主机 pool**峰值 **17,192B**，不等于设备 RAM 峰值。
+  已查看实际 240×320 主机渲染：中文无缺字方框/截断，离线四步、真实 SENT/error 提示、
+  菜单双向箭头和末页返回清楚。证据：`apps/esp/build/ui-v53-fonts/render-*/render.log`、
+  `usb-ui-v53-host-cache-red.log`、`ui-v53-fonts/usb-ui-v53-contact.png` 及上述独立报告。
+- Build：**PASS**，完整门禁 **72872 exit 0**，日志 `apps/esp/build/ui-usb-v53-full-gate.log`，
+  保留既存 **21** 个平台 skips（**4+5+12**）；固件布局/产物/调试归档核验通过。
+  归档/full SHA-256 `16addce3d6e7cad10b58c160e0470f6257f3df35c169b87d11157fc27283247e`，
+  App **1,720,192B**，SHA-256 `ced5667867c641bbd83be3f9ec13a3aa980b2a3a894c2ed2929543b853494e39`，
+  匹配 ELF `973c89538f3f978c399c82344ada35cefc0792cf35886e07fc8ac56648ab0ebc`。
+- Flash：**PASS**，烧录 **60770 exit 0**。新鲜 COM6 / MAC **4c:11:ae:31:32:6c** 及表 SHA-256
+  `bd386c960f8b827e812dd238af37d469c319d7e9ecc2d7501d00296c46804a4f` 与 app-only 计划一致，
+  `apps/esp/build/com6-v53-flash-plan.json`：**@0x20000**、擦除 **[0x20000,0x1c4000)**，
+  保留 bootloader/分区表/otadata/NVS/配对/PHY/assets/OTA1。exact **1,720,192B** App
+  **6.9 秒**写入、`Hash of data verified`，日志 `apps/esp/build/com6-v53-flash.log`。
+- 启动 Device：**PASS**，观察 **64400 exit 0**，`apps/esp/build/com6-v53-startup.json`：
+  **30 秒 / 9** 个只读样本，**1.063 秒**已观察到 WiFi/IP **192.168.101.75** 连接，
+  **15.063 / 25.063 秒** BLE encrypted/bonded/ready；无 fault/errors、SDK/wrapped OOM
+  或 trace 失败，COM6 已关闭。时间相对观察开始，非精确 boot 时长。
+- 原生 USB Device：**PASS**，`apps/esp/build/usb-driver-v53-native-device.json`，实际运行未改的
+  v52 helper，**exit 0 / 922 次 READ / 5,641ms**（含 wrapper **5,734ms**），保存完整
+  **943,153B** ZIP，SHA-256 `100f4ce0924f1310e878aaa62c9887745ddc14d7fb0283617f5e08a6ca4d7494`。
+  严格 CRC/raw-DEFLATE/PE 验证内含 EXE **1,924,096B**、SHA-256
+  `12a80feda10d24043afdb2c8bcbef9644bba3b04b731fe605258a44ed3dc17f6`；无残留 partial，
+  未启动主服务/发送 HID/使用 ADB。
+- USB 协议 / 中性 Device：**PASS**，**17574 exit 0**，
+  `apps/esp/build/usb-driver-v53-device-acceptance.{json,log}`。stale session 与两项 bad range 拒绝，
+  **1,024B** 首块 / **1B** 尾块 CRC、两次 fresh INFO、CANCEL 及旧会话拒绝通过。
+  独立 **25.016 秒**中性压力 **552/552 ACK**、max **32ms**，原 **1200ms** 时限保持；
+  配置 **20ms / 最多 4**，但实际最多 **1** 未确认、约 **22.1 req/s**，**不称持续 50Hz 通过**。
+  PAUSE ACK、等待 **2 秒**后 owner 到期；前后 BLE encrypted/bonded/ready、unarmed/unlocked，
+  OOM/trace 均零。无非零 HID、画面、ADB 或凭据采集。
+- 其余 Device / 部署边界：**尚未观察物理 LCD 逐页画面与实体按键导航**，
+  Host 渲染不能算实物 UI 验收。当前板端部署为 **v53 App + 保留的 v50 assets**；最终只读 health
+  **200 / status:ok**、未知 route **404**，动态核对 PID **111040** 与
+  `apps/android-mcp-rust/build/windows/v47/设备操作台.exe` 一致，未停止/启动主服务。
+  本轮未改 PC EXE、APK、assets payload
+  或 USB helper，ZIP 保持 v50、helper 保持 v52。保留原 v52 USB 实测与源码包，
+  与新的 v53 启动/USB/协议实测分别记录。LAN 小下载器获取、完整成品/实物输入/UI、中文 APK/IME
+  仍有未验证/未通过项。没有提交/push/发布。
+
+## v52 离线 USB 安装包下载器——Build/Host/USB Device PASS，LAN 获取入口未通过
+
+2026-10-18：用户要求完全离线、优先 USB 直传。新增独立小型原生 Windows 下载器，
+只枚举精确 **USB VID303A/PID1001** COM 设备，多板必须明确选择；支持保存对话框及
+`--port COM6 --output <new.zip>`。通过 **QDDDRV/1** 读取现有 assets ZIP，严格核对
+request ID/session/offset/length/CRC32 和最终 Windows BCrypt SHA-256，完整后原子保存新文件，
+不覆盖已有输出。不会解压/启动主 EXE、退出服务、发送手机输入、使用 ADB 或擦除 Flash。
+实现中禁用 DTR/RTS，实际运行未请求 reset，但这不是精确证明打开端口永不重启。
+已有本地 helper 的用户可完全离线经 USB 下载安装包，不依赖 WiFi、Node、Python 或 ADB。
+
+- Helper Build / Host：**PASS**。`apps/android-mcp-rust/build/usb-driver/v52/manifest.json`
+  绑定 **13** 个源码输入、编译器/参数和 PE 审计。`设备USB下载器.exe` **17,920B**，SHA-256
+  `66e0013d6791c464ebeee5f8901eb24379e0ced8e7b03766c508cfd54af6aebf`。
+  生产 parser 敌对帧检查、**24** 项传输/恢复场景、**26** 项精确硬件 ID 检查通过。
+  实际原生空 PATH 自测覆盖 BCrypt 分配/双 cleanup、原子保存/禁止覆盖；仅导入
+  **7 个 Windows 系统 DLL**。Node 与 x64 MinGW-w64 GCC（`QDD_USB_CC` 或 PATH）只用于构建，
+  不成为运行时依赖。日志：`build/usb-driver/v52/{build,test-protocol,test-transfer,test-hardware}.log`。
+- Node 生成 gzip **9,243B**，SHA-256
+  `d098c0df5bad9d07583dd35b523734b9b3fa35499f439d73b8ac2a80f62e25be`；
+  ESP Python 预生成 gzip **8,958B**，SHA-256
+  `bcfb0e5f3e96eb87f177acc69874d4e35a9350b6241c726d46aa7cc3822a9fb8`。
+  两者压缩流不同，均解码为同一 exact helper EXE，不能混用 compressed hash。
+  证据：`apps/esp/build/usb-installer-v52-identity.json`。
+- 只读传输边界：READ 最多 **1,024B**，同一未确认 offset 最多三次新 ID 尝试，
+  单请求四秒/总三分钟。STALE/IO 仅允许一次重新 INFO，ZIP 类型/大小/SHA 逐项相同才续读，
+  取消或版本改变即终止。旧回复/日志/非法帧不追加字节；独占 CREATE_NEW 临时文件在失败/取消时
+  清理，释放 COM/BCrypt 句柄。这些准备通道的数据重读不重放 HID。
+- ESP 专项 Host：生产 worker/parser/main 安全契约、串行 TX、TTL、HTTP/USB 资源互斥
+  及中性诊断通过。late-CANCEL 对旧生产代码有 **红测 exit 3**，原子终态交接后绿测通过，
+  独立复核无新增确定阻断。慢 hash/read/TX 在 worker 执行，不阻塞安全主循环。
+  新增固定 buffers 合计 **5,376B** 加 **4,096B** worker stack，只是分配预算，非实测峰值。
+  Windows 页推荐 helper、`/qdd-usb-installer.exe` 生产 handler 红/绿，以及
+  **4** 项 prepare/audit（含源码漂移和 PE x64 边界）通过；repo 扫描 **455** 个文本文件通过。
+  证据：`apps/esp/build/usb-driver-v52-*`、
+  `usb-installer-v52-{onboarding-red,onboarding-green,prepare-green,repo}.log`。
+  首次完整固件门禁 **40894** exit **1**，`usb-driver-v52-full-gate-red.log` 保留字体测试
+  因 Windows 默认 GBK 触发的 `UnicodeDecodeError`。显式 UTF-8 读取修正测试假设后，
+  字体专项 **3/3 PASS**，`usb-driver-v52-fonts-green.log`；完整重跑 **47290** exit **0**，
+  日志 `usb-driver-v52-full-gate.log`，保留既存平台 skips，固件布局/调试归档核验通过。
+  归档/full SHA-256 `313f9af0aad80397c507b5a48a1fea694a74e52c142231bf3ed37a7a69ceb8eb`，
+  App **1,713,808B**，SHA-256 `65aa5a24c85c0c18233683b60ff5f0348f485e378a98061d022b255df6e06b42`，
+  匹配 ELF `c9469c75c4099d0d42a55647749f55b3eb66130fcde722cd98c49632bd915989`。
+- Flash：限定 exact app-only 范围 **PASS**。已核对新鲜 COM6 / MAC **4c:11:ae:31:32:6c**
+  及表 SHA-256 `bd386c960f8b827e812dd238af37d469c319d7e9ecc2d7501d00296c46804a4f`，
+  只写 exact App **@0x20000**，擦除 **[0x20000,0x1c3000)**，`Hash of data verified`。
+  bootloader/分区表/otadata/NVS/配对/PHY/assets/OTA1 保留。证据：
+  `apps/esp/build/com6-v52-{layout-read.log,flash-plan.json,flash.log}`。
+  刷写身份核验与下述有界启动/USB 实测分别记录。
+- 源码归档：**PASS**，`apps/android-mcp-rust/build/windows/v52-source/android-mcp-rust-source.zip`，
+  **273,323B**，SHA-256 `68cdd7ba53e66bf6fa484b7d880a62962eb224ab346b138e9127092809e0823d`。
+  **70** 个白名单源码/公开夹具加 README/manifest 共 **72** 条目，含 helper C/H/tests/构建说明。
+  条目哈希、确定性 ZIP、v50 生成构建身份和 helper 源码身份核验通过，不含 build 二进制、
+  私密配置或日志；原 v50 EXE/运行 ZIP/源码 ZIP/manifest 保留。
+  审计：`v52-source/transfer-compression-audit.json`。
+- 启动 Device：**PASS**，限定 **30.000 秒 / 9** 个白名单采样的观察，证据
+  `apps/esp/build/com6-v52-startup.json`。**15.078 / 25.062 秒** BLE 已 encrypted/bonded/ready，
+  **29.078 秒**最终 WiFi 观察恢复 **192.168.101.75**。无 fault、SDK/wrapped OOM 或分配 trace
+  失败，COM6 已关闭；时间相对观察开始，非精确 boot 时长，也不证明长期连续稳定。
+- 原生 USB 整包 Device：**PASS**，`apps/esp/build/usb-driver-v52-native-device.{json,log}`。
+  实际冻结原生 helper exit **0**，**922 次 READ / 5,875ms**（含 wrapper **5,969ms**）
+  保存完整 **943,153B** ZIP，SHA-256
+  `100f4ce0924f1310e878aaa62c9887745ddc14d7fb0283617f5e08a6ca4d7494`，**无 partial 文件**。
+  严格 ZIP CRC/raw-DEFLATE/PE 验证通过，内含 EXE **1,924,096B**、SHA-256
+  `12a80feda10d24043afdb2c8bcbef9644bba3b04b731fe605258a44ed3dc17f6`。
+  helper 未启动主服务、未发 HID/使用 ADB、未请求 reset。
+- USB 协议 / 中性 Device：**PASS**，`apps/esp/build/usb-driver-v52-device-acceptance.{json,log}`。
+  stale session 与两项 bad range 拒绝；**1,024B** 及末尾 **1B** CRC 通过；CANCEL ACK、
+  旧会话拒绝及两次 fresh INFO 重读同一核验前缀通过。中性压力 **25 秒**，配置
+  **20ms / 最多 4 未确认 / 原 1200ms ACK**，**543/543** 回复、max **32ms**；
+  实际 **21.72 req/s**、实测最多 **1** 未确认，**不能称持续 50Hz 已通过**。
+  PAUSE、等待 **2 秒** owner 到期、之后 INFO/CANCEL 通过；前后 BLE encrypted/bonded/ready、
+  unarmed/unlocked、无 OOM/trace 失败。后续独占 COM6 验收成功，确认原生 helper 已释放端口。
+  未测试非零 HID 或真实画面反馈闭环。
+- HTTP/浏览器获取 helper：**未通过**，`apps/esp/build/usb-installer-v52-http-device.json`。
+  IAB 新 tab 为 `ERR_CONNECTION_RESET`；直接 GET `/` 得到完整 **200 / 4,128B** HTML，
+  Windows USB 主入口存在，但 `/qdd-usb-installer.exe` 宣告 **200 / 8,958B gzip**，
+  仅收到 **5,371B** 即 EOF（`EOFError`），不是完整下载。USB 成功不等于浏览器/LAN 获取入口
+  成功，也不据此唯一定位无线物理路径。
+- 保留历史 / 部署：较早开发者 bootloader 只读资源实验仍为独立 **FAIL**：
+  `apps/esp/build/driver-usb-v50-read.{json,log}` 请求 **947,249B**，在 **245,760B**
+  报 corrupt（**期望 4096 / 收到 4045**）、exit **2**，之后 chip-ID/hard-reset 恢复。
+  该实验不是生产 helper 协议，也不是普通用户传输。
+  `usb-v52-baseline.json` 观察 **30.015 秒**，BLE secure/ready、无 OOM/fault、COM6 已关闭，
+  但 **WiFi connected=false / pass=false**，不能写整体 PASS。
+  较早 v51 完整门禁 **87906** 最终 exit **0**，归档
+  `b3c27300235427e067849b34580234875695a8e586f09c3e4d3644ad9ba1f8cd`、App **1,698,960B**；
+  用户改选 USB 后未刷入。当前板为 v52 App + 保留的 v50 assets，8790 仍是用户手动启动的 v47
+  （health PID **111040** 与动态核对的程序路径
+  `apps/android-mcp-rust/build/windows/v47/设备操作台.exe` 一致、health OK），未替换主服务。
+  USB 安装包传输和中性门禁现已在上述范围通过，浏览器小 helper 获取仍未完成。
+  既有 LAN 整包失败、中文 APK/IME、实物输入/UI 边界保持，
+  **仍不能当完整成品验收**。没有提交/push/发布。
+
+## v51 默认原生 ZIP 下载——专项 Host PASS，固件/Device 待核验
+
+2026-10-18：用户要求不强制应用层分块。冻结的 ESP 最小候选恢复普通 Windows 下载 anchor，
+默认由浏览器原生下载一次完整 **200** ZIP；只有显式点击 **“下载中断？使用续传下载”**
+（`data-driver-resume`）才启用有界 Range。APK 路由和冻结 v50 Rust EXE/ZIP 身份保持，
+默认点击不再由分块脚本接管。
+
+- 专项 Host：DOM/生产浏览器检查 **17/17 PASS**、生产 C handler 通过，证据
+  `apps/esp/build/native-download-v51-{red,green,browser-green}.log`。
+  本检查点完整门禁 **87906** 仍在运行，最终门禁/产物与实物证据未齐前，
+  不写 v51 归档/构建/刷写/Device PASS。
+- 原生 endpoint 初步观察：候选部署前，一次 `downloadMedia` 在 **27.97 秒**后返回
+  **canceled**、**没有保存文件**。仅记录该次工具结果，不定根因，也不算原生下载完整验收。
+  `apps/android-mcp/build/npcap-driver-v51-native-tcp-headers.json` 是 header-only 抓包，
+  正独立分析；此处不推断 payload 或唯一归因 PC/AP/ESP/无线物理路径。
+  实际 8790 仍为 v47，未替换 v50/v51 主机服务、未发送手机输入。
+
+## v50 构建期前端压缩——Build/Host PASS，Device 传输未完成
+
+2026-10-18：用户要求继续压缩 HTML/前端代码与冗余格式。可读源码保留在
+`apps/android-mcp-rust/assets`，Cargo 在 `OUT_DIR` 生成实际嵌入文件。
+锁定 **esbuild 0.28.2**、`charset:utf8`，通过解析器压缩 JS/CSS（含设置页内联代码）；
+JSON 去格式空白但不改工具 schema。HTML lexer 只去已知结构标签间缩进，保留属性、
+DOM/aria/class hook、脚本顺序、内联文字间距和 pre/textarea 内容。
+最终用户仍只需原生 EXE；Node/npm 仅是构建前提，已写入 Rust 双语 README 和源码包说明。
+
+旧设置页通过精确 JS 文本片段寻找数据插入点，解析器压缩改变片段后，既有配置注入测试
+实际失败（**红测 exit 1**）。现改为唯一 `__QDD_SETTINGS_DATA__`，先替换固定 routes，
+最后插入转义 JSON；测试覆盖用户值中的 `</script>`、HTML 实体、U+2028/U+2029 和各占位符，
+不二次改写用户值、不提前闭合 script。生成资产通过 `src/assets.rs` 统一嵌入。
+构建身份覆盖原源码、生成脚本、压缩器版本/参数、manifest 与实际生成字节；打包时重新生成，
+EXE 与源码身份不符则拒绝。源码归档也核对同一批输入和生成身份。
+
+| 嵌入资产 | 当前可读源码（B） | v50 嵌入（B） |
+| --- | ---: | ---: |
+| operator.html | 5,756 | 5,456 |
+| operator.css | 9,052 | 7,868 |
+| operator.js | 55,184 | 30,908 |
+| remote-channel.js | 5,122 | 3,594 |
+| screen-channel.js | 2,754 | 1,569 |
+| settings.html | 10,777 | 9,506 |
+| tools.json | 21,623 | 15,615 |
+| 合计 | **110,268** | **74,516** |
+
+前端/schema 嵌入总量比当前可读源码少 **35,752B（32.42%）**。
+相比冻结 v47，完整 EXE 少 **35,840B（1.83%）**，ZIP 少 **4,929B（0.52%）**；
+只陈述实际缩减，不据此宣称修好了网络传输。
+
+- Build / Host：**PASS**。Cargo check、**83/83** Rust 单测（零跳过）、**4/4** 资产流水线测试，
+  以及对实际生成资产执行的 **67/67** operator/screen-channel 行为回归通过。
+  复用的公开 UI 套件仅将一个 CSS 逗号空白格式断言改为接受压缩格式，
+  输入/取消/channel 行为断言保持。根 typecheck/build、release build 通过。
+  证据：`apps/android-mcp-rust/build/assets-v50-{red,check,host,node-tests,generated-ui,release,repo-typecheck,repo-build}.log`。
+- 打包 EXE：**21/21 PASS**，`apps/android-mcp-rust/build/windows/v50/exe-smoke.json`。
+  空 PATH 运行不需 Node；验证五个公开静态资产的真实生成字节/SHA，VM 执行实际设置页
+  的配置/保存流程、全部 **22** 个解析后 MCP 工具定义，并保留取消/中文/预点击等场景。
+  都是独立 loopback 夹具，**realDeviceInput=false**，不算真机手机/BLE 操作通过。
+  Build **rust-7c6e9711bb750fcb**，EXE **1,924,096B**，SHA-256
+  `12a80feda10d24043afdb2c8bcbef9644bba3b04b731fe605258a44ed3dc17f6`；
+  ZIP **943,153B**，SHA-256 `100f4ce0924f1310e878aaa62c9887745ddc14d7fb0283617f5e08a6ca4d7494`。
+  产物及 `manifest.json` / `asset-manifest.json` 位于
+  `apps/android-mcp-rust/build/windows/v50/`，保留原 v47 产物。
+- 源码/归档审计：**PASS**。v50 `android-mcp-rust-source.zip` **249,704B**，SHA-256
+  `98cfb6351f54d8193c669f00554c8483d9f2624e6fbcbd6d1f27d1efa39316fe`，
+  **58** 个白名单源码/公开夹具文件，加 README/manifest 共 **60** 条目。
+  所有条目哈希、确定性 ZIP 生成、运行 ZIP 原始压缩流/CRC、独立解压与解压后 EXE 自检通过。
+  不含私密配置、生成 build 目录或依赖。证据：`v50/transfer-compression-audit.json`、
+  `v50/android-mcp-rust-source-manifest.json`、`apps/android-mcp-rust/build/assets-v50-transfer-audit.log`。
+- 当前服务 / Device 边界：实际 **8790** 服务仍是用户手动打开的 **v47**
+  `rust-20902a052c1fcc76`，路径 `apps/android-mcp-rust/build/windows/v47/设备操作台.exe`；
+  未执行 v50 服务启动/替换。既有 v47 真实 LAN 坐标预览 PASS 独立保留。
+  下述 data-only Range 检查**失败**，浏览器在部分进度后按用户要求**取消**；压缩 EXE 构建/主机夹具 PASS
+  不等于传输成功，也不表示运行服务已部署 v50。
+  最新中文 APK 未安装/IME 未启用及其余实物输入/UI/校准边界仍在。
+  没有提交、push、发布。
+
+## v49 有界 ZIP Range 传输——刷写/启动 PASS，数据 FAIL，浏览器已取消
+
+2026-10-18：v48 ZIP 不完整下载提供新增传输证据。ESP 增加严格单区间
+`bytes=start-end` ZIP Range，**206** 精确 Content-Length/Content-Range 与完整 ZIP SHA
+的强 quoted ETag；只有 **0-0** 单字节 bootstrap 可不带 If-Match，之后必须精确匹配该 ETag。
+suffix/open/multi/溢出/越界请求均拒绝，每次请求验证不可变资源，不静默拼接新旧版本。
+旧 EXE 链接重定向 ZIP。生产同源浏览器脚本顺序读取 **8KiB** 块，只对当前未确认块最多
+**重试 3 次**，总期限有界，完整 SHA 通过后才保存。数据块重试不重放 HID 输入；
+既有 **1200ms** ACK / **1500ms** 控制看门狗、native socket/resource 时限及无线参数不放宽。
+
+- Build / Host：**PASS**，`apps/esp/build/range-download-v49-full-gate.log`，exit **0**，
+  保留既存 **21** 个平台 skips。生产 C handler、**16/16** transport contract、
+  **16/16** 浏览器算法及 **2/2** 内嵌脚本检查通过；覆盖 ETag/长度/Range 拒绝、
+  当前块中断恢复、取消/耗尽不保存部分文件、版本不符、真实 loopback HTTP 截断响应。
+  不把这些主机场景当实物交付 PASS。证据：
+  `range-download-v49-{green,contract,browser-green,script-green}.log`。
+  固件归档/full SHA-256
+  `ae2036c5c664ceeeaf7d6d57a6e2b7f47f97aa91b1e7c41fcceb87958e6459e6`；
+  App **1,698,880B**，SHA-256 `41f35eb1d55a20215ae016b5ba1cd5fb35e991e50e0c2cb596a17595b4bd5713`；
+  匹配 ELF `74b5b1ce8dec51b30870c785cbf353199ec226197bb38b62fc457024471edb83`。
+- Flash / 启动：限定范围 **PASS**。核对新鲜 COM6 / MAC **4c:11:ae:31:32:6c** 与表 SHA-256
+  `bd386c960f8b827e812dd238af37d469c319d7e9ecc2d7501d00296c46804a4f` 后，
+  v49 app-only **@0x20000**、擦除 **[0x20000,0x1bf000)**，`Hash of data verified`；
+  随后 v50 assets-only **@0x600000**、擦除 **[0x600000,0x6e8000)** 同样校验通过。
+  `driver-assets-v50.bin` **947,249B**，SHA-256
+  `a351de22e909c3f3ee1fa54b47713837856d6c1ba5200ae77d12e68906023d68`，
+  绑定上节 v50 **943,153B** ZIP，assets 余 **1,149,903B**。
+  Esptool 补 **3 个 FF**，对齐实写 **947,252B**；其他分区/NVS/配对保留，无全片擦除。
+  证据：`apps/esp/build/com6-v49-{flash-plan.json,flash.log}`、`driver-assets-v50.json`、
+  `com6-v50-assets-flash.log` 及新鲜布局实读。
+  `com6-v49-startup.json` **30.031 秒**通过，`com6-v50-startup.json` **30.016 秒 / 9** 样本通过，
+  最终 BLE secure/ready、WiFi **192.168.101.75**，无 SDK/wrapped OOM、无 fault，COM6 关闭。
+  仅属有界恢复观察，不称网络/下载连续稳定。
+- 较早 v49 preflight：**Range 下载 NOT RUN**。`driver-range-v49-report.json` 保留
+  **8.015 秒**前置超时，requests/progress 数组为空；通用 fail 不等于测到了 Range 正文失败。
+- v50 data-only 实物检查：**FAIL**，`apps/esp/build/driver-range-v50-report.json`，
+  **45.789 秒**，使用生产下载算法，无 ARM/HID 输入。
+  第 2 次 bootstrap 收到 **206**、总长 **943,153** 与精确 v50 强 ETag/SHA；首个 **8KiB**
+  块 **4 次尝试**均未收到 headers 后超时，**confirmedBytes=0 / blocks=0**、`retry_exhausted`。
+  此 data-only 明确未包含页面/模块传输，不悄悄算作通过。
+  同期 `driver-range-v50-uart.json` 观察 **66.031 秒**，无 SDK/wrapped OOM/fault、COM6 关闭；
+  其 observer `status:pass` 仅表示资源/fault 观察通过。
+  最后下载诊断仍 **busy=false / phase=5**、sent **5,269B**、result **45062 / errno=11**。
+  板侧部分发送不是客户端已确认 ZIP 字节，零 OOM 也不能证明传输成功或唯一定位网络根因。
+- 浏览器部分运行：**因任务改变取消**，不判整包 PASS/FAIL。实际内嵌 Chromium 浏览器较晚
+  加载正确 Windows ZIP 页面并执行生产模块，进度达 **286,720 / 943,153B（30%）**。
+  随后用户要求默认直接方案，点击一次取消；UI 显示 **“已取消下载。”** 且重试入口可见。
+  没有完整 ZIP/最终 SHA/保存核验。证据：`apps/esp/build/driver-range-v50-browser-report.json`
+  与 `driver-range-v50-browser-uart.json`。
+  同期 **104.703 秒** UART 无 SDK/wrapped OOM/fault、COM6 已关闭；末次 worker 空闲、phase5，
+  一个 **8,192B** 块 result **0**，只表示该块/资源观察，不证明整包下载通过。
+  旧 v48 失败保留，实际 8790 仍为 v47；手机真实输入、中文/IME 边界保持。
+
+## v48 Rust 传输压缩包——构建/刷写/启动 PASS，连续 ZIP 下载 FAIL
+
+2026-10-18：用户要求压缩 Rust 代码和产物，以便正常传输。现提供冻结 v47 EXE 的单文件
+运行 ZIP 与显式源码快照；压缩和离线核验通过，但下述真实连续 ZIP 下载失败。
+**仅压缩尚未解决正常传输**，不能据此验收下载通过。
+
+- 运行包：`apps/android-mcp-rust/build/windows/v47/设备操作台.zip`，**948,082B**，SHA-256
+  `8b5f0b56b5baa36f3f7f1cbe86607107efa8219d195f2ea545dd7e7488c92957`，
+  比 **1,959,936B** EXE 小 **51.6269%**。唯一条目 `设备操作台.exe`，build
+  **rust-20902a052c1fcc76**，exact SHA-256
+  `4ce6c2bafec24fdc1d4186a8778e20e4466fbe9c8a0078fd90f247b9fbfe3a3f`。
+  独立解压、CRC/哈希和解压后 `--self-test` 通过，不含配置、不启动服务、不发送输入。
+  原 v47 EXE、运行 ZIP 及原 manifest 身份均保持。
+- 源码包：同目录 `android-mcp-rust-source.zip`，**215,333B**，SHA-256
+  `b077372d680ff885bc1732bcdb752501df480405aaa4ee552627bde96b1a1633`，
+  **50** 个显式白名单源码/公开夹具文件，加快照 README/manifest 共 **52** 条目。
+  排除 build/target、依赖、安装机配置和日志；固定时间戳/排序，在相同 Python/zlib 下两次
+  生成字节一致，全部条目/哈希/CRC 通过。公开 loopback TLS 测试密钥保留用途说明。
+  证据：`apps/android-mcp-rust/build/windows/v47/{transfer-compression-audit,android-mcp-rust-source-manifest}.json`。
+  `tools/pack-transfer.py` 仅用 Python 标准库；拒绝原文件名 NUL 后缀、加密/符号链接、
+  local/central 头不一致以及隐藏 DEFLATE 输出/尾部。直接解压上限为 EXE 大小 + 1，
+  必须 EOF、没有 unused/unconsumed data，真实字节/CRC 完全匹配。
+  NUL/隐藏输出红测复现旧验收缺口，修复后 **5 项测试 / 15 场景**通过，证据
+  `tools/test-pack-transfer.py`、`v47/zip-{nul-name,deflate-tail}-{red,green}.log`。
+- Build / Host：**PASS**。ZIP 固件完整门禁 **50332 exit 0**、归档核验通过；最终 packer/static
+  门禁 **30775 exit 0**，保留既存 **21** 个平台 skips（**4+5+12**），不写成零跳过。
+  日志：`apps/esp/build/zip-download-v48-{full-gate,final-static}.log`。
+  固件归档/full SHA-256
+  `490fbc3995d025d2110b0f2ff8e0a4087c5dabef8d248f50f3b6e2cbfd132de0`；
+  App **1,692,912B**，SHA-256 `8c23a1f7ba1207f5a5887d948d670326583caeb3f6f8b0580852c8c49abe2959`；
+  匹配 ELF `aa0313bec542eb841dfa31a261bf592abba6fa2b811bb6dc19f4b44b3515552c`。
+  `apps/esp/build/driver-assets-v48.bin` 为 **QDDDRV2**，原 ZIP 加 **4,096B** 头：
+  **952,178B**，SHA-256 `9c03b40987a3d73aaff419abf33f2b2042503058dedaeba02f79d1f6906021e0`，
+  在现有 **2MiB** assets 分区余 **1,144,974B**。ESP 发送原压缩字节，不在板上解压 EXE；
+  `driver-assets-v48.json` 分别绑定 ZIP 和 EXE 身份。
+- Flash：**PASS**，**67333 exit 0**。核对新鲜 COM6 / MAC **4c:11:ae:31:32:6c** 及表 SHA-256
+  `bd386c960f8b827e812dd238af37d469c319d7e9ecc2d7501d00296c46804a4f` 后，
+  仅写 exact App **@0x20000** 与 assets **@0x600000**，两段均 `Hash of data verified`；
+  擦除范围 **[0x20000,0x1be000)**、**[0x600000,0x6e9000)**。
+  Esptool 为四字节写入对齐补 **2 个 FF**，资源实际写 **952,180B**。
+  保留 bootloader/分区表/otadata/NVS/配对/PHY/ota1，无 merged@0/全片擦除。
+  证据：`apps/esp/build/com6-v48-{flash-plan.json,flash.log}` 及新鲜布局实读记录。
+- Device 启动：有界恢复 **PASS**，**30.015 秒 / 9** 样本，最终 BLE encrypted/bonded/ready，
+  WiFi **192.168.101.75**，SDK/wrapped OOM **0**、无 fault、COM6 已关闭。
+  早期 WiFi 未连接；观察内计数 **1/1 → 2/2**、末次 reason **201 → 8**、channel **6 → 11**。
+  不据此称 WiFi 连续稳定或唯一根因已定。证据：`apps/esp/build/com6-v48-startup.json`。
+- Device ZIP 下载：**FAIL**，**31652 exit 1**，`apps/esp/build/zip-v48-resource-device.json`。
+  HTTP **200**、`application/zip`、Content-Length **948,082** 与响应声明 ZIP SHA-256 均正确，
+  但 **15.641 秒**仅收到 **12,960B**，随后 `TimeoutError`。
+  部分正文不是完整预期 ZIP，没有执行下载后的 EXE 解压/自检。
+  最终 worker **busy=false / phase=5**，sent **12,960**、result **45062 / errno=11**，
+  下载最低 heap **30,600B**、largest **20,480B**。SDK/wrapped OOM **0**、无 fault 仅属于
+  本次不完整负载观察，COM6/worker 已清理；无 ARM/HID 输入、无故意停止读取。
+  观察到零 OOM 不能把不完整下载改判为功能 PASS。
+
+v47 当前服务可见坐标预览 PASS 独立保留。最新中文 APK 仍未安装/IME 未启用，
+实物 UI/校准/输入、此前高频 LAN 时限及长期资源上界仍未验收。
+后续有界 Range/浏览器传输候选正在开发，此处没有 v49 Device PASS。没有提交、push、发布。
+
+## v47 预点击图片可见坐标——构建/隔离及当前服务预览 PASS
+
+2026-10-18：用户指出 target-preview 应把坐标直接标在返回图片中。当前 v44 基线 JSON
+返回 target **(540,1200)**，但 PNG 只有圆环/十字，没有可读坐标，元数据不能代替图内标注。
+证据：`apps/android-mcp/build/target-preview-v47-baseline/report.json` 及 `0-full.png` / `0-zoom.png`；
+该基线报告 PASS 仅表示观察成功保存，不是坐标标注功能 PASS。
+
+Rust 和 Node 现均在完整预览与 2 倍局部图底部绘制 **52px** 标注：
+`PHONE PX: X=... Y=...` 与 `SIMULATED TARGET`。两图都使用最终 **原手机像素** target，
+包括 normalized 输入，不把 crop 局部坐标或翻倍值冒充手机坐标。标注不遮原内容，
+完整图/zoom 内容仍锚定 **(0,0)**，只向下扩画布，小图必要时向右扩。
+`annotation.coordinateSpace:originalPhonePixels`，`annotation.original` / `annotation.zoom`
+明确给出画布 width/height、`sourceRect`、`legend`；目标中心、源尺寸、crop、zoomTarget、
+tapArguments 语义保持。这是只读标注，不发送 HID、不移动真实鼠标、不接管输入 owner，
+也不据此证明真实鼠标定位准确。
+
+- Build / Host：**PASS**。Rust check、**82/82** 单测（零跳过），包括解码两张 PNG 后的可见
+  数字检查、源像素/marker/crop 保持、小图/边缘画布边界。旧图无 caption 的红测失败，
+  修复后 renderer **6/6** 通过。证据：
+  `apps/android-mcp-rust/build/target-preview-caption-{red,green,check,host}.log`。
+  根 typecheck/build、Node **456/456**（零跳过）通过，日志：
+  `apps/android-mcp/build/target-preview-v47-{typecheck,build,host-tests}.log`。
+- 打包 EXE：**21/21 PASS**，`apps/android-mcp-rust/build/windows/v47/exe-smoke.json`。
+  Build **rust-20902a052c1fcc76**，EXE **1,959,936B**，SHA-256
+  `4ce6c2bafec24fdc1d4186a8778e20e4466fbe9c8a0078fd90f247b9fbfe3a3f`，路径
+  `apps/android-mcp-rust/build/windows/v47/设备操作台.exe`，同目录 `manifest.json` 绑定身份。
+  打包检查实际解码两图验证白色坐标/品红模拟目标 caption 与 annotation/source 边界，
+  不把夹具当成真实 HID 输入已通过。
+- 隔离真机预览：新版 EXE stdio 使用真实局域网手机源，**3/3 PASS**：中心 **(540,1200)**、
+  normalized **(1000,1000) → (1079,2399)**、原点 **(0,0)**，两张保存图片均标对应原图像素。
+  全图画布 **1080×2452** 保留 **1080×2400** 手机内容，zoom画布 **320×372** 保留 **320×320**
+  裁切内容。HID endpoint 覆盖为隔离 loopback **1** 端口，无 ARM、真实板输入或 App 启动。
+  证据：`apps/android-mcp/build/target-preview-v47-isolated/report.json` 及六张 PNG。
+- 当前服务边界：自动审批拒绝了准备好的服务更新命令，只返回 **blocked by policy**，
+  拒绝发生在进程启动前，命令内 quit/复制配置/launch 均未执行，较早该检查点 **8790** 仍是 v44。
+  随后独立把同一 ignored 配置复制到 v47 旁，未输出敏感配置，用户再手动打开 v47。
+  后续只读动态 health/路径/哈希核对 **PASS**：build **rust-20902a052c1fcc76**、
+  PID **111040**、exact v47 路径及上述 SHA-256 全匹配，证据
+  `apps/android-mcp-rust/build/windows/v47/actual-service-verified.json`；PID 仅是该次观察值。
+  当前真实 HTTP MCP 再通过同样 **3/3** 真实 LAN 预览，中心/normalized 边缘图坐标可见且正确，
+  无 ARM/HID 输入；证据 `apps/android-mcp/build/target-preview-v47-actual/report.json` 及六张 PNG。
+  当前服务的预览 PASS 不算完整成品交付；ESP/APK/assets 未更新，v46 完整 EXE 下载失败、
+  中文 APK 未安装/IME 未启用、其余实物 UI/校准/输入/资源边界仍保留。没有提交、push、发布。
+
+## v46 可配置 DMA 绘图缓冲——启动/APK PASS，EXE 下载 FAIL
+
+2026-10-18：基于 v45 首次失败调用方证据，测试增加内部 DMA 内存余量的候选。
+BSP 新增 `bsp_lvgl_init_with_buffer_rows(uint16_t)`，合法 **1..320** 行，非法参数在启动
+port/分配资源前返回 NULL；原零参 API 保留 **40 行**默认。QDD 显式选 **20 行**，单个 RGB565
+DMA draw buffer 请求由 **19,200B** 降为 **240 × 20 × 2 = 9,600B**，请求量少 **9,600B**；
+实测 heap/传输结果见下，实物 UI 性能待验证，完整 EXE 恢复仍未通过。有有效参数的重复调用复用原 display，
+不热调整；display 注册失败保留已初始化 port 后重试。partial 绘制依实际 stride/capacity 切片，
+既有圆角 mask 在 RGB565 swap 前以全局 y 与局部行偏移处理；全宽全屏刷新由 8 片变为 16 片。
+独立只读源码审查未发现新增确定边界缺陷，不将其当作设备 PASS。
+
+- Build / Host：**PASS**。完整门禁 **86861 exit 0**，保留既存平台 skips；绘图缓冲
+  **7/7** 场景、旧初始化/失败重试回归、transport contract **16/16**、repo 检查、固件/归档
+  核验通过。主机场景覆盖新旧 DMA 预算、default、min/max、非法参数、重试/复用，
+  padded stride 与 guard sentinel 下的圆角分条/局部区域输出。
+  证据：`apps/esp/build/draw-buffer-v46-{red,green,contract,repo,full-gate}.log`。
+  归档/full SHA-256 `34fce612d4784a47696f6c65419a0cbed411fc6f36958cf72f198ebb26b0fd65`；
+  App **1,692,304B**，SHA-256 `df5acb85fe5e11654093afc52a0da7335801ecfff18177a2353a821a113c4d4d`；
+  匹配 ELF `c42b4641000cc1591633fd18d2a86d2318f08cd768741d777e1a5319901c5159`。
+- Flash：**PASS**。核对 COM6 / MAC **4c:11:ae:31:32:6c** 及新鲜实读表 SHA-256
+  `bd386c960f8b827e812dd238af37d469c319d7e9ecc2d7501d00296c46804a4f` 后，
+  仅写 exact App **@0x20000**，哈希验证，**77811 exit 0**，保留 NVS/配对、assets、bootloader、
+  分区表、otadata、PHY、ota_1。证据：`apps/esp/build/com6-v46-{flash-plan.json,flash.log}`。
+- Device startup：**PASS**，session **97686 exit 0**，**30.015s / 9** 个只读采样，secure BLE
+  ready、Wi-Fi connected，无 faults/errors，SDK OOM=0、包装器失败计数=0，COM6 关闭。
+  报告 free/minimum/largest heap **51,052 / 28,276 / 31,744B**。诊断已有观察前的一次 connect、
+  一次 disconnect、reason **201**，不能声称自开机零断线。
+  证据：`apps/esp/build/com6-v46-startup.json`。
+- EXE 预检：**仪器预检 FAIL，文件传输 NOT RUN**。Session **71253 exit 1**，诊断请求
+  **4.016s** 超时，未发 EXE GET、无 UART samples；零字节/未观察 OOM 不算文件负载或资源 PASS。
+  原 `exe-v46-resource-device.json/.log` 与固定副本
+  `exe-v46-resource-preflight-failure.json/.log` 均保留。
+- EXE 实际传输：之后诊断 HTTP **200** 状态变化后只执行一次实际 GET，**92367 exit 1**，
+  仍 **FAIL**：HTTP 200，**32.297s** 仅收到 **36,864 / 1,947,136B**，TimeoutError，
+  `preflightError` 保留预检超时。板端结束 phase=5/busy=false、sentBytes=37760、
+  result=**45062**、errno=**11**，末次 SDK free/minimum heap **50,740 / 13,476B**，
+  SDK OOM=0、包装器失败计数=0、COM6 关闭。清理完成，但这次部分传输没有 OOM，
+  不等于完整 2MB 下载负载也能零 OOM。证据：`apps/esp/build/exe-v46-resource-recovered-device.json`。
+- APK 传输：**该小范围完整文件与观察资源 PASS**，session **26954 exit 0**。
+  HTTP 200，**18.297s** 收齐 **66,090B**，SHA-256
+  `1811c4aacc77c9be2cf09d396848bb9605e6e2706a5c7a84d882ac869d4052dc` 精确匹配，
+  无 errors/faults，SDK OOM=0、包装器失败计数=0，末次 free heap **50,796B**，COM6 关闭。
+  它证明下载文件完整，不证明已安装、完整 EXE 可靠或长期资源上界；报告中的 DOWNLOAD_DIAG
+  after 是保留的此前 EXE 结果，不是 APK worker 结果。
+  证据：`apps/esp/build/apk-v46-resource-device.json`。
+- 被动抓包：**43757 exit 0**，**50.0s / 264** 条 header/metadata，无 payload、输入或提权。
+  仪器 PASS 不等于网络 PASS，包时序分析另行记录，不猜测调无线参数或放宽 timeout。
+  证据：`apps/android-mcp/build/npcap-driver-v46-tcp-headers.json`。
+  离线摘要 `npcap-driver-v46-summary.json`（SHA-256 `d8307871b45b652e4d97d7715f7b33a6835138d15bfa697b099778808c4a411b`）：12 个五元组仅覆盖 EXE 失败尾段约 **2.066s**、APK 开始约 **2.490s**，没有完整正文过程。
+  SYN 重传、已 ACK 的旧序列及关闭后迟到流量不能唯一定位 PC/AP/ESP/RF 责任。
+  FIN 后零窗口不是正文传输证据；raw window 未应用缩放。
+- 最终实际服务/只读检查：**PASS**。动态核对 health/路径/哈希，实际 PID **57084**、
+  build **rust-76cbec8971e2da33**，exact
+  `apps/android-mcp-rust/build/windows/v44/设备操作台.exe`，SHA-256
+  `cf325aa11a2d5be545626027b64802fa905c0561e3d5221c1af342609b88cd84`。
+  官方 SDK 列 **22** 工具，HID STATUS **611.8102ms**、BLE encrypted/bonded/ready、
+  未 ARM/未锁，真实 LAN **99,305B JPEG** 返回，未发送 ARM/HID 输入。
+  看到的手机桌面来自已有 App，没有点击投屏图标，也没有绕过被拒绝的启动动作；
+  这仅验证保留的运行服务/只读链路，不代表新 APK 安装、IME/校准/非零输入已验收。
+  证据：`apps/android-mcp/build/rust-v46-final-real-neutral.json/.log`、
+  `apps/android-mcp-rust/build/windows/v44/actual-service-v46-verified.json`，PID 仅为该次观察。
+- 手机准备：`apps/android-screen/build/ime-v44-device-preparation.json` 记录真实 ADB 设备为 0，
+  Windows 未发现 OnePlus USB 接口、mDNS 未发现真实手机源；未使用模拟器替代。
+  屏幕源仍是已有 App，未安装新 APK/启用 IME，没有重试或绕过此前被拒绝的 App 启动动作。
+  用户委托准备不等于可以远程接上缺失的实体 USB。当前板保留 v46、服务及设备数据，
+  Rust/EXE/assets 与 Unicode APK 产物冻结；实物 UI/校准、完整 EXE、真实中文输入框/画面反馈、
+  高频 LAN、长期资源验收仍未完成，设备整体为 **FAIL/部分通过**，完整成品不能验收。
+
+## v45 首次分配失败调用方诊断——构建/刷写 PASS，实物下载 FAIL
+
+2026-10-18：本版完成 v44 中待执行的诊断门禁，新增有界、仅 USB 的 `OOM_TRACE`，
+通过 GNU ld 包装 malloc/calloc/heap_caps_malloc。失败记录不分配、不打印、不读业务内容，
+不改变原分配参数/结果，只保留计数与首条完整数字调用方记录。主机 **6/6** 场景覆盖成功、
+zero size、三类 allocator、overflow、errno 不变、首记录固定、外部函数指针重定位；
+transport contract **15/15** 通过。它不是完整 heap trace/backtrace，不保证覆盖其他 API 或
+同一编译单元内已解析的引用。SDK 失败 hook 在真实 allocator 内先执行，其首记录可与包装器不同。
+
+- Build / Host / Flash：**PASS**。完整门禁 **9096 exit 0**，保留既存平台 skips。
+  归档/full SHA-256 `d18a2cc2ff51da1496ce1fe95aad201eeec1fccdaa8c71413f46635833df1886`；
+  App **1,692,288B**，SHA-256 `8488b9b15965173dd354edcadfbcb9b1a478333afea56212b76551e9d6571554`；
+  exact ELF `1624ac1e42cb43cc937ef0b8b6afbe5c78026de98a8fb413f05e513d0245afa1`。
+  最终 ELF/map 核对包装器、真实分配器及使用的 32 位原子/中断辅助均在 IRAM，字段在 DRAM，
+  真实函数调用无递归，Wi-Fi SDK malloc 函数指针已重定位到包装器；ISR/关闭缓存行为未实物测试。
+  核对 COM6 / MAC **4c:11:ae:31:32:6c** 及新鲜实读表 SHA-256
+  `bd386c960f8b827e812dd238af37d469c319d7e9ecc2d7501d00296c46804a4f` 后，
+  仅写 exact App **@0x20000**，哈希验证，**64988 exit 0**；保留 NVS/配对、assets、bootloader、
+  分区表、otadata、PHY、ota_1。证据：`apps/esp/build/oom-trace-v45-{full-gate,wrapper-green,contract-green}.log`、
+  `com6-v45-{flash-plan.json,flash.log,startup.json}` 及哈希命名固件归档。
+- Startup：**30.031s 只读窗口 PASS**。BLE secure/ready、Wi-Fi 恢复，无 faults/errors/OOM，
+  OOM_TRACE count=0/ready=false，COM6 已关闭；不据此声明负载稳定。
+- APK 诊断：**FAIL**，与 v44 的资源失败分别记录。HTTP 200 声明仍为 **66,090B** APK，
+  但 **6.797s** 仅收到 **5,399B** 即 EOF，OOM 与包装器计数均 **0**，不能声称已确定与
+  此前 APK/OOM 相同根因。**361B header + 5,399B body = 5,760B** 仅是字节边界相关性，
+  不等于已诊断网络原因；之后 health ICMP **1/2**、HTTP timeout。
+  证据：`apps/esp/build/apk-v45-oom-trace-device.json`、`com6-v45-after-apk-health.json`。
+- EXE 诊断：恢复后独立 **30.000s PASS** 基线、OOM_TRACE count=0
+  （`com6-v45-exe-baseline.json`）之后仍 **下载/资源 FAIL**。Session **53083 exit 1**，
+  **148.687s** 仅收到 **1,293,952 / 1,947,136B**；板端 phase=5/busy=false、
+  result=**45062**、errno=**11**，下载最小 heap/largest block **9,240 / 4,608B**，
+  SDK 最小 heap **864B**，OOM 计数 **7**，末次 SDK free heap **41,056B** 不能覆盖失败。
+  观察 **6.047s** 首次包装器失败：kind=3（heap_caps_malloc）、**1630B**、caps=**2060**、
+  PC **0x40381896**；exact ELF 解码为 `esp_coex_common_malloc_internal_wrapper`，
+  `components/esp_coex/esp32c3/esp_coex_adapter.c:125`。这是 allocator trampoline，
+  不是完整调用栈，不能唯一归因 Wi-Fi 或 Bluetooth。证据：
+  `apps/esp/build/exe-v45-oom-trace-device.json`。未发送 ARM 或业务输入；随后已再次恢复板子
+  （`com6-v45-exe-recovery.log`），该 reset 日志本身不算新的恢复后负载 PASS。
+- Unverified / 后续诊断：v46 BSP App 绘图缓冲区回收仍是开发中的候选，未证明修复。
+  Rust/EXE/assets、Android/Unicode 产物未改。最新
+  `D:/SDK/platform-tools/adb.exe devices -l` 未枚举手机，未安装、启动新 APK 或选择其 IME，
+  没有重试或绕过此前被拒绝的 App 启动动作。真实中文输入框/画面反馈、非零 HID、校准/UI、
+  高频 LAN 与长期资源验收仍未完成，这些下载失败意味着完整成品仍不能验收。
+
+## v44 防止延迟长按与请求重放、中文 IME 通道——主机/刷写 PASS，实物 EXE 下载 FAIL
+
+2026-10-18：用户新增“延迟时输入重复”的反馈。本轮先复现两个具体问题：按下 ACK 延迟
+300ms 时，旧文字路径直到 **301.3445ms** 才释放按键；完成的同一 MCP request ID 再次到达会
+重新派发。另一个真实 HTTP 红测显示，旧请求虽被重复 ID 检查拒绝，前置接管仍让后来浏览器
+owner 的 stop 计数 **0→2**。这些主机证据支持最小修复，不等于已唯一定位真机所有重复来源。
+
+最近位移之后的 **350ms** 静置继续保留，抵扣已过时间且可取消。一次短按在真正写出后约
+**50ms** 即发送中立 keyup/mouseup，**不等待按下 ACK 才释放**；两个报告仍独立编号、各用原
+**1200ms ACK** 截止。取消可提前释放，超时不重发按下或继续剩余字符，原始报告仍可表达有意
+保持按键。PING **300ms** 和设备 **1500ms** 安全截止未放宽；这不保证网络/设备异常时没有物理
+延迟，也不把中立释放当作一次新的业务输入。
+
+同会话所有 `tools/call` request ID 开始派发即保留 **32B SHA-256 摘要**，完成、失败、取消后
+都不能复用。每会话最多 **4096** 个，满后拒派发并要求新会话，不淘汰旧记录后放行重放；
+不缓存参数、图片或响应正文。HTTP 接管放到 ID 原子占位及参数/帧预校验之后，重复或被拒请求
+不会抢占/停止后来浏览器 owner。**新 ID 的相同文字仍允许有意再次输入**；不保证跨会话、
+服务重启或任意新 ID 重试的 exactly-once，不确定结果须先观察。
+
+包含非 ASCII 的整串文字使用新版 ESP 的 **加密 BLE 自定义 GATT → 手机 QDD 输入法 →
+InputConnection.commitText**，不能通过 US HID 键码或拼音伪装支持。用户须自行启用、选择输入法
+并聚焦可编辑输入框。`QDDTXT/1` 全串 UTF-8/NUL 校验后限制 **512B**，STATUS 查询当前
+editorEpoch/ready，连续 offset 分块；transfer ID 纳入 UTC 微秒、进程原子上界及板端最后 ID。
+COMMIT **只发一次**，queued ACK 不算输入成功；随后只轮询 STATUS，最多 **10s** 等手机结果。
+提交后断线、取消、超时或结果未知返回 `uncertain`，不自动重发。accepted 仅表示手机
+InputConnection API 接受，仍须用真实新画面验证输入框内容；终态清正文/计数，只保留 ID、结果
+及该 transfer 原 editorEpoch。ASCII 继续使用上述 HID 短按路径。
+
+- Build / Host：**PASS**。Rust 最终 **rust-76cbec8971e2da33**，EXE **1,947,136B**，SHA-256
+  `cf325aa11a2d5be545626027b64802fa905c0561e3d5221c1af342609b88cd84`；固定路径
+  `apps/android-mcp-rust/build/windows/v44/设备操作台.exe`。check、**80/80** 单测（零跳过）、
+  release 与官方 SDK EXE **21/21** 通过，最终 session **88757 exit 0**。
+  包含真实生产 **1200ms** COMMIT ACK 丢失→uncertain、同 RPC ID 再来不追加 wire 输入、
+  300ms press ACK 延迟下及时释放、新 ARM 与旧取消隔离、HTTP 旧/非法请求保护新 owner。
+  证据：同目录 `manifest.json`、`validation.json`、`check.log`、`host-tests.log`、
+  `build.log`、`exe-tests.log`、`exe-smoke.json`；夹具 `realDeviceInput:false`。
+- Android Build / Host：**PASS，仅主机与产物**。APK **66,090B**，SHA-256
+  `1811c4aacc77c9be2cf09d396848bb9605e6e2706a5c7a84d882ac869d4052dc`，签名已验证。
+  **21** socket 场景和 **125** UTF-8/IME 协议检查通过。同步 commitText 引发切焦点时，原模型
+  ACK 使用错误 epoch 的红测 exit 1，修复后保留原 transfer epoch；另有 ASCII-only mutant
+  红测，不能把它称作旧 APK 或真机复现。证据：
+  `apps/android-screen/build/ime-v44-{validation.json,host-tests.log,editor-epoch-red.log,editor-epoch-green.log}`。
+  **此新版 APK 未安装/启动到真机，IME 未由用户启用，真实中文闭环未测试**；
+  最新只读检查未枚举到该手机 ADB serial，不能把既有投屏画面当作新版 APK 已运行。
+- Assets：**PASS，仅离线身份/容量**。`apps/esp/build/driver-assets-v44.bin` 为 **1,951,232B**，
+  SHA-256 `b35048deb9613bdb377852bf637f6792a3b1e57049441329aa6d9b0699267b28`；
+  4KiB 头 + 上述原始 EXE，既有 `assets @ 0x600000 / 0x200000` 留 **145,920B**。
+  `driver-assets-v44.json` 绑定 exact EXE 与新鲜分区表，create/verify 通过；随后已与 App 一起
+  写入下述 exact 资源镜像，但新版 EXE 从实物完整下载 **失败**。
+- ESP Build / Host / Flash：**对应范围 PASS**。最终完整门禁 **48663 exit 0**，保留既存
+  平台 skips，固件布局与归档核验通过。归档/full SHA-256
+  `0cb2f7a389afcac70eec8988fddc49684acdc5fa064f7d7e4c8b12d513a8ed73`；App **1,691,568B**，
+  SHA-256 `d04b9a511d4e2cf7ce90aadd36527a9dc0cf9da69937fc388a2de7f1b0843020`，匹配 ELF
+  `101f81fa55295491d963ee1dd5e51f3dca59628328016077e8c749d49e8452d9`。COM6 /
+  MAC **4c:11:ae:31:32:6c** 与新鲜实读表核对后，联合写入 exact
+  **App @ 0x20000 + assets @ 0x600000**，两项哈希验证，刷写 **85902 exit 0**。
+  保留 NVS/配对、bootloader、分区表、otadata、PHY、ota_1，无全擦/merged@0；
+  归档 merged 布局仅作构建/调试产物，没有按其生成偏移烧入。
+  跨端红绿覆盖 Rust exact `STATUS 0000000000000000` 预检、切焦点后原 epoch 的晚 ACK 收敛、
+  ServiceChanged 超时仍占用共享 ATT indication 槽、事件队列双 producer 去重；
+  runtime 集成 **4/4** 通过。证据：`apps/esp/build/drivers-v44-final-gate.log`、
+  `text-v44-rust-zero-{red,green}.log`、`text-v44-att-timeout-{red,green}.log`、
+  `com6-v44-combined-flash-plan.json`、`com6-v44-flash.log`。
+- Device v44：**启动/恢复 PASS，连续 EXE 下载及资源 FAIL**。
+  `apps/esp/build/com6-v44-startup.json` 只读观察 **30.032s**，secure BLE ready、Wi-Fi 恢复，
+  TEXT STATUS 可查询但 **idle / ready=false**，无 fault/OOM。不故意停读的连续请求
+  **36.203s** 仅收到 **177,184 / 1,947,136B** 后超时；板端 phase=5、sentBytes=177184、
+  result=**257**、errno=0，OOM 累计 **478**，末次采样 free heap **5,084B**，
+  下载最小 heap **4,068B**。因此 **16KiB** 下载保护对该真实负载不足，
+  身份/刷写通过不能覆盖下载 FAIL。证据：`apps/esp/build/exe-v44-continuous-device.json`。
+  恢复后 `com6-v44-recovery-startup.json` 只读观察 **30.016s**，secure BLE ready、Wi-Fi 恢复，
+  无 errors/faults/OOM，COM6 已关闭，TEXT 仍 idle/not ready。这些观察未发送 ARM、PING、
+  配对请求或 HID 业务输入。最小分配调用方诊断 v45 正在完整门禁（**9096 PENDING**），
+  不猜测调整无线参数，也不声称修复已成功。
+- Device APK/页面恢复：**功能 PASS，整体资源 FAIL**。两种 User-Agent 页面请求均 HTTP
+  **200**，分别推荐 Windows `/qdd-desktop.exe` 与 Android `/qdd-remote.apk`；实物 APK
+  请求 **13.859s** 收齐 **66,090B**，SHA-256
+  `1811c4aacc77c9be2cf09d396848bb9605e6e2706a5c7a84d882ac869d4052dc` 匹配。
+  证据：`apps/esp/build/apk-page-v44-recovered-device.json`。后续
+  `com6-v44-after-apk.json` 的 **30.031s** UART 观察记录 OOM **3**、最小空闲堆 **1,756B**、
+  末次 free heap **41,672B**，BLE ready/Wi-Fi connected，无其他 faults/errors；
+  即使堆恢复，资源结果仍 **FAIL**。未发送输入，也没有安装/启动该 APK。
+  较早 `apk-page-v44-device.json` 在尚无检查结果时 **RemoteDisconnected**，该独立瞬时故障
+  仍未定位，不能由后续功能 PASS 抹掉。请求前恢复观察 OOM=0 的 PASS 仅描述此前窗口。
+- Device 诊断 v43c：**完整下载功能 PASS，整体资源 FAIL**。已完成完整门禁并只向 COM6 /
+  MAC **4c:11:ae:31:32:6c** 的实读 `ota_0 @ 0x20000` 刷入诊断 App，保留 NVS/配对、
+  bootloader、分区表、otadata、PHY、assets、ota_1，无全擦/merged@0。归档 Full SHA-256
+  `72a3c381c43e20c7c2062a6298fd9919ff486dce664f28e4b2d95eea0874fdd6`；App
+  **1,670,704B**，SHA-256 `5a7c5c90d7a97582058b6b19f64b21c8d88281a91a03034a112eee36cfb90d27`，
+  匹配 ELF `ac7397ec688d96e7e0d6b99d584e48c012a1bb29e477bf2c66d623eb3e5ab7f7`。
+  不故意停读的连续请求 **53.640s** 收齐 **1,892,352B**，SHA-256
+  `93b72fd189944db6dcedd251ed7ceb74241b1e413566a16439115bf8cd301ecc`；这是旧 v43 Rust
+  资源，**不是 v44 新 EXE 下载验收**。结束 phase=5、sentBytes 全量、result/errno=0。
+  同期 OOM 累计 **46**、最小空闲堆 **952B**；8s 静置后 free heap 恢复 **42,408B**。
+  因而下载完成不能覆盖资源 FAIL，也不能凭短样本宣称永久泄漏或没有泄漏。
+  证据：`apps/esp/build/{com6-v43c-flash-plan.json,com6-v43c-flash.log,exe-v43c-continuous-device.json}`，
+  `apps/android-mcp/build/npcap-driver-v43c-summary.json`。抓包只保存头部/计数，无 payload；
+  此观察未发送 ARM 或 HID 业务输入。这是保留的诊断历史；后续实际刷入的 v44 身份、
+  资源/下载失败结果已记于上方。
+- 服务边界：用户已手动打开新版 Rust EXE，实际路径/哈希、health、官方 SDK 工具与真实
+  局域网画面核验如下；旁边的 ignored 连接配置保留。后续须按 `/health`、实际路径和哈希
+  动态核对，不能固定历史 PID。stdio 客户端也须选择新版路径，HTTP 服务通过不等于所有
+  客户端配置都已切换。
+- Unverified：好友 **0/10** 仍不计业务 FAIL；旧高频 LAN、Home OEM、完整实物 UI/校准、
+  真实 Unicode GATT/IME/画面闭环、长期资源上界和最终 v44 ESP 验收仍未通过。没有提交、push、发布。
+
+自动审批拒绝了“退出旧 Node 服务并启动新版 Rust”的替换命令，仅返回 **blocked by policy**；
+命令未执行，没有重试或换接口绕过。随后用户手动打开 v44，已核对实际 PID **57084**、
+程序路径及最终 EXE 哈希；官方 SDK 列 **22** 工具，中立 STATUS **730.8651ms**、
+BLE encrypted/bonded/ready、未 ARM，真实手机局域网投屏 JPEG **99,169B** 返回成功。
+这验证当前实际 Rust 服务与只读链路，仍不代替 Unicode 或非零 HID 验收。
+证据：`apps/android-mcp-rust/build/windows/v44/actual-service-verified.json`、
+`apps/android-mcp/build/rust-v44-real-neutral.json`；PID 仅是该次观察值，后续须动态核对。
+
+## v43 驱动分发与不依赖系统光标的校准——主机 PASS，实物下载 FAIL，v43b 待验
+
+2026-10-18：用户新增 Rust 操作台、assets 分区分发及平板校准反馈。好友的 **0/10** 表示
+业务用例尚未执行，不能记作目标应用 FAIL 或 PASS。`CONFIGURING`、paused、PING 超时和点击
+变拖动属于仪器链路问题；OEM Home 导航是否生效也必须从新画面判断，不能只凭 HID ACK。
+本轮没有放宽 **1200ms ACK / 1500ms 安全截止**、重放输入或使用 ADB 业务输入/截图回退。
+
+设置项和二维码页面改为 **驱动下载**。同一个板端页面按访问设备推荐 Android APK 或 Windows
+EXE，并始终保留两个明确的平台链接；Windows 使用 `/qdd-desktop.exe`，Android 使用
+`/qdd-remote.apk`。独立下载 worker 避免大文件占住注册/状态服务；并发 EXE 下载返回 503，
+资源缺失、损坏或容量不符时拒绝提供文件，不修改分区表来迁就大小。页面仍是下载入口，
+不能据此宣称手机安装或电脑运行成功。
+
+点击/按下前按最近成功位移 ACK 的单调时间保证 **350ms** 静置，抵扣已经经过的时间，
+可取消/暂停；不会给每次点击额外固定加 350ms，也不会重新发送位移或点击。
+相同 `probe` 前后图返回两图和 `measurable:false` / `measurementAvailable:false`、
+`reason:identical_images`，暂停且不发 `probeId`，禁止凭空填写光标坐标或猜测增益。
+
+新版 APK 提供用户主动打开的 **指针校准** 页，接收真实鼠标 MotionEvent 的 rawX/rawY 并把
+实际坐标标记绘进 MediaProjection；不依赖系统是否捕获鼠标光标。MCP 新增
+`android_pointer_calibration {"phase":"auto","frameId":"..."}`，只读 `/pointer/calibration`
+的 active/session/geometry/point 信息，不通过网络启动 App 或打开校准页。
+显标小移动后静置 **550ms**，向屏幕中心探测默认 **96 HID counts**，只在同会话新 sequence、
+两轴真实位移有效且未触边时计算 counts/pixel；完整 GET RTT 计入坐标年龄。失焦、旋转、过期、
+没有事件或外部移动会暂停并保留已有校准。它不发送业务点击，加速度下的后续落点仍是估算。
+
+- Build：**PASS，仅限已列产物**。根目录 typecheck/build 日志
+  `apps/android-mcp/build/drivers-v43-{typecheck,build}.log`。Rust 最终 build
+  **rust-447d9cad992b51c3**，EXE **1,892,352B**，SHA-256
+  `93b72fd189944db6dcedd251ed7ceb74241b1e413566a16439115bf8cd301ecc`；固定目录
+  `apps/android-mcp-rust/build/windows/v43/` 的 `manifest.json`、`validation.json` 和
+  `exe-smoke.json`。原默认目录 EXE 因现有用户进程占用而保留，`QDD_RUST_OUTPUT_DIR` 支持独立
+  版本目录；使用 stdio 的客户端须切换到新路径，不能把旧进程当新版。
+  APK **53,727B**，SHA-256
+  `d01126223e601678af72f42e31241d09b1e58c8a70ff6bb79e51a23811fd54d1`。
+- Host tests：**PASS**。Node **562/562、零跳过**，日志
+  `apps/android-mcp/build/drivers-v43-node-tests.log`；Rust check、**66/66** 单测、release 及
+  官方 SDK 打包夹具 **18/18** 通过。覆盖静置红绿、取消前不按下、已静置点击不追加等待、
+  相同图片无票据、auto 的失焦/旋转/旧事件/裁切/插入移动/取消边界，以及只读 GET 和传输年龄。
+  EXE 夹具隔离于真实服务，`realDeviceInput:false`，不是真实平板精度或 BLE 性能。
+- Assets：**PASS，格式/身份/容量专项**。`QDDDRV1` 资源为 **4KiB 头 + 原始 EXE**，
+  **1,896,448B**，SHA-256
+  `d08e880176f364b3a9e5f4460cd1ab08945929a4978785769d254d8147cc9cae`。
+  COM6 / MAC **4c:11:ae:31:32:6c** 新鲜实读表 SHA-256
+  `bd386c960f8b827e812dd238af37d469c319d7e9ecc2d7501d00296c46804a4f`，
+  `assets @ 0x600000 / 0x200000`，剩余 **200,704B**。固件核对头、长度、SHA 与边界，
+  不把 ZIP 能装下当作原始 EXE 能装下。证据 `apps/esp/build/driver-assets-v43.{bin,json}`、
+  `com6-v43-{assets-verify.log,combined-flash-plan.json}`。
+- Device tests：**FAIL，v43 第一版大文件下载/内存**。第一版完整门禁及归档通过，bundle
+  `dd73c262a0ddb2f39fa51691ecf60d82060a4a892e2292e537356f2314faf9bc`；
+  App **1,668,976B**，SHA-256
+  `82899c73e9891db5471c108c49679f3a307b924006416f8c383d18c5fc0e1603`，匹配 ELF
+  `a9f325a512482e7f35e3cf458c002111ffe9f6913e58207fe4e135fe45f880b3`。
+  COM6 已核对身份/实际布局后只写 App `ota_0 @ 0x20000` 与上述 assets，写入哈希通过，
+  保留 bootloader、分区表、otadata、NVS/配对、PHY、ota_1；没有 merged@0 或全片擦除。
+  Android/Windows 推荐链接、APK 完整下载及其 SHA 通过；EXE 普通连续读取却在 **22.303s**
+  截断为 **872,064 / 1,892,352B**，哈希不符。同期 UART OOM 累计 **398**、最小空闲堆
+  **568B**。虽然 BLE 仍 ready，也必须判为内存/下载 FAIL。
+  原 observer 只检查 BLE 的错误 PASS 谓词已更正；原始结果保存在
+  `com6-v43-after-download-original.json`，更正结果为 `com6-v43-after-download.json`。
+  证据：`apps/esp/build/{drivers-v43-full-gate.log,com6-v43-flash.log,driver-download-v43-device.json,exe-v43-continuous-device.json}`。
+- v43b：**PENDING**。针对上述新实物证据复用校验/传输 staging、减少常驻 **2,048B**，
+  并增加独立 `/api/download-status` 内存/发送阶段观察点；完整门禁正在运行，日志
+  `apps/esp/build/drivers-v43b-full-gate.log`。新产物身份、刷入和完整连续下载结果待补，
+  当前不能声称 v43b 已修复、下载已恢复或内存验收通过。
+- Unverified：新 APK 尚未完成真机安装/校准页测量闭环；真实平板非零 HID、完整实体 UI、
+  OEM Home、旧高频 LAN 时延根因和长期资源上界继续未验收。电脑实际服务切换及最终真机结果
+  待补；未提交、push 或发布，保留所有历史记录和自动审批拒绝边界。
+
+## v42 设置排序与下一页箭头——已更新 COM6
+
+2026-10-18：设置顺序调整为 **无线网络 → 手机蓝牙配对 → 手机投屏下载 → 按键指南 →
+重置设备 → 返回主界面**。常用项在第一页，重置位于第二页且仍默认取消、需再次确认。
+第一页右侧空隙显示小 **↓**，仅表示下方还有选项；最后一页隐藏，返回第一页恢复。
+箭头用 LVGL 三条线绘制，不依赖现有字库未覆盖的 U+2193，不增加字体资源。
+菜单动作和各子页返回位置改为具名索引，避免排序后进入错误页面。
+
+- Build：**PASS**，完整门禁及归档复验，日志 `apps/esp/build/settings-v42-full-gate.log`。
+  归档 `apps/esp/build/firmware/983dbf511cf953ea8e52905814e62aeac46419b2151517514e449136f898c28a`，
+  Full SHA-256 与目录名一致。App **1,666,320B**，SHA-256
+  `3c6cba5a656ab30e0cb924ea6d37c61dd4ad6121f488db76745794cab39d2ddf`；匹配 ELF SHA-256
+  `a92b03f01f03b1c81e244ef307502c9bf9de8b2d80807686b35606b4fcc81bc5`。
+- Host tests：**PASS**。旧模型编译成功后语义红测 exit 3，新模型 exit 0；真实 LVGL 9.5 的
+  menu/download/full/intro/pair/scan/guide **7 组**通过。覆盖排序、全部返回索引、3↔4 跨页及首尾循环、
+  重置默认取消、箭头像素和隐藏后的背景清除。每页 100 次无变化刷新零 flush/分配稳定，
+  下载 120 次切页稳定，24KiB LVGL 池峰值 **17,040B**。完整门禁保留既有平台跳过项。
+  证据及渲染图：`apps/esp/build/settings-menu-regression/`；源码摘要 `settings-v42-source-identity.json`。
+- Device tests：**PASS，仅限烧录/启动/连接恢复**。新鲜核对 COM6 / MAC **4c:11:ae:31:32:6c**
+  及实际分区表 MD5，只写 `ota_0 @ 0x20000 / 0x2f0000`；写入哈希通过，擦除结束不含 `0x1b7000`。
+  保留 bootloader、分区表、otadata、NVS/配对、PHY、assets、ota_1。
+  **30.000 秒**只读观察六个回复，BLE **QDD-Passport-326E** 持续 encrypted/bonded/ready，
+  未启用输入/未锁定，fault/OOM **0**。最早 Wi-Fi 样本尚在恢复，后续 DIAG up=1，最终独立查询确认
+  **192.168.101.75:3333** 已连接。未发送 PING、PAIR、ARM 或业务输入，未保存原始串口，COM6 已关闭。
+  证据：`apps/esp/build/com6-v42-{archive-verify.log,layout-read.log,partition-table.bin,flash-plan.json,flash.log,startup.json,final-link.json}`。
+- Unverified：实物屏幕上的箭头/菜单与实体按键效果、扫码操作仍需实物观察；本轮主机渲染不代替实屏验收，
+  也不扩大已有高频 LAN 与完整成品验收结论。未更改电脑服务/APK，未提交、push 或发布。
+
 ## v41 预点击标记与真实悬停——电脑已更新，真机专项 PASS
 
 2026-10-18：新增只读 `android_preview_tap`。传入最新 `frameId`、坐标及可选 `coordinateSpace`，
@@ -101,6 +940,16 @@ Unverified：其它真机/非整数比例的加速及误差、完整实物 UI、
   保留 bootloader、分区表、otadata、NVS/配对、PHY、assets、ota_1。30 秒只读观察六个样本通过，
   地址仍 **192.168.101.75:3333**、BLE encrypted/bonded/ready，未启用输入，无 fault/OOM，COM6 已关闭。
   证据：`apps/esp/build/new-com6-v39-{layout-read.log,flash-plan.json,flash.log,startup.json}`。
+- COM5 追加安装（2026-10-18 上海 09:53）：**Device tests PASS，仅限烧录与启动观察**。
+  用户明确指定 COM5；新鲜核对 MAC **4c:11:ae:2f:a1:b8**、8MB ESP32-C3 和实际分区表 MD5，
+  该板是 `factory @ 0x10000 / 0x7f0000`，与 COM6 的 OTA 布局不同。
+  复验上方同一 v39 归档后仅写 **1,666,016B** App，写入哈希通过，擦除结束不含 `0x1a7000`；
+  未擦除 bootloader、分区表、NVS/配对或 PHY。Build/Host tests 沿用该精确产物已有完整门禁，未重建。
+  **30.015 秒**只读串口观察六个回复通过：Wi-Fi **192.168.100.167:3333**，
+  **QDD-Passport-A1BA** 持续 encrypted/bonded/ready、未启用输入/未锁定，fault/OOM **0**。
+  未发送 PING、PAIR、ARM 或业务输入，未保存原始串口，COM5 已关闭。
+  证据：`apps/esp/build/com5-v39-{archive-verify.log,layout-read.log,partition-table.bin,layout.json,flash-plan.json,flash.log,startup.json}`。
+  实体菜单/按键、扫码下载及该板真实画面与 HID 反馈闭环仍未验收；未改变电脑配置或服务。
 - 电脑服务已恢复为实际 PID **91668**，EXE build **c2042f779676b1fb0546** 未改；官方 SDK
   **20** 工具、STATUS **5/5**、最大 **267ms**、七次 POST 全 SSE，LAN/loopback health **200**、未知路由 **404**。
   证据：`apps/android-mcp/build/mcp-v39-final-status.json`。

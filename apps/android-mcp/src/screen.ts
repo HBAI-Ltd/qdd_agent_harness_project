@@ -24,6 +24,10 @@ function withAbortSignal<T>(task: Promise<T>, signal?: AbortSignal): Promise<T> 
 export const PREVIEW_PROFILES = ["turbo", "fast", "standard", "original"] as const;
 export type PreviewProfile = typeof PREVIEW_PROFILES[number];
 export interface PreviewProfileState { profile: PreviewProfile; deviceWidth?: number; deviceHeight?: number }
+export interface PointerCalibrationState {
+  active: boolean; deviceId: string; sessionId: string | null; width: number; height: number; rotation: number;
+  point: { x: number; y: number; sequence: number; ageMs: number } | null;
+}
 
 export interface ScreenCapture extends AdbCapture {
   mimeType: "image/jpeg" | "image/png";
@@ -188,6 +192,38 @@ export class ScreenClient {
     return this.profileRequest();
   }
 
+  getPointerCalibration(serial: string | undefined = this.deviceId, signal?: AbortSignal): Promise<PointerCalibrationState> {
+    const requestedAt = performance.now();
+    return this.request("/pointer/calibration", async (response, active) => {
+      const invalid = (): never => { throw new ScreenError("SCREEN_INVALID_HEALTH", "手机指针校准状态无效，请更新投屏 App。"); };
+      if (response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json") {
+        this.cancelBody(response); invalid();
+      }
+      const bytes = await this.readBody(response, active, 4096, "SCREEN_INVALID_HEALTH");
+      let state: PointerCalibrationState;
+      try { state = JSON.parse(bytes.toString("utf8")) as PointerCalibrationState; } catch { return invalid(); }
+      if (!state || typeof state !== "object" || Array.isArray(state) || typeof state.active !== "boolean"
+        || typeof state.deviceId !== "string" || !DEVICE_ID.test(state.deviceId)
+        || ![state.width, state.height].every((size) => Number.isSafeInteger(size) && size >= 0 && size <= 65535)
+        || !Number.isInteger(state.rotation) || state.rotation < 0 || state.rotation > 3) invalid();
+      this.checkDeviceId(state.deviceId.toLowerCase(), this.deviceId); this.checkDeviceId(state.deviceId.toLowerCase(), serial);
+      if (state.active) {
+        if (typeof state.sessionId !== "string" || !DEVICE_ID.test(state.sessionId) || !state.width || !state.height) invalid();
+      } else if (state.sessionId !== null || state.point !== null) invalid();
+      if (state.point !== null) {
+        const point = state.point;
+        if (!point || typeof point !== "object" || Array.isArray(point)
+          || ![point.x, point.y].every((value) => typeof value === "number" && Number.isFinite(value))
+          || point.x < 0 || point.x >= state.width || point.y < 0 || point.y >= state.height
+          || !Number.isSafeInteger(point.sequence) || point.sequence < 1 || !Number.isSafeInteger(point.ageMs) || point.ageMs < 0) invalid();
+        // Include the entire query RTT conservatively; a delayed response must
+        // not turn an old mouse event into a fresh accepted measurement.
+        state = { ...state, point: { ...point, ageMs: Math.ceil(point.ageMs + performance.now() - requestedAt) } };
+      }
+      return { ...state, deviceId: state.deviceId.toLowerCase() };
+    }, "GET", undefined, undefined, signal);
+  }
+
   setPreviewProfile(profile: PreviewProfile): Promise<PreviewProfileState> {
     if (!PREVIEW_PROFILES.includes(profile)) return Promise.reject(new ScreenError("SCREEN_INVALID_PROFILE", "未知画质档位。"));
     return this.profileRequest(profile);
@@ -277,7 +313,7 @@ export class ScreenClient {
     }
   }
 
-  private async request<T>(path: "/health" | "/frame.jpg" | "/preview/profile", read: (response: Response, signal: AbortSignal) => Promise<T>,
+  private async request<T>(path: "/health" | "/frame.jpg" | "/preview/profile" | "/pointer/calibration", read: (response: Response, signal: AbortSignal) => Promise<T>,
     method: "GET" | "POST" = "GET", body?: string, missing?: () => T, signal?: AbortSignal): Promise<T> {
     signal?.throwIfAborted();
     const controller = new AbortController();
@@ -310,6 +346,9 @@ export class ScreenClient {
       this.checkActive(controller.signal);
       if (response.status !== 200 || response.redirected) {
         this.cancelBody(response);
+        if (response.status === 404 && !response.redirected && path === "/pointer/calibration") {
+          throw new ScreenError("SCREEN_HTTP_ERROR", "请更新手机投屏 App，并在 App 内主动打开“指针校准”页；电脑不能代替打开。");
+        }
         if (response.status === 404 && !response.redirected && path === "/preview/profile") {
           if (missing) return missing();
           throw new ScreenError("SCREEN_HTTP_ERROR", "请先更新手机投屏 App，才能切换预览画质。");

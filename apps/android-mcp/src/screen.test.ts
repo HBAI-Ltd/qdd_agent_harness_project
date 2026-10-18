@@ -109,6 +109,51 @@ test("LAN capture needs no credentials, uses the explicit endpoint and binds the
   assert.equal(requests.length, 1);
 });
 
+const CALIBRATION_SESSION = "33333333-3333-4333-8333-333333333333";
+function pointerState(values: Record<string, unknown> = {}): Response {
+  return Response.json({ active: true, deviceId: DEVICE_A, sessionId: CALIBRATION_SESSION, width: 1080, height: 2400,
+    rotation: 0, point: { x: 345.25, y: 678.5, sequence: 4, ageMs: 10 }, ...values });
+}
+
+test("actual pointer calibration is a read-only LAN query bound to the exact phone UUID", async () => {
+  const { client, requests } = mockClient(() => pointerState());
+  const state = await client.getPointerCalibration(DEVICE_A);
+  assert.equal(state.active, true); assert.equal(state.sessionId, CALIBRATION_SESSION);
+  assert.equal(state.point?.x, 345.25); assert.equal(state.point?.sequence, 4); assert.ok(state.point!.ageMs >= 10);
+  assert.equal(requests[0]!.url, `${ENDPOINT}/pointer/calibration`);
+  assert.equal(requests[0]!.options?.method, "GET"); assert.equal(requests[0]!.options?.body, undefined);
+  assert.equal(requests[0]!.options?.cache, "no-store");
+  const other = mockClient(() => pointerState({ deviceId: DEVICE_B }));
+  await assert.rejects(other.client.getPointerCalibration(DEVICE_A), hasCode("SCREEN_DEVICE_MISMATCH"));
+  await Promise.all([client.close(), other.client.close()]);
+});
+
+test("actual pointer state accepts inactive initial geometry but rejects invalid and out-of-bounds samples", async () => {
+  const inactive = mockClient(() => pointerState({ active: false, sessionId: null, point: null, width: 0, height: 0 }));
+  assert.equal((await inactive.client.getPointerCalibration()).active, false); await inactive.client.close();
+  for (const values of [
+    { active: false }, { active: true, sessionId: null }, { sessionId: "invalid" }, { width: 0 }, { rotation: 4 },
+    { point: undefined }, { point: { x: 1080, y: 0, sequence: 1, ageMs: 0 } },
+    { point: { x: -1, y: 0, sequence: 1, ageMs: 0 } }, { point: { x: 0, y: 0, sequence: 0, ageMs: 0 } },
+    { point: { x: 0, y: 0, sequence: 1, ageMs: -1 } },
+  ]) {
+    const { client } = mockClient(() => pointerState(values));
+    await assert.rejects(client.getPointerCalibration(), hasCode("SCREEN_INVALID_HEALTH")); await client.close();
+  }
+});
+
+test("old APK cannot silently pretend to provide actual pointer calibration", async () => {
+  const { client } = mockClient(() => new Response("Missing", { status: 404 }));
+  await assert.rejects(client.getPointerCalibration(), /更新|校准/); await client.close();
+});
+
+test("actual pointer event freshness conservatively includes the complete query round trip", async () => {
+  const { client } = mockClient(async () => { await delay(35); return pointerState(); });
+  const state = await client.getPointerCalibration();
+  assert.ok(state.point!.ageMs >= 40, "Server event age plus delayed HTTP transit must remain visible to the calibration guard.");
+  await client.close();
+});
+
 test("real JPEG dimensions and MIME survive the LAN capture unchanged", async () => {
   assert.deepEqual(readJpegDimensions(JPEG_FIXTURE), { width: 2, height: 3 });
   const { client, requests } = mockClient(() => frame(new Uint8Array(JPEG_FIXTURE), {

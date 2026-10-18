@@ -36,7 +36,8 @@ public final class StreamTransportTest {
   private static final class Fixture implements AutoCloseable {
     final FrameStore frames = new FrameStore();
     final long owner = frames.begin();
-    final FrameServer server = new FrameServer(new ScreenApplication(frames), frames, "127.0.0.1", 0);
+    final ScreenApplication app = new ScreenApplication(frames);
+    final FrameServer server = new FrameServer(app, frames, "127.0.0.1", 0);
     final int port;
     Fixture() throws Exception {
       Field field = FrameServer.class.getDeclaredField("listener"); field.setAccessible(true);
@@ -441,6 +442,30 @@ public final class StreamTransportTest {
         check(html.contains("@keyframes sweep") && html.contains("投屏性能测试"), "Page supplies a visible moving test target");
         check(!html.contains("<script") && !html.contains("http:") && !html.contains("https:") && !html.contains("<form"), "Animation has no remote services or input hooks");
         check(page.headers.get("Content-Security-Policy").contains("default-src 'none'"), "Only inline diagnostic CSS is enabled");
+      }
+    });
+    test("pointer calibration is read-only and exposes only foreground actual event state", () -> {
+      try (Fixture fixture = new Fixture()) {
+        try (Client inactive = fixture.open("/pointer/calibration")) {
+          check(inactive.status == 200 && new String(inactive.body(), StandardCharsets.UTF_8).contains("\"active\":false"), "Initial page is inactive");
+        }
+        String session = fixture.app.pointerCalibration.begin(1080, 2400, 0);
+        check(fixture.app.pointerCalibration.record(session, 345.25, 678.5, SystemClock.elapsedRealtime()), "Actual event is accepted");
+        try (Client active = fixture.open("/pointer/calibration")) {
+          String body = new String(active.body(), StandardCharsets.UTF_8);
+          check(active.status == 200 && body.contains(session) && body.contains("\"x\":345.25") && body.contains("\"sequence\":1"), "Actual raw-pixel event reaches the client");
+          check("no-store".equals(active.headers.get("Cache-Control")), "Measurement is not cached");
+        }
+        fixture.app.pointerCalibration.end(session);
+        try (Client closed = fixture.open("/pointer/calibration")) {
+          check(new String(closed.body(), StandardCharsets.UTF_8).contains("\"point\":null"), "Background page cannot expose a valid point");
+        }
+        try (Client mutation = new Client(fixture.port, "/pointer/calibration", "127.0.0.1:" + fixture.port, null, "POST", new byte[0], "Content-Length: 0\r\n")) {
+          check(mutation.status == 405, "No remote page opening or mouse input route exists");
+        }
+        try (Client hostile = new Client(fixture.port, "/pointer/calibration", "attacker.example", null)) {
+          check(hostile.status == 403, "Host must stay local");
+        }
       }
     });
     System.out.println("Stream socket tests: " + checks + " passed; no phone/ADB/BLE access.");

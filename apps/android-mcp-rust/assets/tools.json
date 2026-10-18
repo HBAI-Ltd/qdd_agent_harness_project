@@ -1,0 +1,698 @@
+[
+  {
+    "name": "android_devices",
+    "description": "Read the configured LAN screen-sharing App's device identity and list available ESP32 serial ports. Does not open a serial port or scan the network.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "android_screenshot",
+    "description": "Read a fresh original-resolution JPEG from the installed device screen-sharing App at its configured LAN address. Returns an MCP image and this session's frameId. The phone must have granted screen-sharing permission.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "deviceSerial": {
+          "type": "string",
+          "description": "Exact screen App device UUID; when provided it must match the configured endpoint's phone."
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "android_preview_tap",
+    "description": "Preview a proposed tap without moving or clicking the real mouse. Returns a fresh original-resolution phone image with a clearly labeled SIMULATED TARGET marker and a 2x local zoom. Verify the intended UI target visually before using returned tapArguments. No ARM or calibration is needed. This checks the coordinate choice, not physical mouse calibration; use android_control hover to inspect the real cursor before click if needed.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "frameId": {
+          "type": "string",
+          "description": "frameId from this MCP session's latest android_screenshot, android_preview_tap, android_control or calibration probe result of this exact phone, less than 30 seconds old."
+        },
+        "x": {
+          "type": "integer",
+          "description": "X coordinate"
+        },
+        "y": {
+          "type": "integer",
+          "description": "Y coordinate"
+        },
+        "coordinateSpace": {
+          "type": "string",
+          "enum": [
+            "pixels",
+            "normalized1000"
+          ],
+          "default": "pixels"
+        }
+      },
+      "required": [
+        "frameId",
+        "x",
+        "y"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "android_control",
+    "description": "Preferred observe-act-observe tool: use this session's screenshot frameId, send one ESP32 BLE action, and return a new phone image captured after the action completed. Prepares input automatically; the physical emergency stop always wins. move/click/scroll/key/type/home/back need no pointer calibration. Preview target selection with android_preview_tap; hover moves the calibrated mouse without pressing, then click only after inspecting its actual cursor. tap/hover/swipe retain explicit measured calibration and estimated coordinates. Never repeat an action just because its resulting image timed out.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": [
+            "move",
+            "click",
+            "scroll",
+            "key",
+            "type",
+            "home",
+            "back",
+            "tap",
+            "hover",
+            "swipe",
+            "wait"
+          ]
+        },
+        "frameId": {
+          "type": "string",
+          "description": "frameId from this MCP session's latest android_screenshot, android_preview_tap, android_control or calibration probe result of this exact phone, less than 30 seconds old."
+        },
+        "dx": {
+          "type": "integer",
+          "description": "Relative horizontal HID counts for move"
+        },
+        "dy": {
+          "type": "integer",
+          "description": "Relative vertical HID counts for move"
+        },
+        "button": {
+          "type": "string",
+          "enum": [
+            "left",
+            "right",
+            "middle"
+          ]
+        },
+        "count": {
+          "type": "integer",
+          "description": "Click count, default 1",
+          "minimum": 1,
+          "maximum": 2
+        },
+        "amount": {
+          "type": "integer",
+          "description": "Signed wheel counts for scroll"
+        },
+        "combo": {
+          "type": "string",
+          "description": "Keyboard key/chord for key"
+        },
+        "text": {
+          "type": "string",
+          "description": "ASCII uses HID. Non-ASCII uses the selected QDD phone IME over encrypted ESP BLE, at most 512 UTF-8 bytes, never NUL. Focus the field first. Uncertain delivery must not be resubmitted blindly."
+        },
+        "x": {
+          "type": "integer",
+          "description": "Estimated screenshot X for tap or hover"
+        },
+        "y": {
+          "type": "integer",
+          "description": "Estimated screenshot Y for tap or hover"
+        },
+        "x1": {
+          "type": "integer",
+          "description": "Swipe start X"
+        },
+        "y1": {
+          "type": "integer",
+          "description": "Swipe start Y"
+        },
+        "x2": {
+          "type": "integer",
+          "description": "Swipe end X"
+        },
+        "y2": {
+          "type": "integer",
+          "description": "Swipe end Y"
+        },
+        "coordinateSpace": {
+          "type": "string",
+          "enum": [
+            "pixels",
+            "normalized1000"
+          ],
+          "default": "pixels"
+        },
+        "durationMs": {
+          "type": "integer",
+          "description": "Minimum swipe duration, default 400 ms",
+          "minimum": 50,
+          "maximum": 10000
+        },
+        "waitMs": {
+          "type": "integer",
+          "description": "Wait before observing, only for wait; default 200 ms",
+          "minimum": 0,
+          "maximum": 3000
+        }
+      },
+      "required": [
+        "action",
+        "frameId"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "android_hid_status",
+    "description": "Read BLE connection, authentication, physical stop lock, armed state and pointer calibration from the ESP32 bridge.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "android_hid_arm",
+    "description": "Explicitly arm authenticated BLE keyboard/mouse input. A physical stop lock must first be cleared on the device controller: select Cancel emergency stop and confirm there. The computer cannot unlock it.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "android_hid_pause",
+    "description": "Immediately cancel queued computer input, release all held keys/buttons and disarm. Does not clear the physical stop lock.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "android_release",
+    "description": "Cancel queued input and release all held keyboard keys, mouse buttons and consumer keys.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "android_pointer_calibration",
+    "description": "Pointer calibration using actual mouse events or visible captured cursor centers. Prefer auto after the user opens Pointer calibration in the phone screen App: it reads fresh actual mouse coordinates from that page and computes both scales with two movements and no click, even when screenshots omit the system cursor. It cannot open the page. probe returns BEFORE/AFTER images; identical images are not measurable and receive no finish ticket. finish uses observed real cursor centers without moving again. No input may intervene. Android acceleration still makes later coordinates estimates.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "phase": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "probe",
+            "finish"
+          ]
+        },
+        "frameId": {
+          "type": "string",
+          "description": "frameId from this MCP session's latest android_screenshot, android_preview_tap, android_control or calibration probe result of this exact phone, less than 30 seconds old."
+        },
+        "direction": {
+          "type": "string",
+          "enum": [
+            "up-left",
+            "up-right",
+            "down-left",
+            "down-right"
+          ],
+          "default": "up-left"
+        },
+        "counts": {
+          "type": "integer",
+          "description": "Probe HID counts on each axis, default 96",
+          "minimum": 16,
+          "maximum": 127
+        },
+        "probeId": {
+          "type": "string",
+          "description": "This session's pending calibration probeId"
+        },
+        "startX": {
+          "type": "integer",
+          "description": "Cursor center X in the BEFORE image"
+        },
+        "startY": {
+          "type": "integer",
+          "description": "Cursor center Y in the BEFORE image"
+        },
+        "endX": {
+          "type": "integer",
+          "description": "Cursor center X in the AFTER image"
+        },
+        "endY": {
+          "type": "integer",
+          "description": "Cursor center Y in the AFTER image"
+        }
+      },
+      "required": [
+        "phase",
+        "frameId"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "android_calibrate_pointer",
+    "description": "Set measured HID counts per screenshot pixel. This does not infer mouse acceleration or prove accuracy. Recalibrate after any phone rotation, pointer speed or keyboard/mouse setting change.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "frameId": {
+          "type": "string",
+          "description": "frameId from this MCP session's latest android_screenshot, android_preview_tap, android_control or calibration probe result of this exact phone, less than 30 seconds old."
+        },
+        "scaleX": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Horizontal HID counts per screenshot pixel."
+        },
+        "scaleY": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Vertical HID counts per screenshot pixel."
+        },
+        "rotation": {
+          "type": "integer",
+          "description": "Operator-reported display rotation, 0, 1, 2 or 3. A change invalidates old calibration.",
+          "minimum": 0,
+          "maximum": 3
+        }
+      },
+      "required": [
+        "frameId",
+        "scaleX",
+        "scaleY"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "android_pointer_home",
+    "description": "Move the calibrated relative mouse into the top-left corner and reset its estimated position. Requires explicit calibration and armed HID.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "frameId": {
+          "type": "string",
+          "description": "frameId from this MCP session's latest android_screenshot, android_preview_tap, android_control or calibration probe result of this exact phone, less than 30 seconds old."
+        }
+      },
+      "required": [
+        "frameId"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "android_mouse_move",
+    "description": "Move the real BLE mouse by relative HID counts. No calibration required. buttons is a held-button bit mask (left=1,right=2,middle=4); always release after a drag.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "dx": {
+          "type": "integer",
+          "description": "Relative horizontal HID counts"
+        },
+        "dy": {
+          "type": "integer",
+          "description": "Relative vertical HID counts"
+        },
+        "wheel": {
+          "type": "integer",
+          "description": "Relative wheel counts, default 0"
+        },
+        "buttons": {
+          "type": "integer",
+          "description": "Held button bit mask, default 0",
+          "minimum": 0,
+          "maximum": 7
+        }
+      },
+      "required": [
+        "dx",
+        "dy"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "android_mouse_click",
+    "description": "Click at the mouse's current physical position. Does not move or assume a calibrated location.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "button": {
+          "type": "string",
+          "enum": [
+            "left",
+            "right",
+            "middle"
+          ],
+          "default": "left"
+        },
+        "count": {
+          "type": "integer",
+          "description": "One click or double-click",
+          "minimum": 1,
+          "maximum": 2
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "android_tap",
+    "description": "Move the calibrated BLE mouse to an estimated screenshot coordinate and click. Uses hardware HID, not ADB input. Accuracy requires real-phone calibration.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "frameId": {
+          "type": "string",
+          "description": "frameId from this MCP session's latest android_screenshot, android_preview_tap, android_control or calibration probe result of this exact phone, less than 30 seconds old."
+        },
+        "x": {
+          "type": "integer",
+          "description": "X coordinate"
+        },
+        "y": {
+          "type": "integer",
+          "description": "Y coordinate"
+        },
+        "coordinateSpace": {
+          "type": "string",
+          "enum": [
+            "pixels",
+            "normalized1000"
+          ],
+          "default": "pixels"
+        }
+      },
+      "required": [
+        "frameId",
+        "x",
+        "y"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "android_swipe",
+    "description": "Drag the calibrated BLE mouse between two screenshot coordinates, then release. The phone must support mouse drag for the target UI.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "frameId": {
+          "type": "string",
+          "description": "frameId from this MCP session's latest android_screenshot, android_preview_tap, android_control or calibration probe result of this exact phone, less than 30 seconds old."
+        },
+        "x1": {
+          "type": "integer",
+          "description": "Start X"
+        },
+        "y1": {
+          "type": "integer",
+          "description": "Start Y"
+        },
+        "x2": {
+          "type": "integer",
+          "description": "End X"
+        },
+        "y2": {
+          "type": "integer",
+          "description": "End Y"
+        },
+        "durationMs": {
+          "type": "integer",
+          "description": "Minimum drag duration, default 400 ms. Report pacing may extend it; result includes plannedDurationMs.",
+          "minimum": 50,
+          "maximum": 10000
+        },
+        "coordinateSpace": {
+          "type": "string",
+          "enum": [
+            "pixels",
+            "normalized1000"
+          ],
+          "default": "pixels"
+        }
+      },
+      "required": [
+        "frameId",
+        "x1",
+        "y1",
+        "x2",
+        "y2"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "android_scroll",
+    "description": "Send hardware mouse wheel reports. The target device app determines how scrolling is handled.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "amount": {
+          "type": "integer",
+          "description": "Signed wheel counts"
+        }
+      },
+      "required": [
+        "amount"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "android_type",
+    "description": "Type into the focused field once. ASCII uses short HID key pulses whose neutral release does not wait for the press ACK. Text containing non-ASCII uses the updated ESP encrypted BLE text channel and selected QDD phone IME (maximum 512 UTF-8 bytes, no NUL). It sends COMMIT once, then only polls status until the phone accepts or rejects it. Queued is not success; cancellation or timeout after COMMIT is uncertain and must not be blindly resubmitted. Accepted means InputConnection API accepted, requiring screenshot verification. Missing firmware/IME fails clearly without typing pinyin as Chinese.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "string",
+          "description": "ASCII text/tabs/newlines, or non-ASCII UTF-8 up to 512 bytes via the selected QDD IME. NUL is forbidden."
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "android_key",
+    "description": "Press and release a keyboard key or chord, e.g. enter, escape, ctrl+a, shift+tab, meta+h.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "combo": {
+          "type": "string",
+          "description": "Keyboard key/chord"
+        }
+      },
+      "required": [
+        "combo"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "android_key_report",
+    "description": "Send a raw standard keyboard report. keycode=0 releases the keyboard; release after a held report.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "modifier": {
+          "type": "integer",
+          "description": "USB HID modifier mask",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "keycode": {
+          "type": "integer",
+          "description": "USB HID keyboard usage",
+          "minimum": 0,
+          "maximum": 255
+        }
+      },
+      "required": [
+        "modifier",
+        "keycode"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "android_consumer_report",
+    "description": "Send a raw 16-bit consumer HID usage; usage=0 releases it. OEM mappings may differ.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "usage": {
+          "type": "integer",
+          "description": "Consumer usage",
+          "minimum": 0,
+          "maximum": 65535
+        }
+      },
+      "required": [
+        "usage"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "android_home",
+    "description": "Press and release the hardware consumer Home usage. Phone/OEM mapping requires device verification.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "android_back",
+    "description": "Press and release the hardware consumer Back usage. Phone/OEM mapping requires device verification.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  }
+]

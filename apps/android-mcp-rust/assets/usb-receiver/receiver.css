@@ -1,0 +1,37 @@
+:root { color-scheme: light dark; font-family: system-ui, "Microsoft YaHei", sans-serif; color: #e8edf5; background: #111821; }
+* { box-sizing: border-box; }
+body { margin: 0; padding: 44px 18px; }
+main { max-width: 620px; margin: auto; }
+header { margin-bottom: 28px; }
+.eyebrow { color: #88b9ff; font-size: 13px; letter-spacing: .1em; }
+h1 { font-size: clamp(28px, 5vw, 38px); margin: 12px 0; }
+h2 { font-size: 21px; margin: 0 0 16px; }
+p { line-height: 1.65; }
+header p, .muted, footer { color: #aebccd; }
+section { background: #192330; border: 1px solid #344458; border-radius: 16px; padding: 22px 26px; margin: 18px 0; }
+.steps { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; color: #aebccd; font-size: 13px; }
+#step-label { color: #a8cfff; font-weight: 600; }
+#home { color: #a8cfff; text-underline-offset: 4px; }
+ol { padding-left: 22px; margin: 0; }
+li { line-height: 1.8; margin: 7px 0; }
+.muted { font-size: 13px; margin: 14px 0 0; }
+.environment { margin-top: 0; font-size: 14px; color: #a8cfff; }
+.actions { display: flex; flex-wrap: wrap; gap: 12px; }
+.navigation { display: flex; justify-content: space-between; gap: 12px; margin-top: 24px; padding-top: 20px; border-top: 1px solid #344458; }
+details { color: #aebccd; font-size: 13px; }
+summary { cursor: pointer; }
+button { border: 1px solid transparent; border-radius: 9px; padding: 12px 18px; font: inherit; font-weight: 600; background: #83b7ff; color: #10243f; cursor: pointer; }
+button.secondary { background: transparent; border-color: #60748c; color: #dbe6f5; }
+button:disabled { opacity: .45; cursor: default; }
+button:focus-visible { outline: 3px solid #f9c16e; outline-offset: 4px; }
+.offline-download { display: inline-block; padding: 10px 16px; margin: 0 12px 10px 0; background: #f9c16e; border-radius: 9px; color: #24200f; font-weight: 600; text-decoration: none; }
+.offline-download:focus-visible { outline: 3px solid #83b7ff; outline-offset: 4px; }
+[hidden] { display: none !important; }
+#status { min-height: 28px; margin-bottom: 14px; overflow-wrap: anywhere; }
+progress { display: block; width: 100%; height: 14px; margin-top: 20px; accent-color: #82b7ff; }
+.metrics { display: flex; justify-content: space-between; gap: 12px; margin-top: 10px; font-size: 13px; color: #b8c8db; font-variant-numeric: tabular-nums; }
+.verification { color: #9ed9b9; font-size: 14px; }
+.hash { font: 12px/1.6 ui-monospace, Consolas, monospace; overflow-wrap: anywhere; color: #aebccd; }
+footer { font-size: 12px; line-height: 1.7; padding: 0 5px; }
+#step-3 ol { margin-top: 20px; }
+@media (max-width: 480px) { body { padding-top: 24px; } section { padding: 18px; } .actions button { width: 100%; } }

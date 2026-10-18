@@ -4,7 +4,7 @@ import { formatDate } from "../datasource/store.js";
 import { IMAGE_ANALYSIS_PROMPT, toolImageMessage, toolImages } from "../tool-images.js";
 import { assertCompleteResponse, parseToolArguments, type ChatFn, type ChatMessage, type LlmTool } from "./llm.js";
 
-const MAX_STEPS = 10;
+const MAX_STEPS = 100;
 const RESULT_LIMIT = 12_000;
 
 /** 页面运行时调用的 agent：只能用只读数据工具，不能写文件或执行写入操作。 */

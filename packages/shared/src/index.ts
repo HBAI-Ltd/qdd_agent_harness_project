@@ -9,6 +9,8 @@ export type JsonObject = { [key: string]: unknown };
 /** 数据源工具的统一描述（内置 tools 与 MCP 工具共用）。 */
 export interface ToolSpec {
   name: string;
+  /** 后端提供的易读展示名称，name 仍为调用标识。 */
+  title?: string;
   description: string;
   inputSchema: JsonObject;
 }
@@ -70,7 +72,6 @@ export interface HarnessConfig {
     baseUrl: string;
     model: string;
     apiKeyEnv: string;
-    maxSteps: number;
     /** 单次回复的最大输出 token（长页面文件需要较大值） */
     maxTokens: number;
     /** required：新许愿写页面前必须先 clarify；auto：由模型判断；off：不提问 */
@@ -285,6 +286,8 @@ type At = { at: string };
 export interface AgentToolCall {
   id: string;
   name: string;
+  /** 后端配置的展示名称；旧会话可能没有。 */
+  title?: string;
   args?: JsonObject;
   status: "running" | "success" | "error";
   /** 工具执行时的进度说明（如「查询 xx」「写入 xx」） */

@@ -38,6 +38,7 @@ export async function handleMcp(sources: DataSources, raw: unknown): Promise<Jso
       return ok({
         tools: tools.map((t) => ({
           name: t.name.replace(/^store__/, ""),
+          ...(t.title ? { title: t.title } : {}),
           description: t.description,
           inputSchema: t.inputSchema,
           annotations: { readOnlyHint: true },

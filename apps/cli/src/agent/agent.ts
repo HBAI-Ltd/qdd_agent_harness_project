@@ -15,6 +15,7 @@ import type {
   SessionMeta,
 } from "@qdd/shared";
 import { attachmentPrompt, type AttachmentStore } from "../attachments.js";
+import { toolDisplayTitle } from "../tool-titles.js";
 import type { LoadedConfig } from "../config.js";
 import type { Authorizer, DataSources, DataTool } from "../datasource/registry.js";
 import { RECORDS_METRIC, updateMetrics } from "../datasets/metrics.js";
@@ -41,6 +42,12 @@ export class WishError extends Error {
 }
 
 const LANG_REMINDER = "\n\n（请始终用简体中文回复和提问。）";
+const COMPLETION_REMINDER = "【harness 系统提醒，不是店长的新消息】上一条普通正文没有结束本轮。若原始请求已完成、被拒绝或暂时无法继续，下一步调用 reply 报告实际结果并结束；需要发布页面时调用 finish。仅在原始请求确有未完成的必要步骤时继续执行，不要重复正文、追加任务、轮询等待或再次要求店长选择。";
+const EXPLORATION_REMINDER = "【harness 系统提醒，不是店长的新消息】连续多步查询被拦截或报错，数据探索已暂停。基于已有结果完成原始请求：直接回答或说明缺口用 reply；需要页面时按当前提问策略对齐，再 snapshot_data、write_file、finish。不得把此提醒当作店长的新需求或授权。请用简体中文。";
+const LEGACY_HARNESS_REMINDERS = new Set([
+  "请按本轮意图继续：直接回答或任务结果用 reply 结束；需要生成或修改页面时继续使用工具，完成后调用 finish。",
+  "（harness 提示）你已连续多步重复或写错查询，数据探索已暂停。请按本轮意图基于已有结果完成：直接回答或说明缺口用 reply；需要页面时按当前提问策略对齐，再 snapshot_data、write_file、finish。请用简体中文。",
+]);
 const MAX_VERIFY_REJECTIONS = 2;
 /** 连续这么多步的工具调用全部被拦截/报错，就暂停数据探索（熔断） */
 const BREAKER_STEPS = 3;
@@ -360,7 +367,7 @@ const WORKBENCH_TOOLS: LlmTool[] = [
     type: "function",
     function: {
       name: "send_notification",
-      description: "通过已接入的消息连接器（如飞书）给店长推送一条文本消息。按连接器权限可能需要店长确认。内容要简短，结论数字必须来自工具结果。",
+      description: "通过已接入的消息连接器（如飞书）给店长推送一条文本消息。按连接器权限可能需要店长确认。内容要简短，结论数字必须来自工具结果。定时任务已设置 notify 时由调度器发送结果，不要再调用本工具重复推送。",
       parameters: object(
         {
           connectorId: { type: "string", description: "连接器 id；只有一个可推送的连接器时可省略" },
@@ -409,15 +416,15 @@ const SCHEDULE_TOOLS: LlmTool[] = [
     function: {
       name: "create_schedule",
       description:
-        "创建定时任务（需店长确认）：到点由网关无人值守地执行 prompt，可绑定技能、在本页面上刷新、把结论推送到连接器。店长要求「每天/每周/到点自动…」时使用。",
+        "创建定时任务（需店长确认）：到点由网关无人值守地执行 prompt，可绑定技能、在本页面上刷新、把结论推送到连接器。店长要求「每分钟/每天/每周/到点自动…」时使用。提交前确定唯一推送路径，完成明确要求的步骤后用 reply 或 finish 收尾，不为调整自身方案再追加编辑；被拒后等待店长新指示，不改用 edit_schedules 修改旧任务。",
       parameters: object(
         {
           name: { type: "string", description: "≤30 字，如「每日临期提醒」" },
           cron: { type: "string", description: "5 段 cron（分 时 日 月 周），如每天 9 点为 0 9 * * *，每天 22:30 为 30 22 * * *" },
-          prompt: { type: "string", description: "每次执行交给 agent 的完整任务描述，必须能脱离本次对话独立执行" },
+          prompt: { type: "string", description: "每次执行交给 agent 的完整任务描述，必须能脱离本次对话独立执行；设置 notify 时只生成结果，不再调用 send_notification" },
           skill: { type: "string", description: "绑定的技能名称或 id（可选）" },
           bindPage: { type: "boolean", description: "每次执行在本会话的页面上刷新（新页面在 finish 发布后自动绑定）" },
-          notify: { type: "string", description: "执行后推送到的连接器 id；只有一个可推送连接器时可填 auto" },
+          notify: { type: "string", description: "每轮执行后由调度器推送结果摘要（包括失败信息）的连接器 id；只有一个可推送连接器时可填 auto。与 prompt/技能中的 send_notification 二选一；条件推送或自定义完整正文时省略本字段" },
         },
         ["name", "cron", "prompt"],
       ),
@@ -428,17 +435,17 @@ const SCHEDULE_TOOLS: LlmTool[] = [
     function: {
       name: "edit_schedules",
       description:
-        "编辑一个已有定时任务（需店长确认）。先用 list_schedules 获取 id 和当前配置；只传要修改的字段，其他配置保持不变。可调整时间、内容、绑定及启停，不会创建新任务，也不会取消正在执行的任务。",
+        "店长明确要求修改或复用已有任务，或工具结果证实本轮配置有误需要纠正时，编辑一个定时任务（需店长确认）。先用 list_schedules 获取真实 id 和当前配置，不可用名称代替 id；只传要修改的字段。不得用来绕过创建被拒，也不因发现相似或停用任务就擅自修改。修改不会取消正在执行的任务。",
       parameters: object(
         {
           id: { type: "string", description: "list_schedules 返回的任务 id" },
           name: { type: "string", description: "任务名称，≤30 字" },
           cron: { type: "string", description: "5 段 cron（分 时 日 月 周），网关所在时区" },
-          prompt: { type: "string", description: "可脱离本次对话独立执行的完整任务描述" },
+          prompt: { type: "string", description: "可脱离本次对话独立执行的完整任务描述；保留 notify 时不得同时调用 send_notification" },
           enabled: { type: "boolean", description: "true 启用，false 停用后续定时执行" },
           skill: { type: ["string", "null"], description: "技能名称或 id；null 解除技能绑定" },
           slug: { type: ["string", "null"], description: "已有页面的 slug；null 解除页面绑定" },
-          notify: { type: ["string", "null"], description: "推送连接器 id，只有一个可推送连接器时可填 auto；null 取消推送" },
+          notify: { type: ["string", "null"], description: "每轮推送结果摘要（包括失败信息）的连接器 id，只有一个时可填 auto；null 取消调度器推送。与 prompt/技能中的 send_notification 二选一，改为条件推送或自定义完整正文时需同时传 null" },
         },
         ["id"],
       ),
@@ -489,15 +496,20 @@ export async function runWish(
     ...hooks,
     ...(scheduled ? { authorize: async () => true, clarify: undefined } : {}),
     onEvent: (event) => {
+      if (event.kind === "tool_call") return emit({ ...event, tool: { ...event.tool, title: toolDisplayTitle(event.tool.name, "", sources.get(event.tool.name)?.title) } });
       if (event.kind !== "tool") return emit(event);
       const block = activeTool ?? { blockId: randomUUID().slice(0, 8), tool: { id: randomUUID(), name: "progress", status: "success" } };
-      block.tool = { ...block.tool, progress: event.text };
+      block.tool = { ...block.tool, title: toolDisplayTitle(block.tool.name, "", sources.get(block.tool.name)?.title), progress: event.text };
       emit({ kind: "tool_call", blockId: block.blockId, tool: block.tool });
     },
   };
   let pages = await readPages(paths);
   let updating = request.slug ? pages.find((p) => p.slug === request.slug) : undefined;
-  const history = request.history ?? [];
+  // Older sessions persisted these exact runtime reminders as user turns.
+  const history = (request.history ?? []).filter((message) =>
+    message.role !== "system"
+    && !(message.role === "user" && !message.images?.length && LEGACY_HARNESS_REMINDERS.has(message.content ?? "")),
+  );
   if (request.slug && (!updating || !SLUG_RE.test(request.slug))) throw new Error(`页面 ${request.slug} 不存在`);
   let slug = updating?.slug ?? newSlug();
   while (
@@ -600,7 +612,7 @@ export async function runWish(
     ...history,
     { role: "user", content: wish + LANG_REMINDER, ...(attachmentImages.length ? { images: attachmentImages } : {}) },
   ];
-  const conversation = () => messages.slice(1);
+  const conversation = () => messages.filter((message) => message.role !== "system");
 
   async function snapshot(args: JsonObject): Promise<string> {
     // 名称自动规范化（大写转小写、非法字符替换），不再因格式报错
@@ -1222,7 +1234,7 @@ export async function runWish(
 
   async function loop(): Promise<WishResult> {
     let idle = 0;
-    for (let step = 0; step < config.llm.maxSteps; step++) {
+    while (true) {
       hooks.signal?.throwIfAborted();
       // 熔断后不再向模型提供探索类数据工具（snapshot_data 仍可取数）
       const activeTools = explorationPaused ? tools.filter((t) => !sources.get(t.function.name)) : tools;
@@ -1254,8 +1266,8 @@ export async function runWish(
 
       if (!reply.tool_calls?.length) {
         assertCompleteResponse(reply);
-        if (++idle > 2) throw new WishError("agent 未调用 reply 或 finish 就停止了", conversation());
-        messages.push({ role: "user", content: "请按本轮意图继续：直接回答或任务结果用 reply 结束；需要生成或修改页面时继续使用工具，完成后调用 finish。" });
+        if (++idle > 2) throw new WishError("模型连续 3 轮未返回工具调用，本轮未完成。请确认模型服务支持工具调用，或切换模型后在本会话回复「继续」。", conversation());
+        messages.push({ role: "system", content: COMPLETION_REMINDER });
         continue;
       }
       idle = 0;
@@ -1307,9 +1319,8 @@ export async function runWish(
         explorationPaused = true;
         hooks.onEvent({ kind: "warn", text: `连续 ${BREAKER_STEPS} 步查询全部被拦截或报错，已暂停数据探索` });
         messages.push({
-          role: "user",
-          content:
-            "（harness 提示）你已连续多步重复或写错查询，数据探索已暂停。请按本轮意图基于已有结果完成：直接回答或说明缺口用 reply；需要页面时按当前提问策略对齐，再 snapshot_data、write_file、finish。请用简体中文。",
+          role: "system",
+          content: EXPLORATION_REMINDER,
         });
       }
       if (done) {
@@ -1317,6 +1328,5 @@ export async function runWish(
         return { ...done, messages: conversation() };
       }
     }
-    throw new WishError(`超过最大步数 ${config.llm.maxSteps}，本轮未完成（可在本会话回复「继续」接着做）`, conversation());
   }
 }

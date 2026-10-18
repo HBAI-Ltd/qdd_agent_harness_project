@@ -23,7 +23,7 @@
 .sidebar { display: flex; flex-direction: column; border-right: 1px solid var(--qdd-border); }
 .brand-row { display: flex; align-items: center; justify-content: space-between; }
 .brand { display: flex; align-items: center; text-decoration: none; color: var(--qdd-text); line-height: 1.2; }
-.brand-mark { display: grid; place-items: center; flex-shrink: 0; background: var(--qdd-primary); color: var(--qdd-on-primary); }
+.brand-mark { display: block; flex-shrink: 0; background: #fff; }
 .brand-caption { display: block; color: var(--qdd-muted); }
 .profile { display: flex; align-items: center; border-top: 1px solid var(--qdd-border) !important; }
 .profile strong, .profile-description > span { display: block; }

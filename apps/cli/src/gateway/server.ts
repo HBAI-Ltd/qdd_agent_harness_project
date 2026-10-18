@@ -342,7 +342,7 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
       return;
     }
     if (p === "/api/tools" && m === "GET") {
-      const list: ToolInfo[] = sources.tools.map(({ name, description, inputSchema, source, mutating }) => ({ name, description, inputSchema, source, mutating }));
+      const list: ToolInfo[] = sources.tools.map(({ name, title, description, inputSchema, source, mutating }) => ({ name, ...(title ? { title } : {}), description, inputSchema, source, mutating }));
       return json(res, 200, list);
     }
     if (p === "/api/pages" && m === "GET") {

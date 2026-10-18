@@ -93,7 +93,63 @@ async function setup(t: TestContext) {
     });
     return { output, approvals };
   }
-  return { loaded, scheduler, original, skill, connector, invoke };
+  return { loaded, sources, workbench, scheduler, original, skill, connector, invoke };
+}
+
+for (const automaticNotify of [true, false]) {
+  test(`a schedule can be created and completed with one delivery path (automatic: ${automaticNotify})`, async (t) => {
+    const { loaded, sources, workbench, scheduler, original, connector } = await setup(t);
+    const prompt = automaticNotify
+      ? "检查监控画面，用 reply 输出实况摘要，由调度器推送，不调用 send_notification。"
+      : `检查监控画面，仅发现异常时用 send_notification 向 ${connector.id} 推送完整通知；用 reply 说明执行结果。`;
+    let step = 0;
+    let approvals = 0;
+    t.mock.method(workbench.connectors, "send", async () => {
+      assert.fail("Creating a schedule must not send an unrequested test notification");
+    });
+    const result = await runWish(loaded, sources, async (messages, tools) => {
+      if (step++ === 0) {
+        const create = tools.find((tool) => tool.function.name === "create_schedule")!.function;
+        const edit = tools.find((tool) => tool.function.name === "edit_schedules")!.function;
+        const notify = tools.find((tool) => tool.function.name === "send_notification")!.function;
+        assert.match(create.description, /唯一推送路径/);
+        assert.match(create.description, /不改用 edit_schedules 修改旧任务/);
+        assert.match(JSON.stringify(create.parameters), /send_notification 二选一/);
+        assert.match(edit.description, /不可用名称代替 id/);
+        assert.match(edit.description, /不得用来绕过创建被拒/);
+        assert.match(JSON.stringify(edit.parameters), /需同时传 null/);
+        assert.match(notify.description, /不要再调用本工具重复推送/);
+        return call("create_schedule", {
+          name: "监控通知", cron: "* * * * *", prompt,
+          ...(automaticNotify ? { notify: connector.id } : {}),
+        });
+      }
+      assert.equal(step, 2, "Creation should be followed by the final reply");
+      assert.match(messages.at(-1)!.content!, /已创建定时任务/);
+      return call("reply", { text: "监控通知任务已创建。" });
+    }, { wish: "创建监控通知任务", sessionId: randomUUID(), workbench }, {
+      onEvent: () => {},
+      clarify: async () => null,
+      authorize: async (tool) => {
+        assert.equal(tool.name, "create_schedule");
+        approvals++;
+        return true;
+      },
+    });
+    const schedules = await scheduler.list();
+    assert.equal(schedules.length, 2);
+    assert.deepEqual(await scheduler.get(original.id), original, "Existing tasks must remain unchanged");
+    const created = schedules.find((schedule) => schedule.id !== original.id)!;
+    assert.equal(created.prompt, prompt);
+    assert.equal(created.cron, "* * * * *");
+    assert.equal(created.enabled, true);
+    assert.deepEqual(created.notify, automaticNotify ? { connectorId: connector.id } : undefined);
+    assert.equal(approvals, 1);
+    assert.deepEqual(
+      result.messages.flatMap((message) => message.tool_calls?.map((tool) => tool.function.name) ?? []),
+      ["create_schedule", "reply"],
+    );
+  });
 }
 
 test("edit_schedules persists only approved fields and preserves identity, bindings and history", async (t) => {

@@ -31,7 +31,12 @@ export type ChatDelta =
   | { type: "thinking" | "text"; index: number; delta: string }
   | { type: "tool"; index: number; id: string; name: string };
 
-export type ChatFn = (messages: ChatMessage[], tools: LlmTool[], signal?: AbortSignal, onDelta?: (delta: ChatDelta) => void) => Promise<ChatMessage>;
+export type ChatFn = (
+  messages: ChatMessage[],
+  tools: LlmTool[],
+  signal?: AbortSignal,
+  onDelta?: (delta: ChatDelta) => void,
+) => Promise<ChatMessage>;
 
 interface StreamChunk {
   choices?: {

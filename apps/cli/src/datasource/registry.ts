@@ -7,6 +7,7 @@ import { JsonlDatasetStore, type DatasetStore } from "../datasets/store.js";
 import { loadInstalledMcpServers } from "../workbench/local-mcp.js";
 import { createStoreTools } from "./builtin.js";
 import { McpClient } from "./mcp-client.js";
+import { toolDisplayTitle } from "../tool-titles.js";
 import { loadStoreData, type StoreData } from "./store.js";
 
 export interface DataTool extends ToolSpec {
@@ -60,6 +61,7 @@ export class DataSources {
     const metrics = () => loadMetrics(paths);
     const tools: DataTool[] = createStoreTools({ load, store: datasets, metrics }).map((t) => ({
       name: `store__${t.name}`,
+      title: toolDisplayTitle(t.name, t.description, t.title),
       description: t.description,
       inputSchema: t.inputSchema,
       source: "store",
@@ -98,6 +100,7 @@ export class DataSources {
               const emergencyStop = CAMERA_EMERGENCY_STOPS.get(name) === t.name && t.annotations?.destructiveHint === false;
               tools.push({
                 name: `mcp__${sanitize(name)}__${sanitize(t.name)}`.slice(0, 64),
+                title: toolDisplayTitle(t.name, t.description, t.title ?? t.annotations?.title, name),
                 description: `[MCP ${name}] ${t.description ?? ""}`,
                 inputSchema: t.inputSchema ?? { type: "object", properties: {} },
                 source: `mcp:${name}`,

@@ -35,12 +35,12 @@ target_add_binary_data(${COMPONENT_LIB} "${CMAKE_CURRENT_BINARY_DIR}/qdd_remote.
 
 # Factory-only boards have no assets partition. Keep the exact verified ZIP in
 # read-only application Flash; existing assets partitions remain authoritative.
-set(qdd_desktop_dir "${CMAKE_CURRENT_LIST_DIR}/../../android-mcp-rust/build/windows/v60")
+set(qdd_desktop_dir "${CMAKE_CURRENT_LIST_DIR}/../../android-mcp-rust/build/windows/v61")
 set(qdd_desktop_manifest "${qdd_desktop_dir}/manifest.json")
 set(qdd_desktop_archive "${qdd_desktop_dir}/设备操作台.zip")
 set(qdd_desktop_prepare "${CMAKE_CURRENT_LIST_DIR}/../tools/prepare_desktop_zip.py")
 if(NOT EXISTS "${qdd_desktop_manifest}" OR NOT EXISTS "${qdd_desktop_archive}")
-    message(FATAL_ERROR "The verified v60 Windows ZIP and manifest are required for boards without an assets partition.")
+    message(FATAL_ERROR "The verified v61 Windows ZIP and manifest are required for boards without an assets partition.")
 endif()
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
     "${qdd_desktop_manifest}" "${qdd_desktop_archive}" "${qdd_desktop_prepare}"

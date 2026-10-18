@@ -220,3 +220,22 @@ test("Feishu retains its existing webhook form and install request", async () =>
   await click(root, "验证并安装");
   assert.deepEqual(calls.install[0][2], { type: "feishu", mode: "webhook", permission: "confirm", webhookUrl: "https://open.feishu.cn/open-apis/bot/v2/hook/fixture" });
 });
+
+test("phone installs Android MCP and shows device setup and console instead of account login", async () => {
+  const phone = { ...mcpConnector, id: "mcp:android", type: "phone", name: "门店手机", config: { mode: "mcp", provider: "android", consoleUrl: "http://127.0.0.1:8792/" } };
+  const catalog = [{ type: "phone", name: "门店手机 · 助手操控", category: "设备", available: true, modes: ["mcp"], tags: [], providers: [{ id: "android", name: "Android 设备操作台" }] }];
+  const { root, calls } = await mount({ catalog });
+  await click(root, "安装连接器");
+  assert.match(textContent(root), /8792/);
+  assert.match(textContent(root), /授权投屏/);
+  assert.match(textContent(root), /操作需要店长确认/);
+  await choose(root, "android");
+  await click(root, "验证并安装");
+  assert.deepEqual(calls.install[0][2], { type: "phone", mode: "mcp", provider: "android" });
+  const installed = await mount({ catalog, connectors: [phone] });
+  const consoleLink = findAll(installed.root, (node) => node.tag === "a" && textContent(node) === "打开设备操作台")[0];
+  assert.equal(consoleLink.props.href, phone.config.consoleUrl);
+  assert.equal(button(installed.root, "测试消息"), undefined);
+  await click(installed.root, "重新验证");
+  assert.match(textContent(installed.root), /不操作手机/);
+});

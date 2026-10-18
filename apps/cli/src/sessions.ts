@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { appendFile, readdir, readFile } from "node:fs/promises";
 import path from "node:path";
-import type { AttachmentRef, BrowserSessionState, ChatSelection, ClarifyAnswers, ClarifyQuestion, HarnessConfig, JsonObject, PendingItem, SessionDetail, SessionEvent, SessionMeta } from "@qdd/shared";
+import type { AttachmentRef, BrowserSessionState, ChatSelection, ClarifyAnswers, ClarifyQuestion, HarnessConfig, JsonObject, PendingItem, PermissionMode, SessionDetail, SessionEvent, SessionMeta } from "@qdd/shared";
 import { runWish, WishError, type AgentEvent } from "./agent/agent.js";
-import { resolveChatSelection } from "./agent/chat-options.js";
+import { parsePermissionMode, resolveChatSelection } from "./agent/chat-options.js";
 import type { ChatFn, ChatMessage } from "./agent/llm.js";
 import { AttachmentStore } from "./attachments.js";
 import { resolveModel, type LoadedConfig } from "./config.js";
@@ -46,6 +46,8 @@ export class SessionHub {
   private readonly running = new Map<string, AbortController>();
   private readonly recoveries = new Map<string, Promise<SessionMeta>>();
   private readonly activeMetas = new Map<string, SessionMeta>();
+  private readonly metaWrites = new Map<string, Promise<void>>();
+  private readonly selectionUpdates = new Map<string, Promise<unknown>>();
   /** 页面 → 正在修改它的会话，同一页面同时只允许一个会话修改 */
   private readonly editing = new Map<string, string>();
   private readonly approvals = new Map<string, { detail: PendingDetail; resolve(approved: boolean): void }>();
@@ -223,20 +225,63 @@ export class SessionHub {
 
   /** 许愿之后在同一会话里继续对话。 */
   async send(id: string, text: string, options: SendOptions = {}): Promise<SessionMeta> {
-    const meta = await this.meta(id);
-    if (this.running.has(id)) throw new Conflict("会话正在运行，请等待完成");
-    await this.start(meta, text, options.attachments ?? [], undefined, options);
-    return this.meta(id);
+    return this.updateSelection(id, async () => {
+      const meta = await this.meta(id);
+      if (this.running.has(id)) throw new Conflict("会话正在运行，请等待完成");
+      await this.start(meta, text, options.attachments ?? [], undefined, options);
+      return this.meta(id);
+    });
+  }
+
+  /** 模型、权限及新一轮启动共享队列，串行读取和修改，避免撤权被旧快照覆盖。 */
+  private updateSelection<T>(id: string, update: () => Promise<T>): Promise<T> {
+    const previous = this.selectionUpdates.get(id) ?? Promise.resolve();
+    const run = previous.catch(() => undefined).then(update);
+    this.selectionUpdates.set(id, run);
+    const cleanup = () => { if (this.selectionUpdates.get(id) === run) this.selectionUpdates.delete(id); };
+    void run.then(cleanup, cleanup);
+    return run;
   }
 
   /** 切换会话模型；运行中的一轮保持原模型，下一轮起生效。 */
   async selectModel(id: string, model: string): Promise<SessionMeta> {
-    const meta = this.activeMetas.get(id) ?? await this.meta(id);
-    Object.assign(meta, resolveChatSelection(this.loaded.config.llm, { model }, meta));
-    meta.updatedAt = new Date().toISOString();
-    await this.saveMeta(meta);
-    for (const l of this.metaListeners) l({ ...meta });
-    return meta;
+    return this.updateSelection(id, async () => {
+      const stored = await this.meta(id);
+      const meta = this.activeMetas.get(id) ?? stored;
+      Object.assign(meta, resolveChatSelection(this.loaded.config.llm, { model }, meta));
+      meta.updatedAt = new Date().toISOString();
+      await this.saveMeta(meta);
+      for (const l of this.metaListeners) l({ ...meta });
+      return { ...meta };
+    });
+  }
+
+  /** 权限切换即时生效；完全访问同时放行本会话已在等待的工具审批。 */
+  async selectPermissionMode(id: string, input: unknown): Promise<SessionMeta> {
+    const permissionMode: PermissionMode = parsePermissionMode(input);
+    return this.updateSelection(id, async () => {
+      const stored = await this.meta(id);
+      const meta = this.activeMetas.get(id) ?? stored;
+      const previous = meta.permissionMode;
+      meta.permissionMode = permissionMode;
+      meta.updatedAt = new Date().toISOString();
+      try {
+        await this.saveMeta(meta);
+      } catch (error) {
+        if (meta.permissionMode === permissionMode) {
+          if (previous === undefined) delete meta.permissionMode;
+          else meta.permissionMode = previous;
+        }
+        throw error;
+      }
+      for (const l of this.metaListeners) l({ ...meta });
+      if (meta.permissionMode === "full-access") {
+        for (const pending of this.approvals.values()) {
+          if (pending.detail.sessionId === id) pending.resolve(true);
+        }
+      }
+      return { ...meta };
+    });
   }
 
   approve(id: string, requestId: string, approved: boolean): void {
@@ -381,7 +426,10 @@ export class SessionHub {
             } else if (e.kind === "tool_call") void this.emit(id, { type: "tool", blockId: e.blockId, tool: e.tool });
             else if (e.kind === "say" || e.kind === "warn") void this.emit(id, { type: e.kind, text: e.text });
           },
-          authorize: (tool, args) => this.waitFor(meta, this.requestApproval(id, tool.name, tool.source, args)),
+          authorize: (tool, args) => meta.permissionMode === "full-access"
+            ? Promise.resolve(true)
+            : this.waitFor(meta, this.requestApproval(id, tool.name, tool.source, args)),
+          permissionMode: () => meta.permissionMode ?? "approval",
           clarify: this.unattended.has(id) ? undefined : (questions) => this.waitFor(meta, this.requestClarify(id, questions)),
         },
       );
@@ -480,7 +528,15 @@ export class SessionHub {
     if (!this.directories.has(meta.id)) {
       this.directories.set(meta.id, meta.origin?.kind === "schedule" ? this.loaded.paths.scheduleSessions : this.loaded.paths.sessions);
     }
-    return writeAtomic(this.file(meta.id, "meta.json"), JSON.stringify(meta, null, 2));
+    // 状态更新和权限切换可并发发生，按调用顺序保存，避免旧状态覆盖新权限。
+    const file = this.file(meta.id, "meta.json");
+    const snapshot = JSON.stringify(meta, null, 2);
+    const previous = this.metaWrites.get(meta.id) ?? Promise.resolve();
+    const run = previous.catch(() => undefined).then(() => writeAtomic(file, snapshot));
+    this.metaWrites.set(meta.id, run);
+    const cleanup = () => { if (this.metaWrites.get(meta.id) === run) this.metaWrites.delete(meta.id); };
+    void run.then(cleanup, cleanup);
+    return run;
   }
 
   private async emit(id: string, event: NewEvent): Promise<void> {

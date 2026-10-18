@@ -434,6 +434,7 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
         attachments,
         ...(model !== undefined ? { model } : {}),
         ...(body.reasoningEffort !== undefined ? { reasoningEffort: body.reasoningEffort } : {}),
+        ...(body.permissionMode !== undefined ? { permissionMode: body.permissionMode } : {}),
       }));
     }
 
@@ -551,7 +552,7 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
       if (m === "GET") return json(res, 200, { catalog: CONNECTOR_CATALOG, connectors: await workbench.connectors.list(mcpInfo()) });
       if (m === "POST") {
         const installed = await workbench.connectors.install(await readJson(req));
-        if (installed.type === "pos" || installed.type === "camera") await sources.reloadMcp(loaded);
+        if (installed.config.mode === "mcp") await sources.reloadMcp(loaded);
         broadcast({ type: "connectors_changed" });
         return json(res, 201, installed);
       }
@@ -577,7 +578,7 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
       const action = connector[2];
       if (action === "/verify" && m === "POST") {
         const view = await workbench.connectors.verify(id);
-        if ((view.type === "pos" || view.type === "camera") && view.status === "connected") await sources.reloadMcp(loaded);
+        if (view.config.mode === "mcp" && view.status === "connected") await sources.reloadMcp(loaded);
         broadcast({ type: "connectors_changed" });
         return json(res, 200, view);
       }
@@ -599,7 +600,7 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
           if (using.length) throw new HttpError(409, `连接器被定时任务使用中：${using.map((x) => x.name).join("、")}`);
           const view = await workbench.connectors.get(id);
           await workbench.connectors.remove(id);
-          if (view.type === "pos" || view.type === "camera") await sources.reloadMcp(loaded);
+          if (view.config.mode === "mcp") await sources.reloadMcp(loaded);
           broadcast({ type: "connectors_changed" });
           return json(res, 200, { ok: true });
         }
@@ -638,6 +639,7 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
           attachments,
           ...(model !== undefined ? { model } : {}),
           ...(body.reasoningEffort !== undefined ? { reasoningEffort: body.reasoningEffort } : {}),
+          ...(body.permissionMode !== undefined ? { permissionMode: body.permissionMode } : {}),
         }));
       }
       if (sub === "/model" && m === "PUT") {
@@ -645,6 +647,10 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
         const model = checkModel(body?.model);
         if (!model) throw new HttpError(400, "model 不能为空");
         return json(res, 200, await hub.selectModel(id, model));
+      }
+      if (sub === "/permissions" && m === "PUT") {
+        const body = await readJson(req) as { permissionMode?: unknown } | undefined;
+        return json(res, 200, await hub.selectPermissionMode(id, body?.permissionMode));
       }
       if (sub === "/cancel" && m === "POST") {
         hub.cancel(id);

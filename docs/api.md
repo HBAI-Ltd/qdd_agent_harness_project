@@ -63,10 +63,17 @@ GET  /api/sessions                   → SessionMeta[]（仅普通对话，按�
 GET  /api/sessions/:id               → SessionDetail（元信息 + 全部事件）
 GET  /api/sessions/:id/events        → SSE，先回放历史事件再推送实时事件；?since=N 跳过前 N 条
 POST /api/sessions/:id/messages      { "text": "把图表改成按周", "model"?: "deepseek-chat", "reasoningEffort"?: "low" } → 202 SessionMeta（运行中时 409）
+PUT  /api/sessions/:id/permissions   { "permissionMode": "approval" | "full-access" } → 200 SessionMeta
 POST /api/sessions/:id/approvals/:requestId   { "approved": true }
 POST /api/sessions/:id/questions/:requestId   { "answers": { "<问题id>": ["<候选项 label 或自填内容>"] } }
 POST /api/sessions/:id/cancel        → 202
 ```
+
+输入框下方可选择“审批”或“完全访问”。新对话及旧数据缺省为 `approval`；创建许愿和续聊请求可传 `permissionMode`，省略时续聊沿用当前会话模式。模式保存在 `SessionMeta.permissionMode`，重启后保留。`full-access` 自动放行该对话的工具审批，包括 MCP、浏览器、保存技能和通知推送，不再逐次产生授权请求；业务需求澄清仍正常进行，连接器自身权限、参数校验和页面隔离继续生效。
+
+`PUT /permissions` 需要网关鉴权，模式非法或缺失返回 400。切换即时生效：从审批切到完全访问会放行本会话尚在等待的工具审批，其他会话不受影响；切回审批后，后续需授权的调用重新请求确认。新对话重新使用审批，不继承另一对话的完全访问。直接 `/api/tools` 的只读限制不受此模式影响。
+
+权限回归测试位于 `apps/cli/src/session-permissions.test.ts`，执行 `npm run build` 后用 `node --test apps/cli/dist/session-permissions.test.js` 运行，也纳入 `npm test`。
 
 同一会话要求修改界面时，默认沿用 `SessionMeta.slug`，先读取现有文件再发布更新。新对话也可以直接指定已有页面名称或 slug，例如「把品类销售页面的图表改成按周」；agent 用 `edit_page({ slug })` 选择已有页面，再通过 `list_files` / `read_file` / `write_file` / `finish` 修改。页面地址、创建时间和未修改的文件保留，`version` 递增，页面列表不增加重复项。
 
@@ -217,7 +224,9 @@ POST   /api/connectors/:id/verify   重新验证并记录 status/detail
 POST   /api/connectors/:id/test     { "text"? } 发送测试消息
 ```
 
-`connectors` 包含内置数据（`origin: builtin`）、自定义 MCP 服务（`origin: mcp`，只读展示）与通过 API 安装的连接器（`origin: installed`）。飞书、收银系统与门店摄像头开放安装；ERP、门店手机、外卖平台、企业微信暂未开放。收银和摄像头条目提供 `providers: [{ id, name }]` 供用户选择，默认不安装任何平台。
+`connectors` 包含内置数据（`origin: builtin`）、自定义 MCP 服务（`origin: mcp`，只读展示）与通过 API 安装的连接器（`origin: installed`）。飞书、收银系统、门店摄像头与门店手机开放安装；ERP、外卖平台、企业微信暂未开放。本地 MCP 条目提供 `providers: [{ id, name }]` 供用户选择，默认不安装任何平台。
+
+门店手机安装请求为 `{ "type": "phone", "mode": "mcp", "provider": "android", "name": "门店运营手机" }`，成功返回 201，ID 为 `mcp:android`，权限固定为 `confirm`。Node/Rust 设备操作台共用此连接器，默认接入地址为 `http://127.0.0.1:8792/mcp`；需将操作台服务端口设为 `8792`，避免与天翼视联冲突。`mcpServers.android` 可覆盖地址，配置本身不会自动安装。验证只握手、列工具并检查 Android 工具，不操作手机。手机投屏、蓝牙输入与启动步骤见[接入说明](android-connector.md)。
 
 **本地 MCP** 安装请求示例：
 
@@ -229,9 +238,9 @@ POST   /api/connectors/:id/test     { "text"? } 发送测试消息
 { "type": "camera", "mode": "mcp", "provider": "haik", "name": "门店摄像头" }
 ```
 
-摄像头可选择 `haik`、`tysl`、`ezviz`，收银可选择 `shouqianba`。只有用户提交安装才验证对应 MCP 并持久保存，验证失败不保存；重复平台返回输入错误。安装成功后工具立即可用，删除后立即撤销，重启后恢复用户选择。四家厂商的 `mcpServers` 配置仅作为连接参数覆盖，不表示已安装。返回的 `config` 包含 `mode: "mcp"`、`provider` 和本地 `consoleUrl`，不含密钥；账号登录在控制台另行完成。
+摄像头可选择 `haik`、`tysl`、`ezviz`，收银可选择 `shouqianba`。只有用户提交安装才验证对应 MCP 并持久保存，验证失败不保存；重复平台返回输入错误。安装成功后工具立即可用，删除后立即撤销，重启后恢复用户选择。内置本地服务的 `mcpServers` 配置仅作为连接参数覆盖，不表示已安装。返回的 `config` 包含 `mode: "mcp"`、`provider` 和本地 `consoleUrl`，不含密钥；账号登录在控制台另行完成。
 
-本地 MCP 的 `PUT` 仅支持修改名称，`verify` 验证本地 MCP 连接；不发送短信或业务请求。收银权限固定为 `read`，摄像头固定为 `confirm`。本地 MCP 不支持 `/test` 消息推送，也不能作为定时任务的消息接收方。
+本地 MCP 的 `PUT` 仅支持修改名称，`verify` 验证本地 MCP 连接；不发送短信或业务请求。收银权限固定为 `read`，摄像头和门店手机固定为 `confirm`。本地 MCP 不支持 `/test` 消息推送，也不能作为定时任务的消息接收方。
 
 `permission`：`read` 只查看（不能推送）/ `confirm` 每次推送需店长确认（默认）/ `auto` 无需确认。
 

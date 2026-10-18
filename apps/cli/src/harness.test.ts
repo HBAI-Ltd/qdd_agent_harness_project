@@ -658,7 +658,8 @@ describe("gateway", () => {
     assert.equal(executions, 1);
   });
 
-  test("回归：重复调用拦截、结论数字核验、页面工具以代码为准、失败保留对话", async () => {
+  test("回归：重复调用正常执行、结论数字核验、页面工具以代码为准、失败保留对话", async (t) => {
+    const dataCalls = t.mock.method(sources, "call");
     const outputs: string[] = [];
     const steps: ChatMessage[] = [
       call("store__aggregate", { dataset: "order_items", groupBy: ["sku", "channel"], metrics: ["revenue"], time: { field: "date", bucket: "day" } }),
@@ -679,7 +680,8 @@ describe("gateway", () => {
     };
     const result = await runWish(base, sources, scripted, { wish: "看看", sessionId: "00000000-0000-0000-0000-000000000001" }, { onEvent: () => {}, authorize: async () => false });
     assert.match(outputs[0]!, /"truncated":true.*"rows":\d+/); // 大结果给摘要而非截断
-    assert.match(outputs[1]!, /^重复调用/);
+    assert.equal(outputs[1], outputs[0]);
+    assert.equal(dataCalls.mock.calls.filter((entry) => entry.arguments[0] === "store__aggregate").length, 3);
     assert.match(outputs[4]!, /¥9,548\.90：在本次工具结果中找不到出处/);
     assert.deepEqual(result.page?.tools, ["store__aggregate"]); // 未使用的移除、使用的补上
 
@@ -697,7 +699,7 @@ describe("gateway", () => {
     assert.ok(saved.length >= 4);
   });
 
-  test("熔断：换着花样写错参数的循环会暂停探索；快照名自动规范化", async () => {
+  test("连续报错后仍可修正参数查询；快照名自动规范化", async () => {
     let n = 0;
     const seenTools: string[][] = [];
     const outputs: string[] = [];
@@ -707,31 +709,33 @@ describe("gateway", () => {
       if (last.role === "tool") outputs.push(String(last.content));
       n++;
       if (n <= 4) return call("store__aggregate", { dataset: "order_items", metrics: ["revenue"], [`metrics_extra${n}`]: ["x"] });
-      if (n === 5) return call("snapshot_data", { name: "Sales 30D!", tool: "store__aggregate", arguments: { dataset: "order_items", metrics: ["revenue"] } });
+      if (n === 5) return call("store__aggregate", { dataset: "order_items", metrics: ["revenue"] });
+      if (n === 6) return call("snapshot_data", { name: "Sales 30D!", tool: "store__aggregate", arguments: { dataset: "order_items", metrics: ["revenue"] } });
       return call("reply", { text: "好", gaps: [] });
     };
     await runWish(base, sources, scripted, { wish: "看看", sessionId: "00000000-0000-0000-0000-000000000002" }, { onEvent: () => {}, authorize: async () => false });
-    assert.match(outputs[0]!, /未知参数 metrics_extra1/);
-    assert.ok(seenTools[2]!.includes("store__aggregate"), "熔断前仍可探索");
-    assert.ok(!seenTools[3]!.includes("store__aggregate"), "连续 3 步全部报错后移除探索工具");
-    assert.ok(seenTools[3]!.includes("snapshot_data"));
-    assert.ok(outputs.some((o) => o.startsWith("探索已暂停")), "模型无视工具列表硬调也会被挡");
+    for (let index = 0; index < 4; index++) assert.match(outputs[index]!, new RegExp(`未知参数 metrics_extra${index + 1}`));
+    assert.ok(seenTools.every((tools) => tools.includes("store__aggregate")), "连续报错后仍保留探索工具");
+    assert.ok(Array.isArray(JSON.parse(outputs[4]!)), "修正参数后正常返回数据");
+    assert.equal(outputs.some((o) => o.startsWith("探索已暂停")), false);
     assert.match(outputs.at(-1)!, /已保存 data\/sales_30d\.js/);
   });
 
-  test("熔断：换参数反复查询但结果不变时拦截（真实场景回归）", async () => {
+  test("重复查询：换参数反复查询但结果不变时仍正常执行", async (t) => {
+    const dataCalls = t.mock.method(sources, "call");
     const outputs: string[] = [];
     let i = 0;
     const scripted: ChatFn = async (messages) => {
       const last = messages.at(-1)!;
       if (last.role === "tool") outputs.push(String(last.content));
       // 每次多加一个不影响结果的过滤条件
-      if (i < 4) return call("store__aggregate", { dataset: "order_items", metrics: ["revenue"], filter: Array.from({ length: ++i }, () => ["revenue", ">", -1]) });
+      if (i < 7) return call("store__aggregate", { dataset: "order_items", metrics: ["revenue"], filter: Array.from({ length: ++i }, () => ["revenue", ">", -1]) });
       return call("reply", { text: "好", gaps: [] });
     };
     await runWish(base, sources, scripted, { wish: "看看", sessionId: "00000000-0000-0000-0000-000000000003" }, { onEvent: () => {}, authorize: async () => false });
-    assert.doesNotMatch(outputs[1]!, /^重复调用/);
-    assert.match(outputs[2]!, /^重复调用：你已连续 3 次修改参数调用 store__aggregate（order_items），结果完全相同/);
+    assert.equal(outputs.length, 7);
+    assert.ok(outputs.every((output) => output === outputs[0]));
+    assert.equal(dataCalls.mock.calls.filter((entry) => entry.arguments[0] === "store__aggregate").length, 7);
   });
 
   test("回归：等待店长回答时停止执行，会话立即结束", async () => {

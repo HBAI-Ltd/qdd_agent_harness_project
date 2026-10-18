@@ -342,20 +342,22 @@ test("resuming legacy history removes runtime reminders but preserves real turns
   assert.deepEqual(history, before);
 });
 
-test("exploration breaker uses a non-persistent system reminder, not a user turn", async (t) => {
+test("repeated tool errors keep data tools available and allow recovery without a pause reminder", async (t) => {
   const { loaded, sources } = await fixture(t);
   const { chat, seen } = script(
-    call("unknown_tool", {}), call("unknown_tool", {}), call("unknown_tool", {}),
-    call("reply", { text: "工具不可用，未完成查询。" }),
+    call("unknown_tool", {}), call("unknown_tool", {}), call("unknown_tool", {}), call("unknown_tool", {}),
+    call("store__list_datasets", {}),
+    call("reply", { text: "已完成查询。" }),
   );
   const result = await runWish(loaded, sources, chat, { wish: "查询数据", sessionId: "breaker-roles" }, hooks);
-  const reminder = seen[3]!.at(-1)!;
-  assert.equal(reminder.role, "system");
-  assert.match(reminder.content!, /数据探索已暂停/);
-  assert.match(reminder.content!, /不是店长的新消息/);
-  assert.equal(seen[3]!.filter((message) => message.role === "user").length, 1);
+  const outputs = toolOutputs(result.messages);
+  assert.ok(outputs.slice(0, 4).every((output) => output.startsWith("错误：")));
+  assert.deepEqual(JSON.parse(outputs[4]!), []);
+  assert.ok(seen.every((messages) => messages.filter((message) => message.role === "system").length === 1));
+  assert.ok(seen.every((messages) => messages.filter((message) => message.role === "user").length === 1));
   assert.ok(result.messages.every((message) => message.role !== "system"));
-  assert.equal(toolOutputs(result.messages).length, 4);
+  assert.equal(outputs.length, 6);
+  assert.equal(result.summary, "已完成查询。");
 });
 
 for (const { thinking, ignoreFirst } of [

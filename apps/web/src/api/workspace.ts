@@ -9,6 +9,7 @@ import type {
   CreateWishBody,
   GatewayEvent,
   PageView,
+  PermissionMode,
   SendMessageBody,
   SessionDetail,
   SessionEvent,
@@ -104,6 +105,12 @@ export function listModels(base: string, token: string, signal?: AbortSignal): P
 export function selectSessionModel(base: string, token: string, id: string, model: string, signal?: AbortSignal): Promise<SessionMeta> {
   const body: SelectModelBody = { model };
   return json(base, token, `/api/sessions/${encodeURIComponent(id)}/model`, { method: "PUT", body: JSON.stringify(body), signal: signal ?? null });
+}
+
+export function selectSessionPermissionMode(base: string, token: string, id: string, permissionMode: PermissionMode, signal?: AbortSignal): Promise<SessionMeta> {
+  return json(base, token, `/api/sessions/${encodeURIComponent(id)}/permissions`, {
+    method: "PUT", body: JSON.stringify({ permissionMode }), signal: signal ?? null,
+  });
 }
 
 /** 上传一个附件；path 为文件名，文件夹上传时为含目录的相对路径。 */

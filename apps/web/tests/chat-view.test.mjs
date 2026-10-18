@@ -31,8 +31,8 @@ const controlsUrl = "data:text/javascript," + encodeURIComponent(`
     },
   };
   export const ElSelect = {
-    props: ["modelValue", "disabled"], emits: ["update:modelValue"],
-    setup: (props, { attrs, slots, emit }) => () => h("select", { ...attrs, value: props.modelValue, disabled: props.disabled, onChange: (event) => emit("update:modelValue", event.target.value) }, slots.default?.()),
+    props: ["modelValue", "disabled", "loading", "size"], emits: ["update:modelValue"],
+    setup: (props, { attrs, slots, emit }) => () => h("select", { ...attrs, "data-element-plus": "select", value: props.modelValue, disabled: props.disabled, loading: props.loading, size: props.size, onChange: (event) => emit("update:modelValue", event.target.value) }, slots.default?.()),
   };
   export const ElOptionGroup = { props: ["label"], setup: (props, { slots }) => () => h("optgroup", { label: props.label }, slots.default?.()) };
 `);
@@ -123,7 +123,7 @@ function remove(node) {
 
 async function mount(initialSession, sendResult = async () => true) {
   const root = { children: [] };
-  const calls = { submit: [], selections: [], attachments: [], notifications: [], cancel: 0 };
+  const calls = { submit: [], selections: [], permissions: [], attachments: [], notifications: [], cancel: 0 };
   const workspace = {
     gatewayUrl: ref("http://127.0.0.1:3000"),
     token: ref("test-token"),
@@ -146,6 +146,9 @@ async function mount(initialSession, sendResult = async () => true) {
     ], defaults: { model: "model-a", reasoningEffort: "default" } }),
     chatOptionsLoading: ref(false), chatOptionsError: ref(""),
     chatSelection: ref({ model: "model-a", reasoningEffort: "default" }),
+    permissionMode: ref(initialSession?.permissionMode ?? "approval"),
+    permissionChanging: ref(false), permissionLocked: ref(false), permissionError: ref(""),
+    async selectPermissionMode(mode) { calls.permissions.push(mode); workspace.permissionMode.value = mode; },
     selectChatModel(id) {
       const model = workspace.chatOptions.value.models.find((entry) => entry.id === id);
       workspace.chatSelection.value = { model: id, reasoningEffort: model.defaultReasoningEffort };
@@ -468,9 +471,51 @@ test("uploads block Enter and submit, upload errors stay visible, and dropped fi
   assert.deepEqual(attachments.value.map((entry) => entry.path), ["pending.png"]);
 });
 
+test("permissions below the composer default to approval and can grant full access during an approval wait", async () => {
+  const { root, workspace, calls } = await mount(session("waiting"));
+  const select = findAll(root, (node) => node.tag === "select" && node.props["aria-label"] === "工具调用权限")[0];
+  assert.ok(select);
+  assert.equal(select.props["data-element-plus"], "select");
+  assert.equal(select.props.size, "small");
+  assert.equal(select.props.value, "approval");
+  assert.equal(select.props.disabled, false);
+  assert.deepEqual(findAll(select, (node) => node.tag === "option").map((node) => [node.props.value, textContent(node)]), [
+    ["approval", "审批"], ["full-access", "完全访问"],
+  ]);
+  assert.match(textContent(root), /需要授权的操作先审批/);
+  select.props.onChange({ target: { value: "full-access" } });
+  await nextTick();
+  assert.deepEqual(calls.permissions, ["full-access"]);
+  assert.equal(select.props.value, "full-access");
+  assert.match(textContent(root), /本对话自动批准工具调用/);
+  workspace.permissionLocked.value = true;
+  await nextTick();
+  assert.equal(select.props.disabled, true);
+});
+
+test("permission saves lock message submission and show inline progress or failure", async () => {
+  const { root, workspace, draft, calls } = await mount(session());
+  draft.value = "读取手机";
+  workspace.permissionChanging.value = true;
+  await nextTick();
+  assert.equal(button(root, "发送消息").props.disabled, true);
+  assert.match(textContent(root), /正在保存权限/);
+  const select = findAll(root, (node) => node.tag === "select" && node.props["aria-label"] === "工具调用权限")[0];
+  assert.equal(select.props.loading, true);
+  await submit(root);
+  assert.deepEqual(calls.submit, []);
+  workspace.permissionChanging.value = false;
+  workspace.permissionError.value = "权限保存失败，请重试";
+  await nextTick();
+  assert.equal(button(root, "发送消息").props.disabled, false);
+  const error = findAll(root, hasClass("chat-permission-error"))[0];
+  assert.equal(error.props.role, "alert");
+  assert.equal(textContent(error), "权限保存失败，请重试");
+});
+
 test("model selection resets effort, only supported levels render, and the submission snapshots the choice", async () => {
   const { root, workspace, draft, calls } = await mount(undefined);
-  const selects = findAll(root, (node) => node.tag === "select");
+  const selects = findAll(root, (node) => node.tag === "select" && node.props["aria-label"] === "切换模型");
   assert.equal(selects.length, 1);
   const select = selects[0];
   assert.equal(select.props["aria-label"], "切换模型");

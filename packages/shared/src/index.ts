@@ -272,6 +272,8 @@ export interface SessionMeta {
   status: SessionStatus;
   /** 最近一轮使用的思考强度；旧会话缺省时沿用网关配置。 */
   reasoningEffort?: ReasoningEffort;
+  /** 工具调用权限；旧会话缺省为审批。 */
+  permissionMode?: PermissionMode;
   /** 会话来源：缺省为店长发起；定时任务触发时记录任务 id。 */
   origin?: { kind: "schedule"; scheduleId: string; scheduleName: string };
   /** 选择的模型 id；缺省用默认模型。下一轮起生效。 */
@@ -335,9 +337,12 @@ export interface SessionDetail extends SessionMeta {
 /** default 不传 reasoning_effort；none 关闭思考，其余值透传服务商。 */
 export type ReasoningEffort = "default" | "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 
+export type PermissionMode = "approval" | "full-access";
+
 export interface ChatSelection {
   model: string;
   reasoningEffort: ReasoningEffort;
+  permissionMode?: PermissionMode;
 }
 
 export interface ChatModelConfig {
@@ -516,9 +521,9 @@ export interface ScheduleInput {
 
 // ---------------------------------------------------------------- 连接器
 
-export type ConnectorType = "feishu" | "pos" | "camera";
+export type ConnectorType = "feishu" | "pos" | "camera" | "phone";
 
-export type LocalMcpProvider = "haik" | "tysl" | "ezviz" | "shouqianba";
+export type LocalMcpProvider = "haik" | "tysl" | "ezviz" | "shouqianba" | "android";
 
 /** read：只查看数据；confirm：写入/推送需店长逐次确认；auto：无需确认。 */
 export type ConnectorPermission = "read" | "confirm" | "auto";
@@ -554,7 +559,7 @@ export interface FeishuConnectorInput {
 }
 
 export interface LocalMcpConnectorInput {
-  type: "pos" | "camera";
+  type: "pos" | "camera" | "phone";
   mode: "mcp";
   provider: LocalMcpProvider;
   name?: string;

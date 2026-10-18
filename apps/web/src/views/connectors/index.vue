@@ -83,7 +83,8 @@ const formError = ref("");
 const installType = ref("feishu");
 const availableProviders = ref<NonNullable<ConnectorCatalogEntry["providers"]>>([]);
 const selectedProvider = ref<LocalMcpProvider | "">("");
-const mcpForm = computed(() => editing.value ? isMcp(editing.value) : installType.value === "pos" || installType.value === "camera");
+const mcpForm = computed(() => editing.value ? isMcp(editing.value) : ["pos", "camera", "phone"].includes(installType.value));
+const phoneForm = computed(() => (editing.value?.type ?? installType.value) === "phone");
 const formTitle = computed(() => editing.value ? `${editing.value.name} · 设置` : `安装${catalog.value.find((entry) => entry.type === installType.value)?.name ?? "连接器"}`);
 const form = reactive({
   name: "",
@@ -142,7 +143,7 @@ function displayDate(value: string | null): string {
 function canInstall(entry: ConnectorCatalogEntry): boolean {
   if (!entry.available) return false;
   if (entry.type === "feishu") return entry.modes.some((mode) => mode === "webhook" || mode === "app");
-  return (entry.type === "pos" || entry.type === "camera") && entry.modes.includes("mcp") && !!entry.providers?.length;
+  return ["pos", "camera", "phone"].includes(entry.type) && entry.modes.includes("mcp") && !!entry.providers?.length;
 }
 function sendsVerificationMessage(connector: ConnectorView): boolean {
   return configText(connector, "mode") === "webhook" || !!configText(connector, "receiveId");
@@ -275,7 +276,7 @@ async function saveConnector() {
       );
     } else if (mcpForm.value) {
       const input: LocalMcpConnectorInput = {
-        type: installType.value === "pos" ? "pos" : "camera",
+        type: installType.value as LocalMcpConnectorInput["type"],
         mode: "mcp",
         provider: selectedProvider.value as LocalMcpProvider,
         ...(form.name.trim() ? { name: form.name.trim() } : {}),
@@ -447,7 +448,7 @@ onBeforeUnmount(() => {
                 <dd>{{ providerName(connector) }}</dd>
                 <dt>账号登录</dt>
                 <dd>
-                  <a v-if="configText(connector, 'consoleUrl')" :href="configText(connector, 'consoleUrl')" target="_blank" rel="noopener noreferrer">打开登录控制台</a>
+                  <a v-if="configText(connector, 'consoleUrl')" :href="configText(connector, 'consoleUrl')" target="_blank" rel="noopener noreferrer">{{ connector.type === 'phone' ? '打开设备操作台' : '打开登录控制台' }}</a>
                   <span v-else>控制台地址不可用</span>
                 </dd>
               </template>
@@ -548,13 +549,13 @@ onBeforeUnmount(() => {
         :closable="false" />
       <ElAlert
         v-if="!editing && mcpForm"
-        title="选择平台后，点击“验证并安装”才会接入该平台。请先启动对应本地服务，安装完成后在登录控制台登录账号。"
+        :title="phoneForm ? '先在手机安装设备投屏 App，授权投屏，并连接 ESP 蓝牙控制板。启动电脑设备操作台并将服务端口设为 8792，然后选择 Android 设备操作台，点击“验证并安装”。验证仅检查服务，不操作手机。' : '选择平台后，点击“验证并安装”才会接入该平台。请先启动对应本地服务，安装完成后在登录控制台登录账号。'"
         type="info"
         show-icon
         :closable="false" />
       <ElForm label-position="top" class="connector-form" :disabled="formBusy" @submit.prevent="saveConnector">
         <ElFormItem label="连接器名称">
-          <ElInput v-model="form.name" maxlength="30" :placeholder="mcpForm ? '选填，例如：门店摄像头' : '例如：门店经营通知群'" autocomplete="off" />
+          <ElInput v-model="form.name" maxlength="30" :placeholder="phoneForm ? '选填，例如：门店运营手机' : mcpForm ? '选填，例如：门店摄像头' : '例如：门店经营通知群'" autocomplete="off" />
         </ElFormItem>
         <template v-if="mcpForm">
           <ElFormItem v-if="!editing" label="接入平台" required>
@@ -567,7 +568,7 @@ onBeforeUnmount(() => {
                 :disabled="providerInstalled(provider.id)" />
             </ElSelect>
           </ElFormItem>
-          <p class="form-note">{{ installType === 'pos' ? '收银系统只查看经营数据。' : '摄像头数据可查看；云台、截图、采集等操作需要店长确认。' }}</p>
+          <p class="form-note">{{ phoneForm ? '助手可读取手机画面；点击、滑动和输入等操作需要店长确认。手机、电脑和控制板需在同一局域网，实体急停只能在控制板解除。' : installType === 'pos' ? '收银系统只查看经营数据。' : '摄像头数据可查看；云台、截图、采集等操作需要店长确认。' }}</p>
           <p v-if="editing" class="form-note">这里只修改名称。更换接入平台，请删除后重新安装。</p>
         </template>
         <template v-else>
@@ -653,7 +654,7 @@ onBeforeUnmount(() => {
           <ElAlert
             :title="
               isMcp(actionTarget)
-                ? '检查本地服务与 MCP 工具是否可用；账号登录请在该平台的登录控制台完成。'
+                ? actionTarget?.type === 'phone' ? '检查 Android MCP 工具是否可用，不操作手机；投屏与蓝牙连接请在设备操作台查看。' : '检查本地服务与 MCP 工具是否可用；账号登录请在该平台的登录控制台完成。'
                 : sendsVerificationMessage(actionTarget)
                 ? '重新验证会向机器人或已配置的接收方发送一条验证消息，即使权限是只查看。'
                 : '本次验证应用凭据与机器人信息；尚未配置接收方，不会推送消息。'

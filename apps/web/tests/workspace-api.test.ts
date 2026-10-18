@@ -15,6 +15,7 @@ import {
   resolveApproval,
   saveStyle,
   sendMessage,
+  selectSessionPermissionMode,
   setPagePinned,
   sessionEvents,
 } from "../src/api/workspace.ts";
@@ -103,6 +104,18 @@ test("follow-up messages and cancellation use the session routes", async () => {
   assert.equal(calls[1]?.url, base + "/api/sessions/session%2F1/cancel");
   assert.equal(calls[1]?.init.body, undefined);
   assert.ok(calls.every((call) => call.init.method === "POST"));
+});
+
+test("permission changes persist through an authenticated session PUT with cancellation", async () => {
+  const changed = { ...session, permissionMode: "full-access" };
+  const calls = stubResponse(changed);
+  const signal = new AbortController().signal;
+  assert.deepEqual(await selectSessionPermissionMode(base, token, "session/中文", "full-access", signal), changed);
+  assert.equal(calls[0]?.url, base + "/api/sessions/session%2F%E4%B8%AD%E6%96%87/permissions");
+  assert.equal(calls[0]?.init.method, "PUT");
+  assert.deepEqual(JSON.parse(String(calls[0]?.init.body)), { permissionMode: "full-access" });
+  assert.equal(calls[0]?.init.signal, signal);
+  assert.equal(new Headers(calls[0]?.init.headers).get("Authorization"), "Bearer " + token);
 });
 
 test("question answers and an explicit rejection preserve their exact request bodies", async () => {

@@ -25,7 +25,7 @@ function mockMcp(t: TestContext) {
     requests.push({ method, url: String(url), authorization: new Headers(init.headers).get("Authorization") });
     if (fails) throw new Error("模拟服务不可访问");
     if (body?.id === undefined) return new Response(null, { status: 202 });
-    const result = method === "tools/list" ? { tools: [{ name: "account_status", description: "账号状态", inputSchema: { type: "object" } }] } : {};
+    const result = method === "tools/list" ? { tools: (String(url).includes(":8792/") ? ["android_screenshot", "android_control"] : ["account_status"]).map((name) => ({ name, description: "服务工具", inputSchema: { type: "object" } })) } : {};
     return Response.json({ jsonrpc: "2.0", id: body.id, result }, { headers: { "mcp-session-id": "synthetic-session" } });
   });
   return { requests, fail: () => { fails = true; } };
@@ -46,7 +46,7 @@ test("收银和摄像头目录开放厂商选择；服务已配置、已启动�
   assert.deepEqual(camera.providers?.map((provider) => provider.id), ["haik", "tysl", "ezviz"]);
 });
 
-test("用户选择后才握手、列工具并保存；四种厂商均可安装，收钱吧密钥只用于本地认证", async (t) => {
+test("用户选择后才握手、列工具并保存；五种本地服务均可安装，收钱吧密钥只用于本地认证", async (t) => {
   const { loaded, store } = await fixture(t);
   const mock = mockMcp(t);
   const tokenFile = localMcpServer("shouqianba", loaded.paths.root).bearerTokenFile!;
@@ -62,21 +62,24 @@ test("用户选择后才握手、列工具并保存；四种厂商均可安装�
     assert.equal(view.permission, metadata.type === "pos" ? "read" : "confirm");
     assert.deepEqual(view.config, { mode: "mcp", provider, consoleUrl: metadata.consoleUrl });
     assert(view.lastVerifiedAt);
-    assert.match(view.detail, /1 个工具/);
+    assert.match(view.detail, provider === "android" ? /2 个工具/ : /1 个工具/);
   }
-  assert.equal((await store.list(Object.keys(LOCAL_MCP_PROVIDERS).map((name) => ({ name, allowWrite: false })))).length, 4);
-  assert.deepEqual(mock.requests.map((request) => request.method), Array.from({ length: 4 }, () => ["initialize", "notifications/initialized", "tools/list", "DELETE"]).flat());
+  assert.equal((await store.list(Object.keys(LOCAL_MCP_PROVIDERS).map((name) => ({ name, allowWrite: false })))).length, 5);
+  assert.deepEqual(mock.requests.map((request) => request.method), Array.from({ length: 5 }, () => ["initialize", "notifications/initialized", "tools/list", "DELETE"]).flat());
   assert(mock.requests.filter((request) => request.url === LOCAL_MCP_PROVIDERS.shouqianba.url).every((request) => request.authorization === "Bearer synthetic-connector-key"));
   assert.doesNotMatch(await readFile(loaded.paths.connectors, "utf8"), /synthetic-connector-key/);
   assert.deepEqual(Object.keys(await loadInstalledMcpServers(loaded.paths)).sort(), Object.keys(LOCAL_MCP_PROVIDERS).sort());
   const reopened = (await openWorkbench(loaded)).connectors;
-  assert.equal((await reopened.list()).length, 4);
+  assert.equal((await reopened.list()).length, 5);
 });
 
 test("非法厂商、类型、模式与自定义权限在请求服务前拒绝；安装失败不保存", async (t) => {
   const { store } = await fixture(t);
   const mock = mockMcp(t);
   for (const input of [
+    { type: "phone", mode: "mcp", provider: "haik" },
+    { type: "camera", mode: "mcp", provider: "android" },
+    { type: "phone", mode: "mcp", provider: "android", permission: "auto" },
     { type: "camera", mode: "mcp", provider: "shouqianba" },
     { type: "pos", mode: "mcp", provider: "haik" },
     { type: "camera", mode: "mcp", provider: "unknown" },
@@ -88,6 +91,16 @@ test("非法厂商、类型、模式与自定义权限在请求服务前拒绝�
   mock.fail();
   await assert.rejects(store.install({ type: "camera", mode: "mcp", provider: "haik" }), /连接失败/);
   assert.deepEqual(await store.list(), []);
+});
+
+test("phone rejects an unrelated MCP endpoint instead of installing a camera service", async (t) => {
+  const { loaded } = await fixture(t);
+  mockMcp(t);
+  loaded.config.mcpServers.android = { url: "http://127.0.0.1:8790/mcp", allowWrite: true };
+  const store = (await openWorkbench(loaded)).connectors;
+  await assert.rejects(store.install({ type: "phone", mode: "mcp", provider: "android" }), /不是兼容的 Android/);
+  assert.deepEqual(await store.list(), []);
+  assert.equal(localMcpServer("android", loaded.paths.root, loaded.config.mcpServers.android).allowWrite, false);
 });
 
 test("重复或并发安装同一厂商仅保存一次，MCP 仅能改名且不能作为飞书通知使用", async (t) => {

@@ -1,4 +1,4 @@
-import type { ConnectorView, DatasetManifest, MetricCatalog, PageEntry, Schedule, SessionMeta, Skill } from "@qdd/shared";
+import type { ConnectorView, DatasetManifest, MetricCatalog, PageEntry, PermissionMode, Schedule, SessionMeta, Skill } from "@qdd/shared";
 import { formatDate } from "../datasource/store.js";
 import { IMAGE_ANALYSIS_PROMPT } from "../tool-images.js";
 import { skillInstructions } from "../workbench/skills.js";
@@ -20,6 +20,7 @@ export interface PromptInput {
   unattended?: boolean;
   /** 定时会话的工具调用自动授权，普通无人值守会话不豁免。 */
   scheduled?: boolean;
+  permissionMode?: PermissionMode;
   /** 本轮实际生效的提问策略；续聊和修改页面不再强制确认。 */
   clarification?: "required" | "auto" | "off";
   /** 可创建定时任务时传入现有任务（终端或网关会话，非无人值守） */
@@ -27,6 +28,7 @@ export interface PromptInput {
 }
 
 export function systemPrompt(input: PromptInput): string {
+  const automaticApproval = input.scheduled || input.permissionMode === "full-access";
   const others = input.pages
     .filter((p) => p.slug !== input.slug)
     .map((p) => `- ${p.slug}：${p.title}（愿望：${p.wish}）`)
@@ -60,7 +62,7 @@ export function systemPrompt(input: PromptInput): string {
   const skills = (input.skills ?? []).map((s) => `- ${s.name}：${s.description}`).join("\n");
   const defaults = (input.skills ?? []).filter((s) => s.source === "builtin").map(skillInstructions).join("\n\n");
   const notifiers = (input.notifiers ?? [])
-    .map((c) => `- ${c.id}：${c.name}（${c.permission === "auto" || input.scheduled ? "可直接推送" : "推送需店长确认"}）`)
+    .map((c) => `- ${c.id}：${c.name}（${c.permission === "auto" || automaticApproval ? "可直接推送" : "推送需店长确认"}）`)
     .join("\n");
   const workbench = input.skills
     ? `## 技能与消息推送
@@ -86,6 +88,7 @@ ${input.unattended ? "- 本次无人值守，不能 clarify；按已知信息和
     : "";
   return `你是「钱多多」，帮助店长查数据、分析经营、制作工具并完成门店任务。今天是 ${formatDate(new Date())}。默认使用简体中文，表达直接、清楚。
 先理解店长本轮想得到什么，结合当前对话完成任务；涉及经营事实时先用真实数据核实。
+${!input.scheduled && input.permissionMode === "full-access" ? "\n当前权限为完全访问：店长已授权本对话的工具调用，包括 MCP、浏览器和其他需要审批的操作。直接调用工具完成店长要求，不再询问是否允许调用或执行；harness 会自动放行工具审批。本提示词中关于逐次授权的要求仅适用于审批模式。继续遵守连接器自身的只读限制、参数校验和任务范围。业务需求缺少关键信息时仍可澄清。\n" : ""}
 ${input.scheduled ? "\n本次是定时任务自动执行：不能 clarify，也不需要请求店长允许执行。所有工具调用（包括写入、浏览器操作、保存技能和消息推送）由 harness 自动授权，直接执行并如实报告结果；本提示词中需店长确认的授权要求仅适用于普通对话。自动授权不解除只读连接器限制、参数校验、数据核验和页面隔离。\n" : ""}
 
 ## 本轮意图与完成方式
@@ -129,7 +132,7 @@ ${IMAGE_ANALYSIS_PROMPT}
 3. 零后端、零 SQL：禁止 fetch / XMLHttpRequest / WebSocket / EventSource / 表单提交 / eval / 任何 SQL 语句或浏览器 SQL 引擎 / 云数据库 / 服务端代码。所有聚合、筛选、预测、模拟都用纯 JavaScript 数组运算在浏览器里完成。
 4. 在线包只能从这些域名引入：${input.cdnAllowlist.join("、")}。版本号要写死，例如 https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js。
 5. 你只能写当前页面目录 pages/${input.slug}/ 下的 .html/.css/.js/.svg/.json 文件，入口必须是 index.html。不能改动其它页面、站点外壳、主题或设置。
-6. 名称含 create/update/delete 等的写入类工具${input.scheduled ? "由 harness 自动授权，无需等待店长确认" : "会触发店长授权"}；授权被拒时如实说明，不得绕过。查看数据请优先用只读工具。
+6. 名称含 create/update/delete 等的写入类工具${automaticApproval ? "由 harness 自动授权，无需等待店长确认" : "会触发店长授权"}；授权被拒时如实说明，不得绕过。查看数据请优先用只读工具。
 
 ## 监控推流播放器（任务 iframe 内）
 - HTTP-FLV 使用已批准的 ezuikit-flv@2.1.1，由网关同源提供：CSS \`/assets/camera-player/style.css\`、脚本 \`/assets/camera-player/index.js\`、解码器 \`/assets/camera-player/decoder.js\`（同目录自动加载 decoder.wasm）。不要把第三方播放器网页嵌入子 iframe，不要从 CDN 加载 decoder/worker。

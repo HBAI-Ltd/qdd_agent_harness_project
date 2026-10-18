@@ -1,9 +1,14 @@
-import type { ChatOptions, ChatSelection, HarnessConfig, ModelConfig, ReasoningEffort } from "@qdd/shared";
+import type { ChatOptions, ChatSelection, HarnessConfig, ModelConfig, PermissionMode, ReasoningEffort } from "@qdd/shared";
 
 const REASONING_EFFORTS: ReasoningEffort[] = ["default", "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
 
 export class ChatSelectionError extends Error {
   readonly status = 400;
+}
+
+export function parsePermissionMode(input: unknown): PermissionMode {
+  if (input !== "approval" && input !== "full-access") throw new ChatSelectionError("permissionMode 只能是 approval 或 full-access");
+  return input;
 }
 
 export function isDeepSeek(llm: HarnessConfig["llm"]): boolean {
@@ -67,5 +72,6 @@ export function resolveChatSelection(llm: HarnessConfig["llm"], input: Partial<C
   if (input.reasoningEffort !== undefined && !model.reasoningEfforts.includes(input.reasoningEffort)) throw new ChatSelectionError(`模型 ${model.id} 不支持思考强度 ${String(input.reasoningEffort)}`);
   const retained = previous?.reasoningEffort;
   const reasoningEffort = input.reasoningEffort ?? (retained && model.reasoningEfforts.includes(retained) ? retained : model.defaultReasoningEffort);
-  return { model: model.id, reasoningEffort };
+  const permissionMode = input.permissionMode !== undefined ? parsePermissionMode(input.permissionMode) : previous?.permissionMode === "full-access" ? "full-access" : "approval";
+  return { model: model.id, reasoningEffort, permissionMode };
 }

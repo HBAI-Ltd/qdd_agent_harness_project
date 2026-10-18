@@ -11,7 +11,7 @@ import { startGateway, type Gateway } from "./gateway/server.js";
 import { ensureWorkspace, writeAtomic } from "./web/site.js";
 
 const TOKEN = "connector-choice-gateway-token";
-const PROVIDERS: LocalMcpProvider[] = ["haik", "tysl", "ezviz", "shouqianba"];
+const PROVIDERS: LocalMcpProvider[] = ["haik", "tysl", "ezviz", "shouqianba", "android"];
 
 async function setup(t: TestContext) {
   const parent = path.resolve(tmpdir());
@@ -44,7 +44,10 @@ async function setup(t: TestContext) {
     }
     if (failures.has(provider)) return void res.writeHead(503).end("offline fixture");
     if (provider === "shouqianba") assert.equal(req.headers.authorization, "Bearer offline-mcp-key");
-    const result = body.method === "tools/list" ? { tools: [
+    const result = body.method === "tools/list" ? { tools: provider === "android" ? [
+      { name: "android_screenshot", description: "phone screenshot", inputSchema: { type: "object" }, annotations: { readOnlyHint: true } },
+      { name: "android_control", description: "phone input", inputSchema: { type: "object" }, annotations: { readOnlyHint: false } },
+    ] : [
       { name: `${provider}_list`, description: "offline list", inputSchema: { type: "object" }, annotations: { readOnlyHint: true } },
       ...(provider === "shouqianba" ? [] : [{ name: `${provider}_ptz`, description: "offline camera move", inputSchema: { type: "object" }, annotations: { readOnlyHint: false } }]),
     ] } : body.method === "tools/call" ? { structuredContent: { provider, tool: body.params?.name } } : {};
@@ -81,7 +84,7 @@ async function setup(t: TestContext) {
     ...init, headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json", ...init.headers },
   });
   const install = (provider: LocalMcpProvider) => api("/api/connectors", {
-    method: "POST", body: JSON.stringify({ type: provider === "shouqianba" ? "pos" : "camera", mode: "mcp", provider }),
+    method: "POST", body: JSON.stringify({ type: provider === "shouqianba" ? "pos" : provider === "android" ? "phone" : "camera", mode: "mcp", provider }),
   });
   const list = async () => (await (await api("/api/connectors")).json()) as { catalog: { type: string; available: boolean }[]; connectors: ConnectorView[] };
   const tools = async () => (await (await api("/api/tools")).json()) as ToolInfo[];
@@ -163,6 +166,28 @@ test("POS installation registers read-only tools and cannot send notifications",
   assert.ok(sources.get("mcp__shouqianba__shouqianba_list"));
   assert.equal((await api(`/api/connectors/${encodeURIComponent(view.id)}/test`, { method: "POST", body: "{}" })).status, 400);
   assert.deepEqual((await list()).connectors.map((connector) => connector.id), [view.id]);
+});
+
+test("phone installation exposes screenshots, confirms input, persists and revokes its tools", async (t) => {
+  const { sources, install, api, reopen, requests, list } = await setup(t);
+  assert.ok((await list()).catalog.find((entry) => entry.type === "phone")?.available);
+  const response = await install("android");
+  assert.equal(response.status, 201, await response.clone().text());
+  const view = await response.json() as ConnectorView;
+  assert.equal(view.type, "phone");
+  assert.equal(view.permission, "confirm");
+  assert.match(view.detail, /Android MCP 已连接/);
+  assert.ok(requests.every((request) => request.method !== "tools/call"));
+  const screenshot = "mcp__android__android_screenshot";
+  const control = "mcp__android__android_control";
+  assert.equal((await api(`/api/tools/${screenshot}`, { method: "POST", body: "{}" })).status, 200);
+  assert.equal((await api(`/api/tools/${control}`, { method: "POST", body: "{}" })).status, 403);
+  assert.equal(sources.get(control)?.preauthorized, false);
+  await sources.call(control, {}, async () => true);
+  assert.ok((await reopen()).get(screenshot));
+  assert.equal((await api("/api/connectors/mcp%3Aandroid", { method: "DELETE" })).status, 200);
+  assert.equal(sources.get(screenshot), undefined);
+  assert.equal((await reopen()).get(control), undefined);
 });
 
 test("an unavailable chosen provider fails without saving or enabling any connector", async (t) => {

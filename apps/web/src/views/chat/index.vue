@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, defineAsyncComponent, nextTick, onMounted, ref, watch } from "vue";
+import { computed, createVNode, defineAsyncComponent, defineComponent, nextTick, onMounted, ref, watch } from "vue";
 import { ElButton } from "element-plus/es/components/button/index";
 import { ElCard } from "element-plus/es/components/card/index";
 import { ElInput } from "element-plus/es/components/input/index";
@@ -17,6 +17,13 @@ import { useWorkspaceContext } from "@/composables/workspaceContext";
 import { buildChatTimeline, toolStatus, toolTitle } from "@/utils/chatTimeline";
 
 const SessionBrowser = defineAsyncComponent(() => import("@/components/SessionBrowser.vue"));
+// Adapt the vendor's size prop declaration for exactOptionalPropertyTypes.
+const PermissionSelect = defineComponent({
+  inheritAttrs: false,
+  setup(_props, { attrs, slots }) {
+    return () => createVNode(ElSelect, { ...attrs, size: "small" }, slots);
+  },
+});
 
 const { workspace, draft, submitMessage, notify, navigation, composer: attach } = useWorkspaceContext();
 const {
@@ -42,6 +49,11 @@ const {
   chatSelection,
   selectReasoningEffort,
   loadChatOptions,
+  permissionMode,
+  permissionChanging,
+  permissionLocked,
+  permissionError,
+  selectPermissionMode,
 } = workspace;
 const { openPage, openView } = navigation;
 const composer = ref<InputInstance>();
@@ -66,6 +78,7 @@ const canSend = computed(
     !loadingSession.value &&
     !uploading.value &&
     !modelChanging.value &&
+    !permissionChanging.value &&
     (Boolean(draft.value.trim()) || attach.ready.value.length > 0),
 );
 const modelValue = computed({
@@ -73,6 +86,12 @@ const modelValue = computed({
   set: (id: string) => {
     if (!id) return;
     void attach.selectModel(id);
+  },
+});
+const permissionValue = computed({
+  get: () => permissionMode.value,
+  set: (mode: string) => {
+    if (mode === "approval" || mode === "full-access") void selectPermissionMode(mode);
   },
 });
 const modelGroups = computed(() => {
@@ -658,6 +677,23 @@ onMounted(() => {
           </div>
         </div>
       </form>
+      <div class="chat-permission-row">
+        <label for="chat-permission-select">权限</label>
+        <PermissionSelect
+          id="chat-permission-select"
+          v-model="permissionValue"
+          class="chat-permission-select"
+          aria-label="工具调用权限"
+          :loading="permissionChanging"
+          :disabled="!connected || permissionLocked">
+          <StringSelectOption value="approval" label="审批" />
+          <StringSelectOption value="full-access" label="完全访问" />
+        </PermissionSelect>
+        <span class="chat-permission-hint" :role="permissionChanging ? 'status' : undefined">
+          {{ permissionChanging ? "正在保存权限…" : permissionMode === "full-access" ? "本对话自动批准工具调用" : "需要授权的操作先审批" }}
+        </span>
+      </div>
+      <p v-if="permissionError" class="chat-permission-error" role="alert">{{ permissionError }}</p>
       <div class="chat-composer-footer">
         <div class="chat-conversation-actions">
           <ElButton v-if="activeSession?.slug" link type="primary" @click="openPage(activeSession.slug)">查看生成页面</ElButton>
@@ -1130,6 +1166,26 @@ onMounted(() => {
   align-items: center;
   gap: 8px;
   margin-left: auto;
+}
+.chat-permission-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 4px 0;
+  color: var(--qdd-muted);
+  font-size: 12px;
+}
+.chat-permission-select {
+  width: 112px;
+}
+.chat-permission-hint {
+  font-size: 11px;
+}
+.chat-permission-error {
+  margin: 6px 4px 0;
+  color: var(--qdd-bad);
+  font-size: 12px;
 }
 .chat-file-input {
   display: none;

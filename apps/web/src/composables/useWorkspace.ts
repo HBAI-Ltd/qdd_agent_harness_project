@@ -1,5 +1,5 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import type { ChatOptions, ChatSelection, ClarifyAnswers, CreateWishBody, PageView, ReasoningEffort, SessionDetail, SessionEvent, SessionMeta } from "@qdd/shared";
+import type { ChatOptions, ChatSelection, ClarifyAnswers, CreateWishBody, PageView, PermissionMode, ReasoningEffort, SessionDetail, SessionEvent, SessionMeta } from "@qdd/shared";
 import * as api from "@/api/workspace";
 import { createConversationSelection } from "./conversationSelection";
 import type { LiveBlocks } from "@/utils/chatTimeline";
@@ -55,6 +55,11 @@ export function useWorkspace() {
   const chatOptionsLoading = ref(false);
   const chatOptionsError = ref("");
   const chatSelection = ref<ChatSelection>();
+  const draftPermissionMode = ref<PermissionMode>("approval");
+  const pendingPermissions = ref(new Map<string, { mode: PermissionMode; version: number }>());
+  const permissionRequests = new Map<string, Promise<void>>();
+  const permissionError = ref("");
+  let permissionVersion = 0;
   const gatewayChanges = ref({ overview: 0, pending: 0, skills: 0, schedules: 0, connectors: 0 });
   const selectionVersion = ref(0);
   const pendingSends = ref(new Set<string>());
@@ -65,6 +70,14 @@ export function useWorkspace() {
   const pendingPagePins = ref(new Set<string>());
   const sendTarget = () => activeSessionId.value ?? `draft:${selectionVersion.value}`;
   const pendingSend = computed(() => pendingSends.value.has(sendTarget()));
+  const permissionMode = computed<PermissionMode>(() => {
+    const id = activeSessionId.value;
+    if (!id) return draftPermissionMode.value;
+    const session = activeSession.value?.id === id ? activeSession.value : sessions.value.find((entry) => entry.id === id);
+    return pendingPermissions.value.get(id)?.mode ?? session?.permissionMode ?? "approval";
+  });
+  const permissionChanging = computed(() => !!activeSessionId.value && pendingPermissions.value.has(activeSessionId.value));
+  const permissionLocked = computed(() => loadingSession.value || pendingSend.value);
   const conversationStatus = computed(() => activeSession.value?.status
     ?? sessions.value.find((session) => session.id === activeSessionId.value)?.status);
   const responding = computed(() => pendingSend.value || conversationStatus.value === "running");
@@ -124,6 +137,46 @@ export function useWorkspace() {
     const selection = chatSelection.value;
     const model = chatOptions.value?.models.find((entry) => entry.id === selection?.model);
     if (selection && model?.reasoningEfforts.includes(effort)) chatSelection.value = { ...selection, reasoningEffort: effort };
+  }
+
+  watch(activeSessionId, () => { permissionError.value = ""; }, { flush: "sync" });
+
+  async function selectPermissionMode(mode: PermissionMode): Promise<void> {
+    if (disposed || !connected.value || permissionLocked.value || (mode !== "approval" && mode !== "full-access")) return;
+    if (permissionError.value && error.value === permissionError.value) error.value = "";
+    permissionError.value = "";
+    const id = activeSessionId.value;
+    if (!id) {
+      draftPermissionMode.value = mode;
+      return;
+    }
+    const version = ++permissionVersion;
+    const context = connectionVersion;
+    const base = gatewayUrl.value;
+    const key = token.value;
+    pendingPermissions.value.set(id, { mode, version });
+    // Serialize writes so an older request cannot overwrite a newer choice.
+    const request = (permissionRequests.get(id) ?? Promise.resolve()).then(async () => {
+      if (disposed || context !== connectionVersion || pendingPermissions.value.get(id)?.version !== version) return;
+      const controller = new AbortController();
+      actionControllers.add(controller);
+      try {
+        const meta = await api.selectSessionPermissionMode(base, key, id, mode, controller.signal);
+        if (!controller.signal.aborted && !disposed && context === connectionVersion) applyResponseMeta(meta);
+      } catch (cause) {
+        if (!controller.signal.aborted && !disposed && context === connectionVersion
+          && pendingPermissions.value.get(id)?.version === version && activeSessionId.value === id) {
+          permissionError.value = errorMessage(cause);
+          error.value = permissionError.value;
+        }
+      } finally {
+        actionControllers.delete(controller);
+        if (context === connectionVersion && pendingPermissions.value.get(id)?.version === version) pendingPermissions.value.delete(id);
+      }
+    });
+    permissionRequests.set(id, request);
+    await request;
+    if (permissionRequests.get(id) === request) permissionRequests.delete(id);
   }
 
   async function loadChatOptions() {
@@ -212,6 +265,9 @@ export function useWorkspace() {
     sendRequests.clear();
     pendingCancellations.value.clear();
     pendingActions.value.clear();
+    pendingPermissions.value.clear();
+    permissionRequests.clear();
+    permissionError.value = "";
     pendingPagePins.value.clear();
   }
 
@@ -225,6 +281,7 @@ export function useWorkspace() {
     activeSession.value = undefined;
     chatOptions.value = undefined;
     chatSelection.value = undefined;
+    draftPermissionMode.value = "approval";
     chatOptionsError.value = "";
     activePageSlug.value = null;
     if (!sameGateway) revisionPageSlug.value = null;
@@ -244,6 +301,7 @@ export function useWorkspace() {
       ...(meta.origin ? { origin: meta.origin } : {}),
       ...(meta.model ? { model: meta.model } : {}),
       ...(meta.reasoningEffort ? { reasoningEffort: meta.reasoningEffort } : {}),
+      permissionMode: meta.permissionMode ?? "approval",
     };
     const index = sessions.value.findIndex((session) => session.id === meta.id);
     if (meta.origin?.kind === "schedule") {
@@ -458,6 +516,7 @@ export function useWorkspace() {
   function startNewConversation(): void {
     if (disposed) return;
     selectionVersion.value++;
+    draftPermissionMode.value = "approval";
     detailController?.abort();
     sessionController?.abort();
     resetLiveBlocks();
@@ -588,9 +647,9 @@ export function useWorkspace() {
     }
   }
 
-  async function sendMessage(content: string, options: Pick<CreateWishBody, "skillId" | "model" | "reasoningEffort"> & { attachments?: api.AttachmentRef[] } = {}): Promise<boolean> {
+  async function sendMessage(content: string, options: Pick<CreateWishBody, "skillId" | "model" | "reasoningEffort" | "permissionMode"> & { attachments?: api.AttachmentRef[] } = {}): Promise<boolean> {
     const text = content.trim();
-    if (!text || sending.value || loadingSession.value || disposed) return false;
+    if (!text || sending.value || loadingSession.value || permissionChanging.value || disposed) return false;
     if (!connected.value) {
       error.value = "请在设置中连接网关后发送消息。";
       return false;
@@ -627,6 +686,7 @@ export function useWorkspace() {
       ? chatSelection.value?.reasoningEffort
       : chatOptions.value?.models.find((model) => model.id === selectedModel)?.defaultReasoningEffort);
     const extra = {
+      permissionMode: options.permissionMode ?? permissionMode.value,
       ...(options.attachments?.length ? { attachments: options.attachments.map((a) => a.id) } : {}),
       ...(selectedModel ? { model: selectedModel } : {}),
       ...(selectedEffort ? { reasoningEffort: selectedEffort } : {}),
@@ -806,6 +866,7 @@ export function useWorkspace() {
     preferences, token, gatewayUrl, loadingSessions, loadingPages, loadingSession,
     error, connected, gatewayChanges, sending, responding, pendingMessage, canCancel, cancelling, eventActionBusy, pendingPagePins,
     chatOptions, chatOptionsLoading, chatOptionsError, chatSelection, selectChatModel, selectReasoningEffort, loadChatOptions,
+    permissionMode, permissionChanging, permissionLocked, permissionError, selectPermissionMode,
     loadWorkspace, openConversation, selectSession, startNewConversation,
     sendMessage, answerQuestions, resolveApproval, cancel, revisePage, setPagePinned, applyResponseMeta,
   };

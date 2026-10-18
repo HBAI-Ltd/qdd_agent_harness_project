@@ -4,11 +4,12 @@ import type { LocalMcpProvider, McpServerConfig } from "@qdd/shared";
 import type { HarnessPaths } from "../config.js";
 
 /** 本地服务可用并不代表已安装；只有用户选择的厂商才会作为数据源启用。 */
-export const LOCAL_MCP_PROVIDERS: Record<LocalMcpProvider, { name: string; type: "pos" | "camera"; url: string; consoleUrl: string }> = {
+export const LOCAL_MCP_PROVIDERS: Record<LocalMcpProvider, { name: string; type: "pos" | "camera" | "phone"; url: string; consoleUrl: string }> = {
   shouqianba: { name: "收钱吧", type: "pos", url: "http://127.0.0.1:8788/mcp", consoleUrl: "http://127.0.0.1:8788/" },
   haik: { name: "海康互联", type: "camera", url: "http://127.0.0.1:8787/mcp", consoleUrl: "http://127.0.0.1:8787/" },
   tysl: { name: "天翼视联", type: "camera", url: "http://127.0.0.1:8790/mcp", consoleUrl: "http://127.0.0.1:8790/" },
   ezviz: { name: "萤石", type: "camera", url: "http://127.0.0.1:8791/mcp", consoleUrl: "http://127.0.0.1:8791/" },
+  android: { name: "Android 设备操作台", type: "phone", url: "http://127.0.0.1:8792/mcp", consoleUrl: "http://127.0.0.1:8792/" },
 };
 
 export function isLocalMcpProvider(provider: unknown): provider is LocalMcpProvider {

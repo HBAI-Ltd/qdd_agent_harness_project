@@ -1,4 +1,4 @@
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { cp, mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type {
@@ -12,6 +12,7 @@ import type {
   JsonObject,
   MetricCatalog,
   PageEntry,
+  PermissionMode,
   SessionMeta,
 } from "@qdd/shared";
 import { attachmentPrompt, type AttachmentStore } from "../attachments.js";
@@ -43,17 +44,11 @@ export class WishError extends Error {
 
 const LANG_REMINDER = "\n\n（请始终用简体中文回复和提问。）";
 const COMPLETION_REMINDER = "【harness 系统提醒，不是店长的新消息】上一条普通正文没有结束本轮。若原始请求已完成、被拒绝或暂时无法继续，下一步调用 reply 报告实际结果并结束；需要发布页面时调用 finish。仅在原始请求确有未完成的必要步骤时继续执行，不要重复正文、追加任务、轮询等待或再次要求店长选择。";
-const EXPLORATION_REMINDER = "【harness 系统提醒，不是店长的新消息】连续多步查询被拦截或报错，数据探索已暂停。基于已有结果完成原始请求：直接回答或说明缺口用 reply；需要页面时按当前提问策略对齐，再 snapshot_data、write_file、finish。不得把此提醒当作店长的新需求或授权。请用简体中文。";
 const LEGACY_HARNESS_REMINDERS = new Set([
   "请按本轮意图继续：直接回答或任务结果用 reply 结束；需要生成或修改页面时继续使用工具，完成后调用 finish。",
   "（harness 提示）你已连续多步重复或写错查询，数据探索已暂停。请按本轮意图基于已有结果完成：直接回答或说明缺口用 reply；需要页面时按当前提问策略对齐，再 snapshot_data、write_file、finish。请用简体中文。",
 ]);
 const MAX_VERIFY_REJECTIONS = 2;
-/** 连续这么多步的工具调用全部被拦截/报错，就暂停数据探索（熔断） */
-const BREAKER_STEPS = 3;
-const REJECTED = /^(重复调用|错误：|探索已暂停)/;
-/** 同一工具+数据集换参数后结果连续相同这么多次即拦截 */
-const SAME_RESULT_LIMIT = 3;
 import { systemPrompt } from "./prompt.js";
 
 export type AgentEvent =
@@ -103,6 +98,8 @@ export type Clarifier = (questions: ClarifyQuestion[]) => Promise<ClarifyAnswers
 export interface WishHooks {
   onEvent(event: AgentEvent): void;
   authorize: Authorizer;
+  /** 会话权限可能在运行期间切换，每次读取当前值。 */
+  permissionMode?: () => PermissionMode;
   clarify?: Clarifier | undefined;
   signal?: AbortSignal | undefined;
   /** 切换编辑目标前由会话层获取页面锁并持久化绑定。 */
@@ -535,13 +532,7 @@ export async function runWish(
   const ledger = new NumberLedger();
   ledger.addText(request.wish);
   for (const m of history) if (m.role === "user" && m.content) ledger.addText(m.content);
-  /** 相同数据工具调用的次数，重复调用直接返回提示 */
-  const seenCalls = new Map<string, number>();
-  /** 每个工具+数据集最近一次结果及连续相同次数 */
-  const sameResults = new Map<string, { digest: string; count: number }>();
   let verifyRejections = 0;
-  let rejectedSteps = 0;
-  let explorationPaused = false;
 
   /** 查询的时间范围：未给结束日时，用数据集水位线补齐。 */
   async function scopeOf(args: JsonObject): Promise<Scope> {
@@ -560,7 +551,7 @@ export async function runWish(
     ...sources.tools.map(
       (t): LlmTool => ({
         type: "function",
-        function: { name: t.name, description: `${t.mutating ? scheduled ? "[写入·定时任务自动授权] " : "[写入·需授权] " : ""}${t.description}`, parameters: t.inputSchema },
+        function: { name: t.name, description: `${t.mutating ? scheduled ? "[写入·定时任务自动授权] " : "[写入] " : ""}${t.description}`, parameters: t.inputSchema },
       }),
     ),
     ...HARNESS_TOOLS.filter((tool) => request.origin?.kind !== "schedule" || tool.function.name !== "edit_page"),
@@ -601,6 +592,7 @@ export async function runWish(
     slug,
     pages,
     updating,
+    permissionMode: hooks.permissionMode?.() ?? "approval",
     clarification: !hooks.clarify || config.llm.clarify === "off" ? "off" : mustClarify && !updating ? "required" : "auto",
   });
 
@@ -1174,33 +1166,11 @@ export async function runWish(
         if (!workbench) return "错误：消息连接器不可用";
         return notify(args);
       default: {
-        if (explorationPaused) {
-          return "探索已暂停：前几步的查询全部被拦截或报错。请按本轮意图基于已有结果推进：直接回答用 reply；需要页面时按当前提问策略对齐，再 snapshot_data、write_file、finish。";
-        }
-        const key = `${name}:${JSON.stringify(args)}`;
-        const times = (seenCalls.get(key) ?? 0) + 1;
-        seenCalls.set(key, times);
-        if (times > 1) {
-          hooks.onEvent({ kind: "warn", text: `重复调用 ${name}（第 ${times} 次），已拦截` });
-          return `重复调用：参数与之前完全相同，结果不会变化，未再执行。请基于已返回的结果继续；如果之前的结果是摘要，说明数据过大——给页面用请 snapshot_data，理解数据请粗化分组或缩小范围。${times >= 3 ? "已多次重复，请立即进入下一步（提问对齐或写页面）。" : ""}`;
-        }
         collectRefs(args, usedDatasets, usedMetrics);
         hooks.onEvent({ kind: "tool", text: `查询 ${name} ${truncate(JSON.stringify(args), 2000)}` });
         const inlineImages: AskImage[] = [];
         const result = await sources.call(name, args, hooks.authorize, (images) => inlineImages.push(...images));
         ledger.add(result, await scopeOf(args));
-        // 换着参数反复查询却得到完全相同的结果：说明调参方向不对，拦截并提示（计入熔断）
-        const target = `${name}:${typeof args.dataset === "string" ? args.dataset : ""}`;
-        const resultHash = createHash("sha256").update(JSON.stringify(result) ?? "null");
-        for (const image of inlineImages) resultHash.update(JSON.stringify(image));
-        const digest = resultHash.digest("hex");
-        const same = sameResults.get(target);
-        const repeats = same?.digest === digest ? same.count + 1 : 1;
-        sameResults.set(target, { digest, count: repeats });
-        if (repeats >= SAME_RESULT_LIMIT) {
-          hooks.onEvent({ kind: "warn", text: `${name} 连续 ${repeats} 次换参数结果不变，已拦截` });
-          return `重复调用：你已连续 ${repeats} 次修改参数调用 ${name}${typeof args.dataset === "string" ? `（${args.dataset}）` : ""}，结果完全相同，继续调参不会改变结果。请停止在这个方向上调参：检查指标/字段是否适用于该数据集（store__list_datasets、store__list_metrics），换用其它数据或工具；确实没有数据就说明缺口，用 reply 回答；需要页面时按当前提问策略对齐后再准备数据并发布。`;
-        }
         return {
           content: summarizeResult(result, EXPLORE_LIMIT),
           images: await toolImages(result, inlineImages, sources.get(name)?.imageRoot, hooks.signal),
@@ -1236,11 +1206,10 @@ export async function runWish(
     let idle = 0;
     while (true) {
       hooks.signal?.throwIfAborted();
-      // 熔断后不再向模型提供探索类数据工具（snapshot_data 仍可取数）
-      const activeTools = explorationPaused ? tools.filter((t) => !sources.get(t.function.name)) : tools;
+      messages[0]!.content = buildSystemPrompt();
       // 每条回复一个 id，思考、正文、工具调用按块序号共享同一 parts 数组。
       const replyId = randomUUID().slice(0, 8);
-      const reply = await chat(messages, activeTools, hooks.signal, (delta) => {
+      const reply = await chat(messages, tools, hooks.signal, (delta) => {
         const blockId = `${replyId}:${delta.index}`;
         if (delta.type === "tool") hooks.onEvent({ kind: "tool_call", blockId, tool: { id: delta.id, name: delta.name, status: "running" } });
         else hooks.onEvent({ kind: delta.type, blockId, delta: delta.delta });
@@ -1273,7 +1242,6 @@ export async function runWish(
       idle = 0;
 
       let done: WishResult | undefined;
-      let rejectedCalls = 0;
       for (const call of reply.tool_calls) {
         hooks.signal?.throwIfAborted();
         let output: string;
@@ -1307,22 +1275,12 @@ export async function runWish(
         } finally {
           activeTool = undefined;
         }
-        block.tool = { ...block.tool, status: failed || REJECTED.test(output) ? "error" : "success", result: truncate(output, 2000) };
+        block.tool = { ...block.tool, status: failed || output.startsWith("错误：") ? "error" : "success", result: truncate(output, 2000) };
         hooks.onEvent({ kind: "tool_call", blockId: block.blockId, tool: block.tool });
-        if (REJECTED.test(output)) rejectedCalls++;
         messages.push({ role: "tool", tool_call_id: call.id, content: output });
       }
       // Finish all tool replies before appending user-role image blocks.
       messages.push(...imageMessages.splice(0));
-      rejectedSteps = rejectedCalls === reply.tool_calls.length ? rejectedSteps + 1 : 0;
-      if (rejectedSteps >= BREAKER_STEPS && !explorationPaused && !done) {
-        explorationPaused = true;
-        hooks.onEvent({ kind: "warn", text: `连续 ${BREAKER_STEPS} 步查询全部被拦截或报错，已暂停数据探索` });
-        messages.push({
-          role: "system",
-          content: EXPLORATION_REMINDER,
-        });
-      }
       if (done) {
         if (done.page) hooks.onEvent({ kind: "ok", text: `已发布「${done.page.title}」` });
         return { ...done, messages: conversation() };

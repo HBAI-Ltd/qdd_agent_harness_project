@@ -16,7 +16,7 @@ export const CONNECTOR_CATALOG: ConnectorCatalogEntry[] = [
   { type: "feishu", name: "飞书", category: "消息通知", tags: ["飞书", "群机器人", "应用"], available: true, modes: ["webhook", "app"] },
   { type: "wecom", name: "企业微信", category: "消息通知", tags: ["企业微信"], available: false, modes: ["webhook"] },
   { type: "camera", name: "门店摄像头", category: "设备", tags: ["客流统计", "货架识别"], available: true, modes: ["mcp"], providers: (["haik", "tysl", "ezviz"] as const).map((id) => ({ id, name: LOCAL_MCP_PROVIDERS[id].name })) },
-  { type: "phone", name: "门店手机 · 助手操控", category: "设备", tags: ["小红书", "抖音", "大众点评"], available: false, modes: ["qrcode"] },
+  { type: "phone", name: "门店手机 · 助手操控", category: "设备", tags: ["小红书", "抖音", "大众点评"], available: true, modes: ["mcp"], providers: [{ id: "android", name: LOCAL_MCP_PROVIDERS.android.name }] },
   { type: "delivery", name: "外卖平台", category: "数据", tags: ["外卖订单", "评价"], available: false, modes: ["mcp"] },
 ];
 
@@ -51,7 +51,7 @@ interface StoredFeishuConnector extends StoredConnectorBase {
 }
 
 interface StoredMcpConnector extends StoredConnectorBase {
-  type: "pos" | "camera";
+  type: "pos" | "camera" | "phone";
   mode: "mcp";
   provider: LocalMcpProvider;
 }
@@ -255,6 +255,12 @@ export class ConnectorStore {
       client = new McpClient(provider, localMcpServer(provider, this.paths.root, this.mcpServers[provider]));
       await client.start();
       const tools = await client.listTools();
+      if (provider === "android") {
+        if (!["android_screenshot", "android_control"].every((name) => tools.some((tool) => tool.name === name))) {
+          throw new Error("该地址不是兼容的 Android 设备操作台，请检查服务地址和端口");
+        }
+        return `Android MCP 已连接（${tools.length} 个工具）；请在设备操作台确认手机投屏和控制板连接，手机操作需店长确认`;
+      }
       return `MCP 服务已连接（${tools.length} 个工具）；厂商账号请在登录控制台管理`;
     } catch (error) {
       throw new InvalidInput(`「${LOCAL_MCP_PROVIDERS[provider].name}」连接失败：${(error as Error).message}`);
@@ -328,8 +334,8 @@ export class ConnectorStore {
 
 function parseInput(raw: unknown): ConnectorInput {
   const body = (raw ?? {}) as Record<string, unknown>;
-  if (body.type === "pos" || body.type === "camera") {
-    if (body.mode !== "mcp") throw new InvalidInput("收银系统与门店摄像头的 mode 必须是 mcp");
+  if (body.type === "pos" || body.type === "camera" || body.type === "phone") {
+    if (body.mode !== "mcp") throw new InvalidInput("收银系统、门店摄像头与门店手机的 mode 必须是 mcp");
     if (!isLocalMcpProvider(body.provider) || LOCAL_MCP_PROVIDERS[body.provider].type !== body.type) throw new InvalidInput("请选择此连接器支持的厂商");
     if (Object.keys(body).some((key) => !["type", "mode", "provider", "name"].includes(key))) throw new InvalidInput("MCP 连接器只接受类型、厂商和名称；权限由安装类型确定");
     if (body.name !== undefined && typeof body.name !== "string") throw new InvalidInput("name 必须是字符串");

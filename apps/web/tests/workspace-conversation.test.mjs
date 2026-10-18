@@ -91,10 +91,11 @@ function backend(initial = [], pages = [], chatOptions) {
       const body = JSON.parse(init.body);
       if (body.model) value.model = body.model;
       if (body.reasoningEffort) value.reasoningEffort = body.reasoningEffort;
+      if (body.permissionMode) value.permissionMode = body.permissionMode;
       sessions.set(value.id, value);
       return json(metadata(value), 201);
     }
-    const match = /^\/api\/sessions\/([^/]+)(\/messages|\/cancel|\/questions\/[^/]+|\/approvals\/[^/]+)?$/.exec(url.pathname);
+    const match = /^\/api\/sessions\/([^/]+)(\/messages|\/permissions|\/cancel|\/questions\/[^/]+|\/approvals\/[^/]+)?$/.exec(url.pathname);
     if (match) {
       const value = sessions.get(decodeURIComponent(match[1]));
       assert.ok(value, "Requests must keep using an existing conversation");
@@ -102,8 +103,13 @@ function backend(initial = [], pages = [], chatOptions) {
         const body = JSON.parse(init.body);
         if (body.model) value.model = body.model;
         if (body.reasoningEffort) value.reasoningEffort = body.reasoningEffort;
+        if (body.permissionMode) value.permissionMode = body.permissionMode;
       }
-      if (match[2]) return json(match[2] === "/messages" || match[2] === "/cancel" ? metadata(value) : { ok: true }, 202);
+      if (match[2] === "/permissions") {
+        value.permissionMode = JSON.parse(init.body).permissionMode;
+        value.updatedAt = new Date().toISOString();
+      }
+      if (match[2]) return json(["/messages", "/permissions", "/cancel"].includes(match[2]) ? metadata(value) : { ok: true }, 202);
       if (detailFailures.delete(value.id)) return json({ error: "Temporary detail failure" }, 500);
       return json(value);
     }
@@ -204,6 +210,155 @@ const configuredChatOptions = {
   ], defaults: { model: "plain", reasoningEffort: "default" },
 };
 
+test("permission modes are explicit on creation and continuation and reset for a new conversation", async () => {
+  const service = backend();
+  const { workspace } = mountWorkspace();
+  await ready(workspace);
+  assert.equal(workspace.permissionMode.value, "approval");
+  await workspace.selectPermissionMode("full-access");
+  assert.equal(service.calls.some((call) => call.method === "PUT"), false);
+  assert.equal(await workspace.sendMessage("操作门店手机"), true);
+  assert.deepEqual(JSON.parse(service.calls.find((call) => call.path === "/api/wishes").body), {
+    wish: "操作门店手机", permissionMode: "full-access",
+  });
+  const id = workspace.activeSessionId.value;
+  assert.equal(workspace.permissionMode.value, "full-access");
+  assert.equal(workspace.activeSession.value.permissionMode, "full-access");
+  assert.equal(await workspace.sendMessage("继续查看"), true);
+  assert.equal(JSON.parse(service.calls.find((call) => call.path.endsWith("/messages")).body).permissionMode, "full-access");
+  workspace.startNewConversation();
+  assert.equal(workspace.permissionMode.value, "approval");
+  await workspace.selectSession(id);
+  assert.equal(workspace.permissionMode.value, "full-access", "existing conversations restore their saved permission");
+});
+
+test("permissions save immediately during approval waits and stay attached to their own conversation", async () => {
+  const pending = { ...session("waiting"), status: "waiting" };
+  const service = backend([pending, session("other")]);
+  const { workspace } = mountWorkspace();
+  await ready(workspace);
+  await workspace.selectSession("waiting");
+  const saving = service.hold("/api/sessions/waiting/permissions", "PUT");
+  const request = workspace.selectPermissionMode("full-access");
+  await until(() => service.calls.some((call) => call.path.endsWith("/permissions")), "Permission must save while waiting");
+  assert.equal(workspace.permissionMode.value, "full-access");
+  assert.equal(workspace.permissionChanging.value, true);
+  await workspace.selectSession("other");
+  assert.equal(workspace.permissionMode.value, "approval", "legacy records default to approval");
+  assert.equal(workspace.permissionChanging.value, false);
+  saving.release();
+  await request;
+  assert.equal(workspace.activeSessionId.value, "other");
+  assert.equal(workspace.permissionMode.value, "approval");
+  assert.equal(workspace.sessions.value.find((entry) => entry.id === "waiting").permissionMode, "full-access");
+  assert.equal(service.calls.some((call) => call.path.endsWith("/messages") || call.path === "/api/wishes"), false);
+  await workspace.selectSession("waiting");
+  assert.equal(workspace.permissionMode.value, "full-access");
+});
+
+test("rapid permission choices serialize writes and stale events cannot revert the latest visible choice", async () => {
+  const service = backend([session("existing")]);
+  const { workspace } = mountWorkspace();
+  await ready(workspace);
+  const first = service.hold("/api/sessions/existing/permissions", "PUT");
+  const second = service.hold("/api/sessions/existing/permissions", "PUT");
+  const grant = workspace.selectPermissionMode("full-access");
+  await until(() => service.calls.filter((call) => call.path.endsWith("/permissions")).length === 1, "First permission request must start");
+  const revoke = workspace.selectPermissionMode("approval");
+  service.publish({ ...service.sessions.get("existing"), permissionMode: "full-access" });
+  await setImmediate();
+  assert.equal(workspace.permissionMode.value, "approval");
+  assert.equal(service.calls.filter((call) => call.path.endsWith("/permissions")).length, 1);
+  assert.equal(await workspace.sendMessage("等待保存"), false);
+  first.release();
+  await grant;
+  await until(() => service.calls.filter((call) => call.path.endsWith("/permissions")).length === 2, "Second permission request must follow the first");
+  assert.equal(workspace.permissionMode.value, "approval");
+  assert.equal(workspace.permissionChanging.value, true);
+  second.release();
+  await revoke;
+  assert.equal(workspace.permissionMode.value, "approval");
+  assert.equal(workspace.permissionChanging.value, false);
+  assert.equal(workspace.activeSession.value.permissionMode, "approval");
+  assert.deepEqual(service.calls.filter((call) => call.path.endsWith("/permissions")).map((call) => JSON.parse(call.body)), [
+    { permissionMode: "full-access" }, { permissionMode: "approval" },
+  ]);
+});
+
+test("a failed permission save restores the last confirmed mode and reports the gateway error", async () => {
+  const service = backend([session("existing")]);
+  const { workspace } = mountWorkspace();
+  await ready(workspace);
+  const first = service.hold("/api/sessions/existing/permissions", "PUT");
+  const second = service.hold("/api/sessions/existing/permissions", "PUT");
+  const grant = workspace.selectPermissionMode("full-access");
+  await until(() => service.calls.some((call) => call.path.endsWith("/permissions")), "First permission request must start");
+  const revoke = workspace.selectPermissionMode("approval");
+  first.release();
+  await grant;
+  await until(() => service.calls.filter((call) => call.path.endsWith("/permissions")).length === 2, "Revocation must start");
+  second.fail("权限保存失败，请重试");
+  await revoke;
+  assert.equal(workspace.permissionMode.value, "full-access");
+  assert.equal(workspace.permissionChanging.value, false);
+  assert.equal(workspace.permissionError.value, "权限保存失败，请重试");
+  assert.equal(workspace.error.value, workspace.permissionError.value);
+  await workspace.selectPermissionMode("approval");
+  assert.equal(workspace.permissionMode.value, "approval");
+  assert.equal(workspace.permissionError.value, "");
+  assert.equal(workspace.error.value, "");
+});
+
+test("queued permission choices coalesce before sending superseded writes", async () => {
+  const service = backend([session("existing")]);
+  const { workspace } = mountWorkspace();
+  await ready(workspace);
+  await Promise.all([
+    workspace.selectPermissionMode("full-access"),
+    workspace.selectPermissionMode("approval"),
+    workspace.selectPermissionMode("full-access"),
+  ]);
+  assert.deepEqual(service.calls.filter((call) => call.path.endsWith("/permissions")).map((call) => JSON.parse(call.body)), [
+    { permissionMode: "full-access" },
+  ]);
+  assert.equal(workspace.permissionMode.value, "full-access");
+  assert.equal(workspace.permissionChanging.value, false);
+});
+
+test("permission writes abort across credentials and cannot affect a replacement workspace", async () => {
+  const service = backend([session("existing")]);
+  const { workspace } = mountWorkspace();
+  await ready(workspace);
+  const delayed = service.hold("/api/sessions/existing/permissions", "PUT");
+  const request = workspace.selectPermissionMode("full-access");
+  await until(() => service.calls.some((call) => call.path.endsWith("/permissions")), "Permission request must start");
+  const call = service.calls.find((entry) => entry.path.endsWith("/permissions"));
+  workspace.token.value = "replacement-token";
+  assert.equal(call.signal.aborted, true);
+  assert.equal(workspace.permissionMode.value, "approval");
+  delayed.release();
+  await request;
+  assert.deepEqual(workspace.sessions.value, []);
+  assert.equal(workspace.permissionError.value, "");
+  assert.equal(workspace.permissionMode.value, "approval");
+});
+
+test("permission choices cannot change a draft after its first message has been submitted", async () => {
+  const service = backend();
+  const { workspace } = mountWorkspace();
+  await ready(workspace);
+  await workspace.selectPermissionMode("full-access");
+  const delayed = service.hold("/api/wishes", "POST");
+  const request = workspace.sendMessage("操作手机");
+  await until(() => service.calls.some((call) => call.path === "/api/wishes"), "Creation must start");
+  assert.equal(workspace.permissionLocked.value, true);
+  await workspace.selectPermissionMode("approval");
+  assert.equal(workspace.permissionMode.value, "full-access");
+  delayed.release();
+  assert.equal(await request, true);
+  assert.equal(workspace.permissionMode.value, "full-access");
+});
+
 test("model and effort selections are sent on creation and continuation and retained in session metadata", async () => {
   const service = backend([], [], configuredChatOptions);
   const { workspace } = mountWorkspace();
@@ -214,7 +369,7 @@ test("model and effort selections are sent on creation and continuation and reta
   workspace.selectReasoningEffort("high");
   assert.equal(await workspace.sendMessage("分析附件", { skillId: "inventory" }), true);
   assert.deepEqual(JSON.parse(service.calls.find((call) => call.path === "/api/wishes").body), {
-    wish: "分析附件", skillId: "inventory", model: "reasoning", reasoningEffort: "high",
+    wish: "分析附件", skillId: "inventory", model: "reasoning", reasoningEffort: "high", permissionMode: "approval",
   });
   assert.equal(workspace.activeSession.value.model, "reasoning");
   assert.equal(workspace.activeSession.value.reasoningEffort, "high");
@@ -224,7 +379,7 @@ test("model and effort selections are sent on creation and continuation and reta
   workspace.selectReasoningEffort("none");
   assert.equal(await workspace.sendMessage("继续"), true);
   const followup = service.calls.find((call) => call.path.endsWith("/messages"));
-  assert.deepEqual(JSON.parse(followup.body), { text: "继续", model: "plain", reasoningEffort: "none" });
+  assert.deepEqual(JSON.parse(followup.body), { text: "继续", model: "plain", reasoningEffort: "none", permissionMode: "approval" });
 });
 
 test("existing conversations restore their model choices while stale option loads cannot cross credentials", async () => {
@@ -476,7 +631,7 @@ test("a page origin removed during reconnect cannot turn a pending edit into a n
   assert.equal(await workspace.sendMessage("开始查看销售数据"), true);
   const creations = service.calls.filter((call) => call.path === "/api/wishes");
   assert.equal(creations.length, 1);
-  assert.deepEqual(JSON.parse(creations[0].body), { wish: "开始查看销售数据" });
+  assert.deepEqual(JSON.parse(creations[0].body), { wish: "开始查看销售数据", permissionMode: "approval" });
 });
 
 test("new conversation stays a draft until first send, even with existing history or a reload", async () => {
@@ -505,7 +660,7 @@ test("new conversation stays a draft until first send, even with existing histor
   assert.equal(await reloaded.sendMessage("继续新的需求"), true);
   const creations = service.calls.filter((call) => call.path === "/api/wishes");
   assert.equal(creations.length, 1);
-  assert.deepEqual(JSON.parse(creations[0].body), { wish: "独立的新需求" });
+  assert.deepEqual(JSON.parse(creations[0].body), { wish: "独立的新需求", permissionMode: "approval" });
   assert.equal(service.calls.filter((call) => call.path === "/api/sessions/existing/messages").length, 0);
 });
 
@@ -804,7 +959,7 @@ test("selecting history or a new conversation clears the previous page revision 
   workspace.startNewConversation();
   assert.equal(workspace.revisionPageSlug.value, null);
   assert.equal(await workspace.sendMessage("全新需求"), true);
-  assert.deepEqual(JSON.parse(service.calls.find((call) => call.path === "/api/wishes").body), { wish: "全新需求" });
+  assert.deepEqual(JSON.parse(service.calls.find((call) => call.path === "/api/wishes").body), { wish: "全新需求", permissionMode: "approval" });
 });
 
 test("skill execution preloads the selected skill only on a newly created wish", async () => {
@@ -814,10 +969,10 @@ test("skill execution preloads the selected skill only on a newly created wish",
   workspace.startNewConversation();
   assert.equal(await workspace.sendMessage("运行经营日报", { skillId: "daily-report" }), true);
   assert.deepEqual(JSON.parse(service.calls.find((call) => call.path === "/api/wishes").body), {
-    wish: "运行经营日报", skillId: "daily-report",
+    wish: "运行经营日报", skillId: "daily-report", permissionMode: "approval",
   });
   assert.equal(await workspace.sendMessage("调整日报内容"), true);
-  assert.deepEqual(JSON.parse(service.calls.find((call) => call.path.endsWith("/messages")).body), { text: "调整日报内容" });
+  assert.deepEqual(JSON.parse(service.calls.find((call) => call.path.endsWith("/messages")).body), { text: "调整日报内容", permissionMode: "approval" });
 });
 
 test("new global resource events refresh their own resource and overview without changing conversation", async () => {

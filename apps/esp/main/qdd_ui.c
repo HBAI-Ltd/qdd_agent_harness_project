@@ -19,7 +19,7 @@ typedef enum { MAIN, GUIDE, SETUP } screen_kind_t;
 static screen_kind_t s_kind;
 static cached_label_t s_header, s_battery, s_computer, s_phone, s_title, s_detail, s_next;
 static cached_label_t s_pairing, s_value, s_hint, s_notice, s_rows[5], s_usb_note;
-static cached_label_t s_home_rows[2], s_guide_confirm;
+static cached_label_t s_home_rows[2], s_guide_forward;
 static unsigned s_home_selection, s_home_action_selection, s_home_action_step;
 static bool s_home_action_locked, s_require_onboarding;
 static bool s_skip_desktop, s_skip_app, s_skip_bluetooth;
@@ -138,12 +138,6 @@ static void home_actions(bool locked, unsigned guide_step) {
         const char *action = guide_step == 1 ? "选择无线网" : guide_step == 4 ? "开始配对" :
             guide_step == 6 ? "进入主页" : "下一步";
         text(&s_home_rows[1], action);
-        lv_point_t size;
-        lv_text_get_size(&size, action, &qdd_cjk_14, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
-        const int left = (224 - 40 - 10 - size.x) / 2;
-        lv_obj_set_x(s_guide_confirm.object, left);
-        lv_obj_set_x(s_home_rows[1].object, left + 50);
-        lv_obj_set_width(s_home_rows[1].object, size.x);
         return;
     }
     text(&s_home_rows[0], locked ? "取消急停" : "紧急停止");
@@ -154,26 +148,19 @@ static void home_actions(bool locked, unsigned guide_step) {
         lv_obj_set_style_bg_color(s_home_rows[i].object, lv_color_hex(i == selected ? ACCENT : PANEL), 0);
     }
 }
-static void guide_keys_draw(lv_event_t *event) {
-    lv_layer_t *layer = lv_event_get_layer(event);
-    lv_draw_rect_dsc_t key; lv_draw_rect_dsc_init(&key);
-    key.bg_opa = LV_OPA_TRANSP; key.border_color = lv_color_hex(0x65534B);
-    key.border_width = 1; key.radius = 4;
-    // Small physical-key outlines, with transparent navigation text alongside.
-    const lv_area_t up = {21, 273, 42, 293}, down = {127, 273, 148, 293};
-    lv_draw_rect(layer, &key, &up); lv_draw_rect(layer, &key, &down);
-}
 static void home_actions_create(lv_obj_t *screen, bool guide) {
     if (guide) {
-        lv_obj_add_event_cb(screen, guide_keys_draw, LV_EVENT_DRAW_MAIN, NULL);
-        label(&s_home_rows[0], screen, 25, 275, 91, "上  上一步", &qdd_cjk_14, MUTED, false);
-        fixed_label(screen, 131, 275, 91, "下  下一步", &qdd_cjk_14, MUTED, false);
-        label(&s_guide_confirm, screen, 0, 297, 40, "确认", &qdd_cjk_14, INK, true);
-        lv_obj_set_height(s_guide_confirm.object, 20);
-        lv_obj_set_style_radius(s_guide_confirm.object, 4, 0);
-        lv_obj_set_style_bg_color(s_guide_confirm.object, lv_color_hex(ACCENT), 0);
-        lv_obj_set_style_bg_opa(s_guide_confirm.object, LV_OPA_COVER, 0);
-        label(&s_home_rows[1], screen, 0, 297, 100, "", &qdd_cjk_14, INK, false);
+        cached_label_t *rows[] = {&s_home_rows[0], &s_home_rows[1], &s_guide_forward};
+        const char *values[] = {"上一步", "", "下一步"};
+        for (unsigned i = 0; i < 3; i++) {
+            label(rows[i], screen, 20, 254 + (int)i * 22, 184, values[i], &qdd_cjk_14,
+                i == 1 ? INK : MUTED, true);
+            lv_obj_set_height(rows[i]->object, 20);
+            lv_obj_set_style_pad_top(rows[i]->object, 1, 0);
+            lv_obj_set_style_radius(rows[i]->object, 5, 0);
+            lv_obj_set_style_bg_color(rows[i]->object, lv_color_hex(i == 1 ? ACCENT : PANEL), 0);
+            lv_obj_set_style_bg_opa(rows[i]->object, LV_OPA_COVER, 0);
+        }
         s_home_action_selection = 2; home_actions(false, 1);
         return;
     }
@@ -321,11 +308,11 @@ static void guide_create(void) {
     label(&s_title, screen, 14, 42, 196, "连接无线网", &qdd_cjk_20, INK, true);
     label(&s_detail, screen, 14, 72, 196, "", &qdd_cjk_14, INK, true);
     s_card = card(screen, 12, 110, 200, 102, PANEL);
-    download_qr_create(screen, 94);
+    download_qr_create(screen, 90);
     label(&s_value, screen, 22, 131, 180, "", &qdd_cjk_14, INK, true);
     label(&s_hint, screen, 22, 171, 180, "", &qdd_cjk_14, MUTED, true);
-    label(&s_next, screen, 14, 228, 196, "", &qdd_cjk_14, INK, true);
-    label(&s_notice, screen, 14, 249, 196, "", &qdd_cjk_14, 0xFFAC8D, true);
+    label(&s_next, screen, 14, 216, 196, "", &qdd_cjk_14, INK, true);
+    label(&s_notice, screen, 14, 235, 196, "", &qdd_cjk_14, 0xFFAC8D, true);
     s_passkey = false; home_actions_create(screen, true);
 }
 static void guide_refresh(const qdd_ui_view_t *view, qdd_ble_status_t ble, int charge) {
@@ -343,7 +330,7 @@ static void guide_refresh(const qdd_ui_view_t *view, qdd_ble_status_t ble, int c
         if (s_wifi.connected && s_wifi.ip[0]) snprintf(value, sizeof(value), "http://%s:3334/", s_wifi.ip);
         else strcpy(value, "请先连接无线网");
         text(&s_value, value); lv_obj_set_pos(s_hint.object, 22, 181); text(&s_hint, "电脑和手机连同一无线网");
-        lv_obj_set_pos(s_next.object, 14, 228);
+        lv_obj_set_pos(s_next.object, 14, 216);
         return;
     }
     if (s_usb_cached) {
@@ -357,13 +344,12 @@ static void guide_refresh(const qdd_ui_view_t *view, qdd_ble_status_t ble, int c
         // it would invalidate an unchanged page on every presentation tick.
         text(&s_detail, view->detail); (void)download_qr_update(s_wifi.ip);
         lv_obj_remove_flag(s_qrcode, LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(s_card, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_set_y(s_value.object, 225); snprintf(value, sizeof(value), "%s:3334", s_wifi.ip); text(&s_value, value);
-        lv_obj_set_pos(s_next.object, 14, 249); lv_obj_set_width(s_next.object, 196);
-        text(&s_next, "手机也连接同一无线网"); text(&s_hint, ""); text(&s_notice, "");
+        lv_obj_set_y(s_value.object, 218); snprintf(value, sizeof(value), "%s:3334", s_wifi.ip); text(&s_value, value);
+        text(&s_next, ""); text(&s_hint, ""); text(&s_notice, "长按确认：设置");
     } else {
         text(&s_detail, view->detail); text(&s_next, view->next); text(&s_notice, *view->notice ? view->notice : "长按确认：设置");
         lv_obj_add_flag(s_qrcode, LV_OBJ_FLAG_HIDDEN); lv_obj_remove_flag(s_card, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_set_y(s_value.object, 131); lv_obj_set_pos(s_next.object, 14, 228); lv_obj_set_width(s_next.object, 196);
+        lv_obj_set_y(s_value.object, 131); lv_obj_set_pos(s_next.object, 14, 216); lv_obj_set_width(s_next.object, 196);
         bool passkey = view->onboarding_step == 4 && view->show_passkey;
         if (s_passkey != passkey) { s_passkey = passkey; lv_obj_set_style_text_font(s_value.object, passkey ? &qdd_cjk_20 : &qdd_cjk_14, 0); }
         if (view->onboarding_step == 4) {

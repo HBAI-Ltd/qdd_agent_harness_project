@@ -26,8 +26,9 @@ the package directly, without a local HTML receiver or USB port selection.
   manual pages; connection events do not steal the selected page. Settings order
   is driver download, wireless network, phone Bluetooth, button guide, reset.
   Legacy USB endpoints/protocol remain compatible but are absent from ordinary
-  navigation. The old full-width button-like hints are replaced by small
-  physical-key hints and a separate confirmation action.
+  navigation. Following the user's final layout, the footer has three separate
+  vertical rows: previous, the current page action, next. The middle action is
+  emphasized; the physical button behavior is unchanged.
 - Storage: this COM5 board has no `assets` partition. The v54 hotspot baseline
   reproduced ZIP HTTP 503 while root and APK returned 200. The new app embeds
   the verified 943,153-byte v50 ZIP when the partition is absent. An existing

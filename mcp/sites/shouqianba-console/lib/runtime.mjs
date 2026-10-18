@@ -22,12 +22,23 @@ export function redact(value){
   return Object.fromEntries(Object.entries(value).filter(([key])=>!/(token|password|cookie|secret|auth_code|send_id|sendId)/i.test(key)).map(([key,v])=>[key,redact(v)]));
 }
 export class Runtime {
-  constructor({vault,client=new CloudClient(),save=writeVault,load=readVault,clear=clearVault}={}){
-    this.vault=vault;this.client=client;this.save=save;this.load=load;this.clear=clear;this.session=null;this.pending=null;this.sending=false;this.loggingIn=false;this.stores=new Map();this.offsetHour=null;this.dataSeen=new Set();this.refreshing=null;
+  constructor({vault,client=new CloudClient(),nativeClient=null,nativeDevice=null,save=writeVault,load=readVault,clear=clearVault}={}){
+    this.nativeClient=nativeClient;this.nativeDevice=nativeDevice;this.nativeStartup=false;
+    this.vault=vault;this.client=client;this.save=save;this.load=load;this.clear=clear;this.session=null;this.pending=null;this.sending=false;this.loggingIn=false;this.stores=new Map();this.offsetHour=null;this.dataSeen=new Set();this.refreshing=null;this.sessionEpoch=0;this.sessionSaved=false;this.persistenceQueue=Promise.resolve();
   }
-  async init(){const stored=await this.load(this.vault);if(stored){this.session={...stored,verified:false};for(const [base,values] of stored.cookies||[])this.client.cookies.set(base,new Map(values));}return this;}
-  status(){const s=this.session;return {service:'shouqianba',stage:s?.verified?'authenticated':s?.ucToken?'saved_session':'signed_out',phone:s?.phone?`${s.phone.slice(0,3)}****${s.phone.slice(-4)}`:null,merchant:s?.verified?s.merchant:null,identities:s?.ucToken?(s.identities||[]).map((r,i)=>({index:i,name:r.name||r.brand_name||'商户身份',role:r.role|| (r.group_user_id?'group_super_admin':'未知角色')})):[],modules:modules.map(m=>({...m,state:this.dataSeen.has(m.key)?'live_verified':s?.verified&&['overview','transactions','refunds','stores','products','inventory','gross_profit','catalog','members','stored_value_accounts','stored_value_bills'].includes(m.key)?'ready_for_query':m.state})),coverage:coverageFor(this.dataSeen),hasPendingSms:!!this.pending&&Date.now()-this.pending.createdAt<600000,liveDataVerified:this.dataSeen.size>0};}
-  async persist(){if(this.session)await this.save(this.vault,{...this.session,cookies:[...this.client.cookies].map(([base,v])=>[base,[...v]])});}
+  async init(){const stored=await this.load(this.vault);if(stored?.ucToken){this.session={...stored,verified:false};this.nativeStartup=stored.authSource==='apk';this.sessionSaved=true;for(const [base,values] of stored.cookies||[])this.client.cookies.set(base,new Map(values));}return this;}
+  status(){const s=this.session;return {service:'shouqianba',auth:{loginSource:this.nativeClient?'apk':'web',sessionSource:s?.ucToken?(s.authSource||'web'):null,captcha:{sceneId:this.nativeClient?'1wuucxrx':'1cq7nw11',region:'cn',prefix:'1ewi7m'}},stage:s?.verified?'authenticated':s?.ucToken?'saved_session':'signed_out',phone:s?.phone?`${s.phone.slice(0,3)}****${s.phone.slice(-4)}`:null,merchant:s?.verified?s.merchant:null,identities:s?.ucToken?(s.identities||[]).map((r,i)=>({index:i,name:r.name||r.merchant_name||r.group_name||r.brand_name||'商户身份',role:r.role|| (r.group_user_id?'group_super_admin':'未知角色')})):[],modules:modules.map(m=>({...m,state:this.dataSeen.has(m.key)?'live_verified':s?.verified&&['overview','transactions','refunds','stores','products','inventory','gross_profit','catalog','members','stored_value_accounts','stored_value_bills'].includes(m.key)?'ready_for_query':m.state})),coverage:coverageFor(this.dataSeen),persistence:{saved:this.sessionSaved,savedAt:s?.persistedAt||null},hasPendingSms:!!this.pending&&Date.now()-this.pending.createdAt<600000,lease:{expiresAt:s?.authSource==='apk'&&Number.isSafeInteger(s.expireTime)&&s.expireTime>946684800000&&s.expireTime<4102444800000?s.expireTime:null,lastVerifiedAt:s?.lastVerifiedAt||null,lastRefreshAt:s?.refreshTime||null},keepalive:this.keepaliveStatus?.()||{enabled:false},liveDataVerified:this.dataSeen.size>0};}
+  async persist(){
+    if(!this.session)return;
+    const epoch=this.sessionEpoch,value=structuredClone({...this.session,persistedAt:Date.now(),cookies:[...this.client.cookies].map(([base,v])=>[base,[...v]])});
+    const task=this.persistenceQueue.then(async()=>{
+      if(epoch!==this.sessionEpoch)return;
+      try{await this.save(this.vault,value);}catch{this.sessionSaved=false;throw new ServiceError('SESSION_SAVE_FAILED','登录状态未能加密保存到本机，请检查磁盘空间与当前用户的写入权限后重试',503);}
+      if(epoch===this.sessionEpoch&&this.session?.ucToken===value.ucToken){this.session.persistedAt=value.persistedAt;this.sessionSaved=true;}
+    });
+    this.persistenceQueue=task.catch(()=>{});return task;
+  }
+  assertSession(epoch){if(epoch!==this.sessionEpoch||!this.session?.ucToken)throw new ServiceError('SESSION_CHANGED','账号连接已变化，请重新检查连接',409);}
   async sendCode(input){
     const number=phone(input.phone);
     if(this.sending)throw new ServiceError('SMS_BUSY','短信正在发送，请稍候',429);
@@ -35,11 +46,11 @@ export class Runtime {
     if(typeof input.captchaVerifyParam!=='string'||!input.captchaVerifyParam||input.captchaVerifyParam.length>24000)throw new ServiceError('CAPTCHA_REQUIRED','请先完成人机验证');
     this.sending=true;
     try{
-      const riskData=JSON.stringify({version:'v2',captchaVerifyParam:input.captchaVerifyParam,sceneId:'1cq7nw11'});
-      const result=await this.client.request('/api/login/ucUser/getRiskCode',{body:{identifier:number,riskData,scene:'auth_login'}});
+      const riskData=JSON.stringify({version:'v2',captchaVerifyParam:input.captchaVerifyParam,sceneId:this.nativeClient?'1wuucxrx':'1cq7nw11'});
+      const result=await (this.nativeClient||this.client).request(this.nativeClient?'/v6/appUser/sendAuthCodeWithRisk':'/api/login/ucUser/getRiskCode',{body:{identifier:number,riskData,scene:'auth_login'}});
       if(Number(result?.bizCode)===400)return {sent:false,retryVerification:true};
       if(Number(result?.bizCode)!==200||!result.sendId)throw new ServiceError('SMS_REJECTED','短信未发送成功，请重试验证');
-      this.pending={phone:number,sendId:result.sendId,createdAt:Date.now()};
+      this.pending={phone:number,sendId:result.sendId,createdAt:Date.now(),authSource:this.nativeClient?'apk':'web'};
       return {sent:true,retryAfter:60};
     }finally{this.sending=false;}
   }
@@ -50,11 +61,14 @@ export class Runtime {
     if(typeof input.code!=='string'||!/^\d{4,8}$/.test(input.code))throw new ServiceError('INVALID_CODE','请输入短信中的验证码');
     this.loggingIn=true;
     try{
-      const result=await this.client.request('/api/login/ucUser/loginByCode',{loginHeaders:true,body:{username:number,auth_code:input.code,send_id:this.pending.sendId,uc_device:{device_type:2,default_device:0,platform:'商户服务平台',device_name:'收钱吧商户平台',device_model:'Windows',device_brand:'Chrome',device_fingerprint:input.fingerprint&&/^[\w-]{16,80}$/.test(input.fingerprint)?input.fingerprint:randomUUID()}}});
+      const native=this.pending.authSource==='apk';
+      const result=native?await this.requireNative().request('/v6/appUser/loginWithAuthCodeV2',{body:{authCode:input.code,identifier:number,sendId:this.pending.sendId,scene:'auth_login',uc_device:this.nativeUcDevice()}}):await this.client.request('/api/login/ucUser/loginByCode',{loginHeaders:true,body:{username:number,auth_code:input.code,send_id:this.pending.sendId,uc_device:{device_type:2,default_device:0,platform:'商户服务平台',device_name:'收钱吧商户平台',device_model:'Windows',device_brand:'Chrome',device_fingerprint:input.fingerprint&&/^[\w-]{16,80}$/.test(input.fingerprint)?input.fingerprint:randomUUID()}}});
+      if(native)this.validateNativeLogin(result);
       if(Number(result?.code)===50212)throw new ServiceError('DEVICE_AUTH_REQUIRED','该账号需要在收钱吧APP确认新设备，请先在官方商户平台完成登录');
       const token=result?.mchUserTokenInfo?.token;
-      if(!token)throw new ServiceError('LOGIN_SCHEMA_CHANGED','登录结果没有可识别的会话，需要核对官方登录流程',502);
-      this.session={ucToken:token,phone:number,identities:result.loginUserInfos||[],verified:false,validTime:result.mchUserTokenInfo.valid_time,refreshTime:Date.now()};
+      if(typeof token!=='string'||!token.trim()||result.loginUserInfos!=null&&!Array.isArray(result.loginUserInfos))throw new ServiceError('LOGIN_SCHEMA_CHANGED','登录结果没有可识别的会话，需要核对官方登录流程',502);
+      if(native)this.client.cookies.clear();this.stores.clear();this.offsetHour=null;this.dataSeen.clear();
+      this.sessionEpoch++;this.sessionSaved=false;this.nativeStartup=false;this.session={ucToken:token,authSource:native?'apk':'web',ucUserId:result.uc_user_id||null,phone:number,identities:result.loginUserInfos||[],verified:false,validTime:result.mchUserTokenInfo.valid_time,expireTime:result.mchUserTokenInfo.expire_time??null,refreshTime:Date.now()};
       this.pending=null;
       await this.persist();
       if(this.session.identities.length<=1)await this.checkSession();
@@ -62,36 +76,111 @@ export class Runtime {
     }finally{this.loggingIn=false;}
   }
   requireToken(){if(!this.session?.ucToken)throw new ServiceError('LOGIN_REQUIRED','请先在网页登录收钱吧',401);return this.session.ucToken;}
+  requireNative(){if(!this.nativeClient)throw new ServiceError('NATIVE_PROFILE_REQUIRED','此会话需要本机的 App 连接配置，请恢复配置后检查连接',503);return this.nativeClient;}
+  nativeUcDevice(){
+    this.requireNative();const d=this.nativeDevice;
+    if(!d?.fingerprint)throw new ServiceError('NATIVE_PROFILE_REQUIRED','本机 App 设备配置不可用',503);
+    return {device_type:1,device_name:d.name,device_brand:d.brand,device_model:d.model,platform:'收钱吧APP',device_fingerprint:d.fingerprint};
+  }
+  validateNativeLogin(result){
+    const code=String(result?.code??'');
+    if(code==='20034')throw new ServiceError('DEVICE_AUTH_REQUIRED','收钱吧要求原有设备确认本次登录，当前不能仅凭短信完成连接',409);
+    if(['20041','20043'].includes(code))throw new ServiceError('ADDITIONAL_AUTH_REQUIRED','收钱吧要求额外身份验证，当前短信登录尚未完成',409);
+    if(code==='20033')throw new ServiceError('MERCHANT_ACCOUNT_REQUIRED','此账号还需在收钱吧完成商户设置',409);
+    if(code&&code!=='10000')throw new ServiceError('LOGIN_REJECTED','收钱吧未接受本次登录，请检查验证码或重新获取',400);
+  }
+  async restoreNativeStartup(){
+    if(!this.nativeStartup)return;
+    const epoch=this.sessionEpoch,token=this.requireToken();
+    try{
+      if(token.length>40)await this.refreshToken();
+      else{
+        const result=await this.requireNative().request('/v6/appUser/loginWithAppToken',{token,body:{token,uc_device:this.nativeUcDevice()}});this.assertSession(epoch);this.validateNativeLogin(result);
+        const next=result?.mchUserTokenInfo?.token;
+        if(typeof next!=='string'||!next.trim())throw new ServiceError('SESSION_REFRESH_UNAVAILABLE','尚未取得 App 登录恢复结果，已保留本机记录',502);
+        this.session={...this.session,ucToken:next,ucUserId:result.uc_user_id||this.session.ucUserId,identities:result.loginUserInfos||this.session.identities,validTime:result.mchUserTokenInfo.valid_time,expireTime:result.mchUserTokenInfo.expire_time??null,refreshTime:Date.now()};await this.persist();
+      }
+      this.nativeStartup=false;
+    }catch(e){if(['AUTH_EXPIRED','NATIVE_TOKEN_INVALID'].includes(e.code)&&epoch===this.sessionEpoch)await this.disconnect();throw e;}
+  }
   async authenticated(path,options={}){
     this.requireToken();
-    if(Date.now()-(this.session.refreshTime||0)>25*60000)await this.refreshToken();
-    const request=()=>this.client.request(path,{...options,token:this.requireToken(),query:{...options.query,...(options.queryToken===false?{}:{token:this.requireToken()})}});
+    const epoch=this.sessionEpoch,wasVerified=this.session.verified;let usedToken;
+    const {nativeAuth=false,...requestOptions}=options;
+    const request=async()=>{this.assertSession(epoch);usedToken=this.requireToken();const client=nativeAuth?this.requireNative():this.client;const body=nativeAuth&&requestOptions.body&&Object.hasOwn(requestOptions.body,'token')?{...requestOptions.body,token:usedToken}:requestOptions.body;const result=await client.request(path,{...requestOptions,...(body!==undefined?{body}:{}),token:usedToken,query:{...requestOptions.query,...(requestOptions.queryToken===false?{}:{token:usedToken})}});this.assertSession(epoch);return result;};
+    // Web sessions verify first. App startup recovery follows its separate SDK path.
     try{return await request();}
-    catch(e){if(e.code!=='AUTH_EXPIRED')throw e;try{await this.refreshToken();return await request();}catch(f){if(f.code==='AUTH_EXPIRED'){await this.disconnect();}throw f;}}
+    catch(e){
+      if(e.code==='NATIVE_TOKEN_INVALID'){if(epoch===this.sessionEpoch)await this.disconnect();throw e;}
+      if(e.code==='AUTH_EXPIRED'&&!nativeAuth&&this.session?.authSource==='apk'){
+        // A web data service rejecting an App token does not revoke its native lease.
+        await this.checkNativeSession();
+        throw new ServiceError('DATA_AUTH_UNVERIFIED','App 登录有效，但此经营数据接口尚未接受该会话，需要继续核对 App 数据接口',409);
+      }
+      if(e.code!=='AUTH_EXPIRED')throw e;this.assertSession(epoch);this.session.verified=false;
+      try{if(usedToken===this.session.ucToken)await this.refreshToken();const result=await request();this.session.verified=wasVerified;return result;}
+      catch(f){if(['AUTH_EXPIRED','NATIVE_TOKEN_INVALID'].includes(f.code)&&epoch===this.sessionEpoch){console.warn('[session] '+new Date().toISOString()+' auth rejected after recovery; clearing rejected session');await this.disconnect();}throw f;}
+    }
   }
   async refreshToken(){
-    if(!this.refreshing)this.refreshing=(async()=>{const token=this.requireToken();try{const result=await this.client.request('/api/login/ucUser/refreshToken',{token,query:{token}});if(Number(result?.status)!==2||!result.token)throw new ServiceError('AUTH_EXPIRED','登录已失效，请重新进行短信登录',401);this.session={...this.session,ucToken:result.token,refreshTime:Date.now(),validTime:result.valid_time};await this.persist();}catch(e){if(e.code==='AUTH_EXPIRED')await this.disconnect();throw e;}finally{this.refreshing=null;}})();
-    return this.refreshing;
+    if(this.refreshing)return this.refreshing;
+    const epoch=this.sessionEpoch,token=this.requireToken();
+    const task=(async()=>{
+      const native=this.session.authSource==='apk';
+      const result=native?await this.requireNative().request('/v5/ucToken/refreshToken',{method:'GET',token,query:{threshold:86400}}):await this.client.request('/api/login/ucUser/refreshToken',{token,query:{token}});this.assertSession(epoch);
+      if(result?.status!==undefined&&result?.status!==null&&['0',...(native?['1']:[])].includes(String(result.status)))throw new ServiceError('AUTH_EXPIRED','收钱吧确认登录已失效，请重新进行短信登录',401);
+      if(Number(result?.status)!==2||typeof result.token!=='string'||!result.token.trim())throw new ServiceError('SESSION_REFRESH_UNAVAILABLE','暂未取得有效的登录刷新结果，已保留本机登录记录，请稍后检查连接',502);
+      this.sessionSaved=false;this.session={...this.session,ucToken:result.token,refreshTime:Date.now(),validTime:result.valid_time,expireTime:result.expire_time??null};await this.persist();
+    })();
+    this.refreshing=task;try{return await task;}finally{if(this.refreshing===task)this.refreshing=null;}
   }
   async checkSession(){
+    if(this.session?.authSource==='apk')return this.checkNativeSession();
+    const epoch=this.sessionEpoch;
     const current=await this.authenticated('/api/login/ucUser/getCurrentUser',{method:'GET'});
+    this.assertSession(epoch);
     if(!current?.trade_user_info)throw new ServiceError('MERCHANT_SELECTION_REQUIRED','请选择商户身份，或先在官方商户平台完成账号设置');
     const trade=current.trade_user_info;
     this.session={...this.session,verified:true,businessToken:current.token,context:{role:trade.role,merchant_id:trade.merchant_id,merchant_user_id:trade.merchant_user_id,group_id:trade.group_id,group_user_id:trade.group_user_id,brand_user_id:trade.brand_user_id},merchant:{name:current.loginUserInfo?.name||current.loginUserInfo?.brand_name||'当前商户',merchantId:trade.merchant_id||null,merchantSn:trade.merchant_sn||null,role:trade.role||(trade.group_user_id?'group_super_admin':trade.brand_user_id?'brand_super_admin':'未知角色')}};
     await this.persist();return this.status();
   }
+  async checkNativeSession(){
+    const epoch=this.sessionEpoch;await this.restoreNativeStartup();
+    const current=await this.authenticated('/V2/Account/get',{method:'GET',nativeAuth:true});this.assertSession(epoch);
+    const admin=current?.admin,merchant=current?.merchant;
+    if(!admin||typeof admin!=='object'||!(admin.merchant_id||merchant?.id||admin.group_user_id))throw new ServiceError('MERCHANT_SELECTION_REQUIRED','请选择收钱吧商户身份，当前尚未获得商户信息',409);
+    const selected=this.session.selectedIdentity||(this.session.identities?.length===1?this.session.identities[0]:null);
+    const context={role:admin.role,merchant_id:admin.merchant_id||merchant?.id,merchant_user_id:admin.merchant_user_id||selected?.merchant_user_id,group_id:admin.group_id,group_user_id:admin.group_user_id};
+    this.session={...this.session,verified:true,lastVerifiedAt:Date.now(),context,merchant:{name:merchant?.name||admin.merchant_name||current.group?.name||'当前商户',merchantId:context.merchant_id||null,merchantSn:admin.merchant_sn||merchant?.sn||null,role:admin.role||(admin.group_user_id?'group_super_admin':'未知角色')}};
+    await this.persist();return this.status();
+  }
+  async keepAlive(){
+    if(!this.session?.ucToken||this.session.authSource!=='apk')return {skipped:true};
+    if(this.nativeStartup)return this.checkSession();
+    const epoch=this.sessionEpoch;
+    try{await this.refreshToken();this.assertSession(epoch);return await this.checkSession();}
+    catch(e){if(['AUTH_EXPIRED','NATIVE_TOKEN_INVALID'].includes(e.code)&&epoch===this.sessionEpoch)await this.disconnect();throw e;}
+  }
   async chooseIdentity(input){
     this.requireToken();
     if(!Number.isInteger(input.index)||!this.session.identities?.[input.index])throw new ServiceError('INVALID_IDENTITY','请选择列表中的商户身份');
     const identity=this.session.identities[input.index];
+    if(this.session.authSource==='apk'){
+      if(identity.brand_user_id||identity.group_user_id)throw new ServiceError('IDENTITY_UNSUPPORTED','此 App 集团或品牌身份的原生切换流程尚未验证，请选择普通商户身份',409);
+      const id=identity.merchant_user_id;
+      if(!id)throw new ServiceError('IDENTITY_SCHEMA_CHANGED','App 商户身份格式需要核对');
+      // The SDK models this response as dtc (empty); it keeps the existing token.
+      await this.authenticated('/v6/appUser/changeLoginUser',{nativeAuth:true,queryToken:false,body:{merchantUserId:id,token:this.requireToken()}});
+      this.session.selectedIdentity=identity;this.sessionEpoch++;this.session.verified=false;this.stores.clear();this.offsetHour=null;this.dataSeen.clear();await this.persist();return this.checkSession();
+    }
     let method='chooseLoginUser',query={merchantUserId:identity.merchant_user_id},body={merchantUserId:identity.merchant_user_id};
     if(identity.brand_user_id){method='chooseLoginBrandUser';query={brandUserId:identity.brand_user_id};body=undefined;}
     else if(identity.group_user_id){method='chooseLoginGroupUser';query={groupUserId:identity.group_user_id};body={groupUserId:identity.group_user_id};}
     if(!Object.values(query)[0])throw new ServiceError('IDENTITY_SCHEMA_CHANGED','商户身份格式需要核对');
     await this.authenticated('/api/login/ucUser/'+method,{query,body,loginHeaders:true});
-    this.session.verified=false;this.stores.clear();this.offsetHour=null;this.dataSeen.clear();return this.checkSession();
+    this.sessionEpoch++;this.session.verified=false;this.stores.clear();this.offsetHour=null;this.dataSeen.clear();return this.checkSession();
   }
-  async disconnect(){this.session=null;this.pending=null;this.client.cookies.clear();this.stores.clear();this.offsetHour=null;this.dataSeen.clear();await this.clear(this.vault);return this.status();}
+  async disconnect(){this.sessionEpoch++;this.sessionSaved=false;this.session=null;this.pending=null;this.refreshing=null;this.client.cookies.clear();this.stores.clear();this.offsetHour=null;this.dataSeen.clear();await this.persistenceQueue;await this.clear(this.vault);return this.status();}
   async readInventory(input={}){
     if(typeof input.storeId!=='string'||!input.storeId)throw new ServiceError('STORE_REQUIRED','库存请先选择一家门店，不将各店库存直接相加');
     const stores=await this.authenticated('/v4/uf4b-app/multi/terminal/retail/merchant/findUserStores',{base:EDGE,queryToken:false});

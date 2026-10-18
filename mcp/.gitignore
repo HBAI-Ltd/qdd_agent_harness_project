@@ -9,3 +9,9 @@ dist/
 *.pid
 *.log
 *.tsbuildinfo
+**/mcp-key
+**/browser-key
+**/native-profile.json
+**/shouqianba-client-config.json
+**/keepalive-history.json
+**/session*.json

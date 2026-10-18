@@ -31,10 +31,10 @@ const signed=value=>value===null||value===undefined?'—':(Number(value)>0?'+':'
 function renderChange(){
  const review=report.storeChange;if(!review)return;$('why').hidden=false;
  const updated=el('p','本次深入复盘采集于 '+new Date(review.generatedAt).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false})+'（北京时间）','muted');$('why-comparison').before(updated);
- const stores=review.stores,sea=stores.find(s=>s.store.name.includes('海宫'));
+ const stores=review.stores,initialStore=stores.find(s=>Number(s.delta?.change)>0)||stores[0];
  $('why-comparison').replaceChildren(table(['门店','营业实收（元）','订单数','每单实收（元）','收入变化'],stores.map(s=>{const a=s.weeks.before,b=s.weeks.after,o=s.evidence.orders;return[short(s.store.name),money(a.orderAmount)+' → '+money(b.orderAmount),a.orderCount+' → '+b.orderCount,money(o.beforePerOrder)+' → '+money(o.afterPerOrder),signed(o.amount)+' 元 / '+percent(s.delta.change)];})));
  for(const s of stores){const option=el('option',short(s.store.name));option.value=s.store.id;$('why-store').append(option);}
- if(sea)$('why-store').value=sea.store.id;
+ if(initialStore)$('why-store').value=initialStore.store.id;
  function draw(){
   const s=stores.find(s=>s.store.id===$('why-store').value),a=s.weeks.before,b=s.weeks.after,e=s.evidence,story=s.story,target=$('why-detail');
   target.replaceChildren(el('p',story.conclusion,'why-verdict'));

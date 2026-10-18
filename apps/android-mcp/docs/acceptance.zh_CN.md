@@ -44,10 +44,32 @@
   `transfer-compression-audit.json`、`apps/android-screen/build/listener-refusal-review/repro.log`、
   `endpoint-v61-{red,green,tests,build}.log`。正式复现入口为 `tools/test-stream.ps1`，其调用
   `tools/test-endpoint.ps1` 编译生产监听实现及 `tools/endpoint-tests/` 中的主机事件替身。
-- **Device / Unverified**：未安装 APK，未启动/替换实际操作台，未刷 ESP 或更新板内下载包。
+- **初始交付 Device / Unverified**：当时未安装 APK，未启动/替换实际操作台，未刷 ESP 或更新板内下载包。
   需同时更新 APK 和 EXE 才包含两端修复。朋友机器的实际拒绝原因、厂商网络回调、重连效果和
   中文真实落字仍未验收。本轮保留 v60 输入法实现；历史 MCP 会话/排队取消问题仍为待办，
   不能把这些连接修复当作全部鲁棒性问题已解决。未提交、push 或发布。
+
+### v61 COM5 刷写补充
+
+2026-10-18：用户随后要求刷入 COM5/6。仅枚举到 COM5 A1BA，esptool 实测 MAC
+`4c:11:ae:2f:a1:b8`、ESP32-C3、8 MB；没有 COM6。
+
+- **Build / Host tests: PASS**：内置电脑 ZIP 路径更新为 v61；完整 ESP 门禁 exit 0，
+  保留既有平台跳过 4/5/12。归档及精确 APK/ZIP 嵌入由两次独立检查确认。
+  bundle `apps/esp/build/firmware/1c0f6ef2db164c73caa7c69ccab8697870fd7deac593920aeb6fa63c604ff149`；
+  app 2,695,888 B，SHA `ef1d78777cb33d339eab2ace0f5094c1d985f1cde05947232a88f39b80fd3fff`；
+  ELF SHA `f48b4a42dcb8e3e6e6c19420fd88e9210adcc4a1554340c9ad312b05c6a633d5`。
+- **Device tests: PASS（刷写/启动专项）**：新读表 MD5 有效，SHA
+  `b4a705f5dcd64100c5c40e0de65b2a2acae70a2827ae56044317575331f4620d`，factory 位于
+  `0x10000/0x7f0000`，没有 assets。仅写 app，扇区擦除范围 `[0x10000,0x2a3000)`，
+  esptool exit 0 / `Hash of data verified`，保留 bootloader、分区表、NVS、PHY。
+  30.031 秒只读观察取得 9 个状态回复，无 fault/OOM；Wi-Fi 恢复，BLE 已加密、绑定、ready，
+  文字通道 ready。未发送文字/点击，未清除设置，串口已关闭。
+- **Unverified**：电脑对首页及 `/api/status` 的请求均约 5 秒后无 HTTP 响应断开，ICMP 0/2。
+  板报告 `192.168.1.221`，电脑 WLAN 为 `10.65.201.80/24`，目标路由选到 Mihomo；
+  未修改网络或代理设置。此环境未完成板上 APK/ZIP 下载校验，不能据此归因于固件。
+  手机和电脑尚未更新 v61，真实网页重连、中文落字及完整 UI 流程仍未验收；刷入下载包不等于安装。
+- 证据：`apps/esp/build/com5-v61-{full-gate.log,artifact-identity.json,layout-read.log,partition-table.bin,flash-plan.json,flash.log,startup.json,download.json,result.json}`。
 
 ## v60 设备输入法直写中文——首次选择，单次提交
 

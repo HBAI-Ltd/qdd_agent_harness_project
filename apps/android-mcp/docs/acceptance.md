@@ -51,11 +51,37 @@ which does not establish the other computer's state.
   `transfer-compression-audit.json`, Android `build/listener-refusal-review/repro.log` and
   `endpoint-v61-{red,green,tests,build}.log`. `tools/test-stream.ps1` runs `tools/test-endpoint.ps1`,
   compiling production listeners and the host event substitutes in `tools/endpoint-tests/`.
-- **Device / Unverified**: No APK installation, real console startup/replacement, ESP flash or
+- **Initial delivery Device / Unverified**: At that point, no APK installation, real console startup/replacement, ESP flash or
   on-board download update. Both APK and EXE need updating to include the fixes. The reported
   machine's actual cause, OEM callbacks, real recovery and Chinese insertion remain unverified.
   v60 IME behavior is retained. Previously recorded MCP session/queued-cancellation issues remain
   pending; this is not full robustness acceptance. No commit, push or publication.
+
+### v61 COM5 flashing supplement
+
+2026-10-18: The user subsequently requested flashing COM5/6. Only COM5 A1BA was enumerated;
+esptool confirmed MAC `4c:11:ae:2f:a1:b8`, ESP32-C3 and 8 MB. COM6 was absent.
+
+- **Build / Host tests: PASS**: The embedded desktop ZIP path now selects v61. The full ESP gate
+  exited 0 with existing platform skips 4/5/12 retained. Two independent checks verified the archive
+  and exact embedded APK/ZIP. Bundle
+  `apps/esp/build/firmware/1c0f6ef2db164c73caa7c69ccab8697870fd7deac593920aeb6fa63c604ff149`;
+  app 2,695,888 B, SHA `ef1d78777cb33d339eab2ace0f5094c1d985f1cde05947232a88f39b80fd3fff`;
+  ELF SHA `f48b4a42dcb8e3e6e6c19420fd88e9210adcc4a1554340c9ad312b05c6a633d5`.
+- **Device tests: PASS (flash/startup only)**: Fresh target table MD5 was valid, SHA
+  `b4a705f5dcd64100c5c40e0de65b2a2acae70a2827ae56044317575331f4620d`, with factory at
+  `0x10000/0x7f0000` and no assets partition. Only the app was written; sector erase range
+  `[0x10000,0x2a3000)`, esptool exit 0 / `Hash of data verified`. Bootloader, partition table,
+  NVS and PHY were preserved. A 30.031-second read-only window received nine status replies,
+  with no fault/OOM; Wi-Fi recovered, BLE was encrypted/bonded/ready, and text transport was ready.
+  No typing/clicking or settings reset occurred; the serial port was closed.
+- **Unverified**: PC requests to the root page and `/api/status` closed without an HTTP response
+  after about five seconds; ICMP was 0/2. The board reported `192.168.1.221`, while PC WLAN was
+  `10.65.201.80/24` and the selected target route used Mihomo. Network/proxy settings were not changed.
+  On-board APK/ZIP downloads were not verified in this environment; this does not establish a
+  firmware cause. The phone and desktop have not been updated to v61. Real web recovery, Chinese
+  insertion and full UI flow remain unverified; embedding downloads is not installing them.
+- Evidence: `apps/esp/build/com5-v61-{full-gate.log,artifact-identity.json,layout-read.log,partition-table.bin,flash-plan.json,flash.log,startup.json,download.json,result.json}`.
 
 ## v60 Direct Unicode through the selected device IME
 

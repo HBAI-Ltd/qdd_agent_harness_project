@@ -56,6 +56,10 @@ async function main() {
     '<div class="card-heading"><h2>连接手机</h2><a class="text-button" href="/desktop/settings">连接设置</a></div>'));
   assets["assets/operator.html"] = desktopHtmlPath;
   assets["native/serialport.node"] = nativePath;
+  const previewWorker = join(output, "target-preview-worker.cjs");
+  await build({ entryPoints: [join(appRoot, "src", "target-preview-worker.ts")], outfile: previewWorker,
+    bundle: true, platform: "node", target: "node24", format: "cjs", logLevel: "info", legalComments: "inline" });
+  assets["workers/target-preview.cjs"] = previewWorker;
   const runtimeManifest = await Promise.all(Object.entries(assets).map(async ([path, source]) => ({ path, sha256: sha(await readFile(source)) })));
   const runtimeManifestPath = join(output, "runtime-manifest.json");
   await writeFile(runtimeManifestPath, `${JSON.stringify(runtimeManifest, null, 2)}\n`);

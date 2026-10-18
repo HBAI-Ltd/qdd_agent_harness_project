@@ -14,6 +14,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import { deviceBaseUrl } from "./desktop-network.mjs";
 import { JPEG_FIXTURE } from "../dist/fixtures/jpeg.js";
+import { readPngDimensions } from "../dist/adb.js";
 
 const appRoot = fileURLToPath(new URL("../", import.meta.url));
 const output = join(appRoot, "build", "windows");
@@ -175,7 +176,10 @@ try {
   const client = new Client({ name: "exe-http-smoke", version: "1" });
   clients.push(client);
   await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`)));
-  assert.ok((await client.listTools()).tools.some((tool) => tool.name === "android_control"));
+  const packagedTools = (await client.listTools()).tools;
+  assert.ok(packagedTools.some((tool) => tool.name === "android_control"));
+  assert.ok(packagedTools.some((tool) => tool.name === "android_pointer_calibration"));
+  assert.ok(packagedTools.some((tool) => tool.name === "android_preview_tap"));
   const coldObserver = new Client({ name: "exe-cold-readonly-observer", version: "1" }); clients.push(coldObserver);
   let cancellationDelivered = false;
   await coldObserver.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`), {
@@ -277,6 +281,44 @@ try {
   } finally { clearTimeout(profileDeadline); previewAbort.abort(); await previewReader.cancel().catch(() => {}); previewReader.releaseLock(); }
   assert.equal(armed, true, "Closing a preview viewer must not release the active owner.");
   results.push({ name: "packaged four-profile preview persists settings without claiming input; every MCP screenshot captures a fresh original JPEG", pass: true });
+  const targetFrame = metadata(await client.callTool({ name: "android_screenshot" })).value;
+  const targetInputReports = inputOperations();
+  const target = metadata(await client.callTool({ name: "android_preview_tap", arguments: {
+    frameId: targetFrame.frameId, x: 500, y: 500, coordinateSpace: "normalized1000",
+  } }));
+  assert.equal(target.value.simulatedTarget, true);
+  assert.equal(target.value.realMouseMoved, false); assert.equal(target.value.realClickSent, false);
+  assert.deepEqual(target.value.target, { x: 1, y: 1, coordinateSpace: "pixels" });
+  const targetImages = target.parsed.content.filter(({ type }) => type === "image");
+  assert.equal(targetImages.length, 2);
+  assert.deepEqual(readPngDimensions(Buffer.from(targetImages[0].data, "base64")), { width: 2, height: 3 });
+  assert.deepEqual(readPngDimensions(Buffer.from(targetImages[1].data, "base64")), { width: 4, height: 6 });
+  assert.equal(target.value.sourceSha256, createHash("sha256").update(JPEG_FIXTURE).digest("hex"));
+  assert.equal(inputOperations(), targetInputReports, "Packaged worker rendering must not send any hardware input.");
+  assert.equal(armed, true);
+  results.push({ name: "single EXE decodes and annotates an original JPEG in its embedded worker, returns target plus zoom PNGs, and preserves input owner without HID", pass: true });
+  const calibrationFrame = metadata(await client.callTool({ name: "android_screenshot" })).value;
+  const calibrationReports = reports.length;
+  const measured = metadata(await client.callTool({ name: "android_pointer_calibration", arguments: {
+    phase: "probe", frameId: calibrationFrame.frameId,
+  } }));
+  assert.equal(measured.value.phase, "probe");
+  assert.deepEqual(measured.value.counts, { dx: -96, dy: -96 });
+  assert.deepEqual(measured.value.imageOrder, ["before", "after"]);
+  assert.equal(measured.parsed.content.filter(({ type }) => type === "image").length, 2);
+  assert.notEqual(measured.value.before.sourceFrameId, measured.value.sourceFrameId);
+  assert.deepEqual(reports.slice(calibrationReports).filter(({ op }) => op === "MOVE").map(({ args }) => args), [[1, 1, 0, 0], [-96, -96, 0, 0]]);
+  const measuredInputReports = inputOperations();
+  // The real fixture is only 2x3 pixels, so no >=12px calibration is possible.
+  // This checks packaged result validation, not physical cursor measurement.
+  const invalidMeasurement = CallToolResultSchema.parse(await client.callTool({ name: "android_pointer_calibration", arguments: {
+    phase: "finish", frameId: measured.value.frameId, probeId: measured.value.probeId,
+    startX: 1, startY: 2, endX: 0, endY: 0,
+  } }));
+  assert.equal(invalidMeasurement.isError, true);
+  assert.equal(inputOperations(), measuredInputReports, "Submitting an invalid measurement must send no extra hardware input.");
+  assert.equal(armed, true);
+  results.push({ name: "packaged calibration probe returns two fresh original images and exactly two mouse reports; invalid finish sends no input", pass: true });
   const observer = new Client({ name: "exe-readonly-observer", version: "1" }); clients.push(observer);
   await observer.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`)));
   metadata(await client.callTool({ name: "android_hid_arm" }));

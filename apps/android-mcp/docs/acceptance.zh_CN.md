@@ -11,6 +11,116 @@
 本轮仅按新问题范围进行有界传输验证：v26 新板 APK 下载及哈希通过，没有修改 APK 源码，
 也不把下载通过当作手机已安装。
 
+## v41 预点击标记与真实悬停——电脑已更新，真机专项 PASS
+
+2026-10-18：新增只读 `android_preview_tap`。传入最新 `frameId`、坐标及可选 `coordinateSpace`，
+从新采集的真实原画生成高对比模拟目标全图和 2× 局部图，中心保留底图。返回原图 `target`、
+裁片 `crop`、`zoomTarget`、区分源图/标注图的 SHA 和可直接复用的 `tapArguments`。
+它不要求校准或 ARM，也不发送 HID、抢占输入。源图与后续动作使用同一像素/normalized1000 转换，
+渲染后重查本会话最新 frame、手机/旋转 epoch，并把渲染耗时计入原图 age；超过既有 3000ms 则拒绝。
+
+`android_control` 新增 `hover`：按已测量比例定位真实鼠标、不按下按钮，并返回真实后图；
+确认光标正确后再 `click`。旧鼠标按住状态会在定位前中立释放，避免沿定位路径拖动。
+截图标记确认拟选择的 UI 目标，hover 检查真实 HID 落点，两者不混为一项精度证明。
+
+- Build：**PASS**，根目录 typecheck/build。EXE build **3c8091bb77c3efd2c94d**，**95,678,464B**，
+  SHA-256 `c7ab0b2c329afab7a835e286adb1c322ce3676f37958383363d5e244285b4414`；旧 v40 包
+  已核验备份至 `build/windows/history/222be5b37c4e785e183b`。APK、v39 ESP 固件与设备数据未改。
+- Host tests：**537/537 PASS，零跳过**；EXE **17/17 PASS**。涵盖 JPEG/PNG、坐标/放大逐像素
+  一致、四角/窄图、中心保留、解压上限、只读无 HID/owner 接管、取消/并发新图/几何/age、
+  hover 旧按键中立释放和旧控制轮隔离。纯 JS 编解码在独立 worker 中运行，最多一个 active、
+  一个排队，5s 超时/取消终止；主线程定时器继续运行，取消排队者不会提前释放位置。
+  单 EXE 在空 PATH/独立目录中验证内嵌 worker，不依赖外部 Node 文件。打包 fixture 不是真机性能。
+  证据：`build/preclick-v41-{typecheck,build,host-tests,worker-tests,hover-input,exe-build,exe-tests}.log`。
+- Device tests：**PASS，仅限此预点击流程**。官方 SDK 列 **22** 工具，真实一加 8 原画 **1080×2400**。
+  未校准/未启用输入时预览 SAI 图标 (140,280)，**516ms** 返回全图及 **320×320** 局部图，
+  crop=(60,200,160,160)、zoomTarget=(160,160)，input 仍 armed=false；图中标记位于预期图标内。
+  复用 v40 对同一手机实测的 scale **1/1**，`hover` 含首次归零 **3363ms**，真实光标仍在该图标内。
+  检查图片后 `click` **270ms**；首张后图仍是桌面，再只读 `wait` 观察到 SAI 已打开，未重放点击。
+  随后 Home/只读等待恢复桌面，最终 encrypted/bonded/ready、armed/locked=false，诊断 exit **0**。
+  运行时全部画面来自手机 App 内网、输入来自 ESP BLE。证据：`build/preclick-v41-live.json`、
+  `preclick-v41-image-*.{png,jpg}`；标记局部图为 `preclick-v41-image-3.png`。
+- 最终服务 PID **17268**，路径/哈希核对，监听 **0.0.0.0:8790**；LAN/loopback health **200**、
+  未知路由 **404**，证据 `build/preclick-v41-final-service.json`。未提交/push/发布。
+
+Unverified：自动控件识别、其它手机/加速设置下的落点精度、全 UI、高频 LAN 根因和长期资源上界。
+本轮提供先看后点的工具及实物闭环，不宣称自动识别所有控件或完整成品通过。历史验收与审批边界保留。
+
+## v40 MCP 两阶段鼠标校准——电脑已更新，真机专项 PASS
+
+2026-10-18：新增 `android_pointer_calibration`。`probe` 自动释放输入、ARM、小幅显标，
+返回测量前后两张新原画；`finish` 接收 AI 从图中读取的起终点，计算每像素 HID 计数，
+不再移动。保留旧手动校准；相对移动、当前位置点击、键盘和滚轮仍无需校准。
+会话、手机/旋转、输入轮次、实际派发 revision、过期及一次性记录均有检查。
+允许只读截图/等待刷新画面，动作已完成但取图失败时不得盲目重放。
+
+非整数比例的坐标操作现在保留实际整数 HID 报告对应的估算位置，避免反复丢弃位置后归零。
+主机成本回归：1080×2400、scale 1.25，连续点按 (541,1201)、(542,1202)，第二次由旧路径
+**40** 条报告降至 **3** 条，预定等待 **1800→150ms**；不含传输/手机时间，不是真机非整数比例性能证明。
+
+- Build：**PASS**，根目录 typecheck/build。最终 EXE build **222be5b37c4e785e183b**，
+  **94,448,128B**，SHA-256 `1352d1c02a00d16bbf44e08360b2e1f8325eb55995f3419a37d2b0c6e5e26c14`。
+  旧产物与中间验证产物保存在 `build/windows/history/{c2042f779676b1fb0546,fb0935471db537163b4f}`。
+- Host tests：**498/498 PASS，零跳过**；EXE **16/16 PASS**。覆盖两张原图/四方向、finish 零输入、
+  跨会话/过期/几何/插入输入、旧取消轮隔离、非整数位置漂移及报告成本。HTTP 红绿证实并修正
+  错误 finish 提前打断浏览器，以及缺参数被拒绝的会话仍可借用全局 armed 领取租约的问题。
+  租约、会话关闭和丢失响应现统一读取真实 MCP owner，关闭被拒绝的借用者不影响原持有者。
+  打包场景是独立 loopback fixture，不是真机性能。证据：`build/calibration-v40-*-{red,green}.log`、
+  `calibration-v40-{typecheck,build,host-tests,exe-build,exe-tests}.log`。
+- Device tests：**PASS，仅限最终包校准/连续点按专项**。最初 ESP 在设置中返回 `CONFIGURING`，
+  没有绕过守护；用户用实体按键退出后恢复。最终包官方 SDK 列 **21** 工具，真实一加 8 App
+  经内网提供 **1080×2400** 原图，输入经 COM6 对应板的 BLE。`probe` **1488ms**；图中圆心
+  人工读为 (543,1203)→(447,1107)，`finish` **3ms**，scaleX/scaleY **1/1**。随后
+  (541,1201)、(542,1202) 两次点击均 `actionCompleted/observedAfterAction=true`，**3878/444ms**，
+  图片可见光标在请求中心附近。该短样本含首次归零与取图，不是旧版对比或独立像素误差测量。
+  最终 BLE encrypted/bonded/ready，armed/locked=false；诊断脚本正常 exit 0。
+  证据：`build/calibration-v40-final-live.json`、`calibration-v40-final-image-*.jpg`。
+- 最终服务路径/哈希核对，PID **106560**、监听 **0.0.0.0:8790**，LAN/loopback health **200**、
+  未知路由 **404**，证据 `build/calibration-v40-final-service.json`。APK 与 v39 ESP 固件未改。
+  夜间 automation 已按上海 09:00 截止要求删除，保留服务与设备数据；未提交/push/发布。
+
+Unverified：其它真机/非整数比例的加速及误差、完整实物 UI、高频 LAN 失败根因、长期资源上界。
+校准仍为估算，本轮低频专项不等于完整成品验收。历史 v36 高频失败及 App 启动自动审批拒绝
+边界继续保留，未重试或绕过被拒绝的启动动作。
+
+## v39 设置重新打开安装二维码——已构建并更新 COM6
+
+2026-10-18：设置新增 **手机投屏下载**，显示已有 APK 下载页的二维码、当前局域网 IP、
+同网与浏览器下载提示；确认 **返回设置**，光标仍停留在下载项。离线时显示连接提示，
+不自动打开无线扫描。该页面不改变引导完成标记、Wi-Fi、蓝牙配对、急停或 NVS。
+
+- Build：**PASS**，完整固件门禁及归档复验。App **1,666,016B**，SHA-256
+  `fcb04a400855a4847f1ac0a0d54164002d0464672766ed78243596cd3983ebde`；
+  归档 `apps/esp/build/firmware/f0bada5e21afe55b44399881505e1213c4b9fc47cacbf460ed4a5ae1a0bdeb4d`，
+  ELF SHA-256 `20bb40f39eb59dc717c47050ffe8d6e4d31c2c4429c65295503f43f48df2dc7e`。
+- Host tests：**PASS**。模型红绿、完整真实 LVGL 渲染、字库/布局、同 IP 重入、IP 更新、离线隐藏 QR、
+  返回光标和原退出/重置路径均通过；100 次相同页面刷新零 flush，120 次页面切换内存池稳定。
+  保留完整门禁已有平台跳过项。证据：`apps/esp/build/settings-download-*.log`。
+- Device tests：**PASS，仅限烧录/启动/连接恢复**。新鲜核对 COM6 / MAC **4c:11:ae:31:32:6c**
+  和实际分区表后，仅写 `ota_0 @ 0x20000`；写入哈希校验通过、擦除结束不含 `0x1b7000`。
+  保留 bootloader、分区表、otadata、NVS/配对、PHY、assets、ota_1。30 秒只读观察六个样本通过，
+  地址仍 **192.168.101.75:3333**、BLE encrypted/bonded/ready，未启用输入，无 fault/OOM，COM6 已关闭。
+  证据：`apps/esp/build/new-com6-v39-{layout-read.log,flash-plan.json,flash.log,startup.json}`。
+- 电脑服务已恢复为实际 PID **91668**，EXE build **c2042f779676b1fb0546** 未改；官方 SDK
+  **20** 工具、STATUS **5/5**、最大 **267ms**、七次 POST 全 SSE，LAN/loopback health **200**、未知路由 **404**。
+  证据：`apps/android-mcp/build/mcp-v39-final-status.json`。
+
+本轮另在上海 **08:36** 观察到真实一加 8 的投屏 App 已启动；未重试或绕过之前拒绝的启动动作。
+原画 **1080×2400**、来源 UUID **1651863a-9f91-4d0c-b689-168a2c78fc62**；实际图片核对了
+Home 返回桌面、相对鼠标移动及 Tab 焦点变化。19 次官方工具调用无错误，暂停/自动恢复及暂停后
+legacy 移动拒绝通过。证据：`mcp-v39-live.json`、`mcp-v39-frame-*.jpg`、`mcp-v39-paused-rejection.json`。
+浏览器点击画面进入、Esc 退出和四档画质切换通过，灰度实际可见，观察约 **13–16fps**。
+仍出现一次真实 **ESP32 PING acknowledgement timed out**，没有因此宣称断连解决。
+
+十秒低幅 WS 诊断首轮因 `sentAt <= Date.now()` 检查提前中止，**132** 发送/**128** 确认，
+剩余输入停止且不重放；不是完整压力 PASS，也不能把该脚本断言当作产品断连。
+原报告固定为 `ws-v39-real-smallmove-invalid-wall-clock.json`；诊断计时修正及离线校验通过，
+尚未复跑，不改变生产代码或任何安全时限。同期 35 秒 UART 观察 35 样本无 fault/OOM/无线重连，
+只保存白名单；header-only Npcap 未保存 payload、未提升权限。
+
+Unverified：新下载页的实体按键/实际屏幕/扫码操作、完整实物 UI、当前固件高频 LAN 门禁、
+持续输入稳定性与长期内存上界。真实画面及上述最小 HID 反馈已有证据，但**完整成品仍未通过验收**。
+
 ## v38 空闲观察连接恢复——真机专项 PASS，完整成品仍未通过验收
 
 2026-10-18：新实物证据闭环确认旧连接占槽机制：绑定来源的新 TCP 连接握手成功并发送 STATUS，

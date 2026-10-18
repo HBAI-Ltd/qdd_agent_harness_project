@@ -1238,6 +1238,63 @@ test("aborting a read-only tools POST cannot pause another MCP input owner", asy
   jsonResult(await owner.callTool({ name: "android_key", arguments: { combo: "enter" } }));
 });
 
+for (const rejectedInput of [false, true]) test(`another MCP session cannot borrow armed input to claim the first remote lease${rejectedInput ? " after a rejected input call" : ""}`, async (context) => {
+  const fixture = createFixture();
+  const listener = await startHttpMcp(fixture.tools, { port: 0 });
+  const owner = new Client({ name: "calibration-input-owner", version: "1" });
+  const other = new Client({ name: "unarmed-remote-borrower", version: "1" });
+  const ownerTransport = new StreamableHTTPClientTransport(new URL(listener.url));
+  const otherTransport = new StreamableHTTPClientTransport(new URL(listener.url));
+  context.after(async () => { await owner.close(); await other.close(); await listener.close(); });
+  await owner.connect(ownerTransport as unknown as Transport);
+  await other.connect(otherTransport as unknown as Transport);
+  jsonResult(await owner.callTool({ name: "android_hid_arm" }));
+  const epoch = fixture.input.controlEpoch, records = fixture.bridge.records.length;
+  if (rejectedInput) {
+    const rejected = CallToolResultSchema.parse(await other.callTool({ name: "android_mouse_move", arguments: {} }));
+    assert.equal(rejected.isError, true);
+    assert.equal(fixture.input.state.armed, true);
+  }
+  const endpoint = `${new URL(listener.url).origin}/remote/lease`;
+  assert.equal(await responseStatus(endpoint, { headers: { "Mcp-Session-Id": otherTransport.sessionId! } }), 409,
+    "A different session must claim its own MCP input scope before claiming a remote lease.");
+  assert.equal(fixture.input.controlEpoch, epoch);
+  assert.equal(fixture.bridge.records.length, records);
+  const otherId = otherTransport.sessionId!;
+  await other.close();
+  await waitForClosedSession(listener.url, otherId);
+  assert.equal(fixture.input.state.armed, true, "Closing the rejected borrower must not stop the actual input owner.");
+  assert.equal(fixture.bridge.records.length, records);
+  assert.equal(await responseStatus(endpoint, { headers: { "Mcp-Session-Id": ownerTransport.sessionId! } }), 204);
+});
+
+test("an invalid calibration finish cannot claim or stop another browser input owner", async (context) => {
+  const fixture = createFixture();
+  const listener = await startHttpMcp(fixture.tools, { port: 0 });
+  const browser = new Client({ name: "browser-before-invalid-calibration", version: "1" });
+  const ai = new Client({ name: "invalid-calibration-inspector", version: "1" });
+  const browserTransport = new StreamableHTTPClientTransport(new URL(listener.url));
+  const aiTransport = new StreamableHTTPClientTransport(new URL(listener.url));
+  context.after(async () => { await browser.close(); await ai.close(); await listener.close(); });
+  await browser.connect(browserTransport as unknown as Transport);
+  await ai.connect(aiTransport as unknown as Transport);
+  const origin = new URL(listener.url).origin;
+  const browserId = browserTransport.sessionId; assert.ok(browserId);
+  const browserHeaders = { "Mcp-Session-Id": browserId };
+  jsonResult(await browser.callTool({ name: "android_hid_arm" }));
+  assert.equal(await responseStatus(`${origin}/remote/lease`, { headers: browserHeaders }), 204);
+  const epoch = fixture.input.controlEpoch, before = fixture.bridge.records.length;
+  const result = CallToolResultSchema.parse(await ai.callTool({ name: "android_pointer_calibration", arguments: {
+    phase: "finish", probeId: "missing-probe", frameId: "missing-frame", startX: 200, startY: 300, endX: 104, endY: 204,
+  } }));
+  assert.equal(result.isError, true);
+  assert.equal(fixture.input.state.armed, true, "Measurement submission must not stop the existing browser round.");
+  assert.equal(fixture.input.controlEpoch, epoch);
+  assert.equal(fixture.bridge.records.length, before, "An invalid finish must send no release or input reports.");
+  assert.equal(await responseStatus(`${origin}/remote/input`, { headers: { ...browserHeaders, "Content-Type": "application/json" },
+    body: JSON.stringify({ kind: "mouse", dx: 1, dy: 0, buttons: 0, wheel: 0 }) }), 200);
+});
+
 test("AI control claims an active browser round and old teardown requests cannot stop the new owner", async (context) => {
   const fixture = createFixture();
   const capture = fixture.adb.capture.bind(fixture.adb);

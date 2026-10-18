@@ -24,7 +24,7 @@ function unpackRuntime() {
   if (!isSea()) throw new Error("请运行构建后的设备操作台.exe。");
   const files = JSON.parse(getAsset("runtime-manifest.json", "utf8"));
   for (const file of files) {
-    if (!/^(?:assets\/[a-z.-]+|native\/serialport\.node)$/.test(file.path)) throw new Error("应用资源清单不完整。");
+    if (!/^(?:assets\/[a-z.-]+|native\/serialport\.node|workers\/target-preview\.cjs)$/.test(file.path)) throw new Error("应用资源清单不完整。");
     const destination = join(cacheRoot, file.path);
     if (existsSync(destination) && hash(readFileSync(destination)) === file.sha256) continue;
     const bytes = Buffer.from(getAsset(file.path));

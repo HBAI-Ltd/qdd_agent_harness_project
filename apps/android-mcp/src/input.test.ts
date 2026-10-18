@@ -31,6 +31,150 @@ class FakeBridge implements SerialBridge {
   async close(): Promise<void> {}
 }
 
+for (const unknownPosition of [false, true]) test(`hover releases an old mouse hold before neutral positioning${unknownPosition ? " from an unknown position" : ""}`, async () => {
+  const bridge = new FakeBridge();
+  const input = new InputController(bridge, { width: 100, height: 200 });
+  input.setCalibration(1, 1); await input.arm();
+  if (unknownPosition) await input.move(1, 1, 0, 1);
+  else await input.pointerTo(20, 30, 1);
+  const previous = bridge.records.length;
+  const result = await input.hover(25, 35);
+  const movements = bridge.records.slice(previous).filter(({ op }) => op === "MOVE").map(({ args }) => args);
+  assert.deepEqual(movements[0], [0, 0, 0, 0], "Release at the old position before any homing or positioning report.");
+  assert.ok(movements.every((args) => args[2] === 0 && args[3] === 0), "Hover must never press or drag a held button.");
+  assert.deepEqual(result.pointer, { x: 25, y: 35 });
+  assert.equal(result.armed, true);
+});
+
+test("input revision counts dispatch before ACK across normal and realtime reports, never STATUS/PING/ARM", async () => {
+  const bridge = new FakeBridge();
+  const input = new InputController(bridge, { width: 100, height: 200 });
+  const request = bridge.request.bind(bridge);
+  const dispatched: { op: HidOperation; revision: number }[] = [];
+  bridge.request = async (op, args = [], signal) => {
+    dispatched.push({ op, revision: input.inputRevision });
+    return request(op, args, signal);
+  };
+  bridge.requestRealtime = bridge.request.bind(bridge);
+  assert.equal(input.inputRevision, 0);
+  await input.status(); await input.arm();
+  assert.equal(input.inputRevision, 0);
+  let checked = 0;
+  await input.move(96, 0, 0, 0, undefined, () => { assert.equal(input.inputRevision, 0); checked += 1; });
+  assert.equal(checked, 1); assert.equal(input.inputRevision, 1, "A 96-count probe is exactly one report.");
+  await input.keyReport(0, 4); await input.consumerReport(0x223);
+  await Promise.all([
+    input.remoteReport({ kind: "mouse", dx: 1, dy: 0, wheel: 0, buttons: 0 }),
+    input.remoteReport({ kind: "key", modifier: 0, keycode: 0 }),
+  ]);
+  assert.equal(input.inputRevision, 5);
+  assert.deepEqual(dispatched.filter(({ op }) => op === "MOVE" || op === "KEY" || op === "CONSUMER").map(({ revision }) => revision), [1, 2, 3, 4, 5]);
+  await input.status(); await input.arm();
+  assert.equal(input.inputRevision, 5);
+  await input.releaseAll(); await input.pause();
+  assert.equal(input.inputRevision, 8, "RELEASE and PAUSE also invalidate observations made before cleanup.");
+  const beforeFailure = input.inputRevision;
+  await input.arm(); bridge.failNext = "MOVE";
+  await assert.rejects(input.move(96, 0), /disconnected/);
+  assert.equal(input.inputRevision, beforeFailure + 3, "Failed MOVE remains counted, followed by RELEASE and PAUSE.");
+  assert.deepEqual(dispatched.slice(-3), [
+    { op: "MOVE", revision: beforeFailure + 1 },
+    { op: "RELEASE", revision: beforeFailure + 2 },
+    { op: "PAUSE", revision: beforeFailure + 3 },
+  ]);
+});
+
+test("realtime revision advances while ACKs are outstanding and is not rolled back on failure", async () => {
+  const bridge = new FakeBridge(), input = new InputController(bridge, { width: 100, height: 200 });
+  await input.arm();
+  let fail!: (error: Error) => void, started!: () => void;
+  const pending = new Promise<void>((resolve) => { started = resolve; });
+  bridge.requestRealtime = (op, args = []) => {
+    assert.equal(input.inputRevision, 1); bridge.records.push({ op, args }); started();
+    return new Promise<HidStatus>((_resolve, reject) => { fail = reject; });
+  };
+  const report = input.remoteReport({ kind: "mouse", dx: 1, dy: 0, wheel: 0, buttons: 0 });
+  const rejected = assert.rejects(report, /ACK lost/);
+  await pending;
+  assert.equal(input.inputRevision, 1);
+  fail(new Error("ACK lost")); await rejected;
+  assert.equal(input.inputRevision, 3);
+  assert.deepEqual(bridge.records.slice(-3).map(({ op }) => op), ["MOVE", "RELEASE", "PAUSE"]);
+});
+
+test("raw move guard checks each actual split report and catches mid-action changes before dispatch", async () => {
+  const bridge = new FakeBridge(), input = new InputController(bridge, { width: 100, height: 200 });
+  await input.arm();
+  const revisions: number[] = [];
+  await input.move(300, 0, 0, 0, undefined, () => { revisions.push(input.inputRevision); });
+  assert.deepEqual(revisions, [0, 1, 2]); assert.equal(input.inputRevision, 3);
+  const before = bridge.records.length, revision = input.inputRevision;
+  let fresh = true, checks = 0;
+  const request = bridge.request.bind(bridge);
+  bridge.request = async (op, args = [], signal) => {
+    const status = await request(op, args, signal);
+    if (op === "MOVE") fresh = false;
+    return status;
+  };
+  await assert.rejects(input.move(300, 0, 0, 0, undefined, () => {
+    checks += 1; if (!fresh) throw new Error("Probe frame changed.");
+  }), /Probe frame changed/);
+  assert.equal(checks, 2);
+  assert.deepEqual(bridge.records.slice(before), [
+    { op: "MOVE", args: [100, 0, 0, 0] }, { op: "RELEASE", args: [] }, { op: "PAUSE", args: [] },
+  ]);
+  assert.equal(input.inputRevision, revision + 3);
+});
+
+test("queued calibration probe rejects input inserted since observation before any probe movement", async () => {
+  const bridge = new FakeBridge(), input = new InputController(bridge, { width: 100, height: 200 });
+  await input.arm();
+  const observedRevision = input.inputRevision;
+  let release!: () => void, started!: () => void;
+  const startedPromise = new Promise<void>((resolve) => { started = resolve; });
+  const released = new Promise<void>((resolve) => { release = resolve; });
+  const request = bridge.request.bind(bridge);
+  bridge.request = async (op, args = [], signal) => {
+    if (op === "KEY") { started(); await released; }
+    return request(op, args, signal);
+  };
+  const active = input.keyReport(0, 4); await startedPromise;
+  let checked = false;
+  const probe = input.move(96, 0, 0, 0, undefined, () => {
+    checked = true;
+    if (input.inputRevision !== observedRevision) throw new Error("Intervening input invalidated probe.");
+  });
+  const rejected = assert.rejects(probe, /Intervening input/);
+  assert.equal(checked, false); release();
+  await active; await rejected;
+  assert.equal(checked, true);
+  assert.equal(bridge.records.some(({ op }) => op === "MOVE"), false);
+  assert.equal(input.state.armed, false);
+});
+
+test("a probe guard invalidated by a newer ARM cleans up before that ARM and cannot disarm it", async () => {
+  const bridge = new FakeBridge(), input = new InputController(bridge, { width: 100, height: 200 });
+  await input.arm(); const epoch = input.controlEpoch;
+  let release!: () => void, started!: () => void;
+  const startedPromise = new Promise<void>((resolve) => { started = resolve; });
+  const released = new Promise<void>((resolve) => { release = resolve; });
+  const request = bridge.request.bind(bridge);
+  bridge.request = async (op, args = [], signal) => {
+    if (op === "MOVE") { started(); await released; }
+    return request(op, args, signal);
+  };
+  const probe = input.move(300, 0, 0, 0, undefined, () => {
+    if (input.controlEpoch !== epoch) throw new Error("Expired probe round.");
+  });
+  const rejected = assert.rejects(probe, /Expired probe round/);
+  await startedPromise;
+  const newer = input.arm(); release();
+  await rejected; await newer;
+  assert.equal(input.state.armed, true); assert.equal(bridge.status.armed, true);
+  assert.deepEqual(bridge.records.slice(-4).map(({ op }) => op), ["RELEASE", "PAUSE", "PING", "ARM"]);
+  assert.equal(bridge.records.filter(({ op }) => op === "MOVE").length, 1);
+});
+
 test("read-only STATUS and its failure do not make stop claim or release a controller", async () => {
   const bridge = new FakeBridge(); bridge.status.armed = true;
   const input = new InputController(bridge, { width: 100, height: 200 });
@@ -653,16 +797,18 @@ test("wheel scrolling and keyboard navigation retain position while raw moves in
   assert.deepEqual(bridge.records[raw], { op: "MOVE", args: [-127, -127, 0, 0] });
 });
 
-test("off-grid fractional targets force rehoming instead of accumulating rounded movement", async () => {
+test("fractional targets reuse the actual rounded pointer instead of rehoming", async () => {
   const bridge = new FakeBridge();
   const input = new InputController(bridge, { width: 100, height: 100, scaleX: 0.5, scaleY: 0.5 });
   await input.arm();
-  assert.equal((await input.tap(1, 2)).pointer, null);
+  assert.deepEqual((await input.tap(1, 2)).pointer, { x: 2, y: 2 });
   const before = bridge.records.length;
   assert.deepEqual((await input.tap(2, 2)).pointer, { x: 2, y: 2 });
   const afterUnknown = bridge.records.slice(before);
-  assert.equal(afterUnknown.filter(({ args }) => args[0] === -127 && args[1] === -127).length, 3);
-  assert.ok(afterUnknown.some(({ op, args }) => op === "MOVE" && args[0] === 1 && args[1] === 1));
+  assert.deepEqual(afterUnknown, [
+    { op: "MOVE", args: [0, 0, 0, 1] },
+    { op: "MOVE", args: [0, 0, 0, 0] },
+  ]);
   const next = bridge.records.length;
   await input.tap(4, 4);
   assert.deepEqual(bridge.records.slice(next), [
@@ -672,15 +818,90 @@ test("off-grid fractional targets force rehoming instead of accumulating rounded
   ]);
 });
 
-test("an off-grid swipe start cannot make its aligned endpoint reusable", async () => {
+test("fractional swipe quantizes both endpoints and reuses the actual endpoint", async () => {
   const bridge = new FakeBridge();
   const input = new InputController(bridge, { width: 100, height: 100, scaleX: 0.5, scaleY: 0.5 });
   await input.arm();
   const swipe = await input.swipe(1, 2, 2, 4, 50);
-  assert.equal(swipe.pointer, null);
+  assert.deepEqual(swipe.pointer, { x: 2, y: 4 });
   const before = bridge.records.length;
   await input.tap(2, 4);
-  assert.equal(bridge.records.slice(before).filter(({ args }) => args[0] === -127 && args[1] === -127).length, 3);
+  assert.deepEqual(bridge.records.slice(before), [
+    { op: "MOVE", args: [0, 0, 0, 1] },
+    { op: "MOVE", args: [0, 0, 0, 0] },
+  ]);
+});
+
+test("fractional taps and swipes match actual bounded HID-count position without cumulative drift", async (context) => {
+  for (const scale of [0.5, 0.77, 1.25, 1.5, Math.PI]) await context.test(`scale ${scale}`, async () => {
+    class PositionBridge extends FakeBridge {
+      x = 9; y = 11;
+      override async request(op: HidOperation, args: readonly number[] = [], signal?: AbortSignal): Promise<HidStatus> {
+        const status = await super.request(op, args, signal);
+        if (op === "MOVE") {
+          this.x = Math.max(0, Math.min(Math.ceil(11 * scale) - 1, this.x + args[0]!));
+          this.y = Math.max(0, Math.min(Math.ceil(13 * scale) - 1, this.y + args[1]!));
+        }
+        return status;
+      }
+    }
+    const bridge = new PositionBridge(), input = new InputController(bridge, { width: 11, height: 13, scaleX: scale, scaleY: scale });
+    await input.arm();
+    const check = (x: number, y: number) => {
+      const expectedX = Math.min(Math.round(x * scale), Math.ceil(11 * scale) - 1);
+      const expectedY = Math.min(Math.round(y * scale), Math.ceil(13 * scale) - 1);
+      assert.deepEqual({ x: bridge.x, y: bridge.y }, { x: expectedX, y: expectedY });
+      assert.deepEqual(input.state.pointer, { x: bridge.x / scale, y: bridge.y / scale });
+      assert.ok(input.state.pointer!.x < 11 && input.state.pointer!.y < 13);
+    };
+    await input.tap(1, 1); check(1, 1);
+    const homes = bridge.records.filter(({ op, args }) => op === "MOVE" && args[0] === -127 && args[1] === -127).length;
+    for (const [x, y] of [[2, 2], [1, 1], [10.99, 12.99], [0, 0], [1, 1]] as const) {
+      await input.tap(x, y); check(x, y);
+    }
+    await input.swipe(1, 2, 2, 4, 50); check(2, 4);
+    await input.swipe(10.99, 12.99, 0, 0, 50); check(0, 0);
+    assert.equal(bridge.records.filter(({ op, args }) => op === "MOVE" && args[0] === -127 && args[1] === -127).length, homes);
+    assert.equal(input.state.positionEstimated, true);
+    assert.equal(input.state.armed, true);
+  });
+});
+
+test("fractional pointer reuse invalidates after raw and realtime reports, pause and geometry changes", async () => {
+  const bridge = new FakeBridge(), input = new InputController(bridge, { width: 100, height: 200, scaleX: 0.77, scaleY: 1.25 });
+  bridge.requestRealtime = bridge.request.bind(bridge);
+  await input.arm(); await input.tap(1, 1);
+  assert.notEqual(input.state.pointer, null);
+  await input.move(0, 0, 1); assert.equal(input.state.pointer, null);
+  let before = bridge.records.length; await input.tap(2, 3);
+  assert.deepEqual(bridge.records[before]?.args, [-127, -127, 0, 0]);
+  await input.remoteReport({ kind: "mouse", dx: 1, dy: 0, wheel: 0, buttons: 0 });
+  assert.equal(input.state.pointer, null);
+  before = bridge.records.length; await input.tap(1, 1);
+  assert.deepEqual(bridge.records[before]?.args, [-127, -127, 0, 0]);
+  await input.pause(); assert.equal(input.state.pointer, null);
+  await input.arm(); before = bridge.records.length; await input.tap(2, 3);
+  assert.deepEqual(bridge.records[before]?.args, [-127, -127, 0, 0]);
+  input.setScreen({ width: 200, height: 100, rotation: 1 });
+  assert.equal(input.state.pointer, null); assert.equal(input.state.calibrated, false);
+});
+
+test("nearby fractional taps remove the old repeated-home report and waiting cost", async (context) => {
+  const bridge = new FakeBridge(), input = new InputController(bridge, { width: 1080, height: 2400, scaleX: 1.25, scaleY: 1.25 });
+  await input.arm(); await input.tap(541, 1201);
+  assert.deepEqual(input.state.pointer, { x: 676 / 1.25, y: 1501 / 1.25 });
+  const before = bridge.records.length;
+  await input.tap(542, 1202);
+  assert.deepEqual(bridge.records.slice(before), [
+    { op: "MOVE", args: [2, 2, 0, 0] },
+    { op: "MOVE", args: [0, 0, 0, 1] },
+    { op: "MOVE", args: [0, 0, 0, 0] },
+  ]);
+  assert.deepEqual(input.state.pointer, { x: 678 / 1.25, y: 1503 / 1.25 });
+  const oldHomes = Math.ceil(2400 * 1.25 / 127) + 2;
+  const oldPositionReports = splitMove(Math.round(542 * 1.25), Math.round(1202 * 1.25)).length;
+  assert.equal(oldHomes + oldPositionReports + 2, 40);
+  context.diagnostic(`1080x2400 scale 1.25, tap (541,1201) then (542,1202): second tap uses 3 MOVE reports instead of the old unknown-position path's ${oldHomes} home + ${oldPositionReports} position + 2 button reports = 40. Scheduled waiting is 100 + 50 = 150ms instead of 550 + ${oldPositionReports}*100 + 50 = 1800ms (1650ms saved), excluding bridge/phone time.`);
 });
 
 test("pause, release, calibration and phone or rotation changes invalidate reusable positions", async (context) => {

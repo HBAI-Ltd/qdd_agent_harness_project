@@ -18,7 +18,7 @@ export interface InputState {
 export type RemoteReport = { kind: "mouse"; dx: number; dy: number; wheel: number; buttons: number }
   | { kind: "key"; modifier: number; keycode: number };
 type KeyReport = readonly [modifier: number, keycode: number];
-type CoordinateGuard = () => void;
+export type CoordinateGuard = () => void;
 
 const SPECIAL_KEYS: Record<string, number> = {
   enter: 0x28, return: 0x28, esc: 0x29, escape: 0x29, backspace: 0x2a,
@@ -93,8 +93,8 @@ export class InputController {
   private screen: ScreenGeometry;
   private scaleX: number | undefined;
   private scaleY: number | undefined;
-  // Reusable only within the current geometry/calibration and on the integer
-  // HID-count grid. Off-grid rounding must not accumulate across actions.
+  // Reusable only within the current geometry/calibration. Keep the estimated
+  // integer HID-count position / scale, never the unquantized requested pixel.
   // This remains an estimate; external mouse motion is not observable here.
   private pointer: { x: number; y: number } | undefined;
   private armed = false;
@@ -104,6 +104,7 @@ export class InputController {
   private active: AbortController | undefined;
   private generation = 0;
   private activationEpoch = 0;
+  private revision = 0;
   private bridgeUsed = false;
   private readonly remoteReports = new Set<Promise<InputState>>();
   private readonly remoteAborts = new Set<AbortController>();
@@ -120,6 +121,11 @@ export class InputController {
 
   /** Transports awaiting request bytes must not carry input across cancellation. */
   get controlEpoch(): number { return this.generation + this.activationEpoch; }
+
+  /** HID dispatch attempts, including realtime and release reports. ACK failure
+   * cannot prove that a report did not reach the phone. Observation/arming do
+   * not advance this counter. */
+  get inputRevision(): number { return this.revision; }
 
   get state(): InputState {
     return { screen: { ...this.screen }, calibrated: this.scaleX !== undefined && this.scaleY !== undefined,
@@ -237,13 +243,16 @@ export class InputController {
     });
   }
 
-  move(dx: number, dy: number, wheel = 0, buttons = 0, signal?: AbortSignal): Promise<InputState> {
+  move(dx: number, dy: number, wheel = 0, buttons = 0, signal?: AbortSignal, frameGuard?: CoordinateGuard): Promise<InputState> {
     const reports = splitMove(dx, dy, wheel);
     this.validateButtons(buttons);
     return this.enqueue(async (abort) => {
       this.requireArmed();
       this.pointer = undefined;
-      for (const report of reports) await this.mouseReport(...report, buttons, abort);
+      for (const report of reports) {
+        frameGuard?.();
+        await this.mouseReport(...report, buttons, abort);
+      }
       return this.state;
     }, signal);
   }
@@ -269,6 +278,7 @@ export class InputController {
       this.requireArmed();
       this.pointer = undefined;
       this.bridgeUsed = true;
+      this.revision += 1;
       const status = await (this.bridge.requestRealtime?.(op, args, controller.signal)
         ?? this.bridge.request(op, args, controller.signal));
       aborted(controller.signal);
@@ -350,20 +360,33 @@ export class InputController {
       this.requireArmed(); this.requireCalibration();
       frameGuard?.();
       if (!this.pointer && this.buttons !== 0) throw new Error("Pointer position is unknown while a mouse button is held. Pause and start control again.");
-      // Keep the actual rounded HID-count position for direct interaction,
-      // including non-integer calibration scales. AI coordinate semantics stay
-      // unchanged. Clamp the count grid inside the display's pixel bounds.
-      const targetX = Math.min(Math.round(x * this.scaleX!), Math.ceil(this.screen.width * this.scaleX!) - 1) / this.scaleX!;
-      const targetY = Math.min(Math.round(y * this.scaleY!), Math.ceil(this.screen.height * this.scaleY!) - 1) / this.scaleY!;
+      const target = this.coordinateTarget(x, y);
       const origin = this.pointer ?? { x: 0, y: 0 };
-      this.coordinateBudget((this.pointer ? 0 : this.homeReportCount()) + this.coordinateReports(targetX - origin.x, targetY - origin.y).length + 1);
+      this.coordinateBudget((this.pointer ? 0 : this.homeReportCount()) + this.coordinateReports(target.x - origin.x, target.y - origin.y).length + 1);
       if (!this.pointer) await this.homeInternal(abort);
       // Retain the old buttons through positioning. Press at the destination;
       // for a drag, reach its final destination before releasing there.
-      await this.moveTo(targetX, targetY, this.buttons, abort);
+      await this.moveTo(target.x, target.y, this.buttons, abort);
       aborted(abort);
-      this.pointer = { x: targetX, y: targetY };
       if (buttons !== this.buttons || wheel !== 0) await this.mouseReport(0, 0, wheel, buttons, abort);
+      return this.state;
+    }, signal);
+  }
+
+  /** Move for visual inspection, releasing an old mouse hold before positioning. */
+  hover(x: number, y: number, signal?: AbortSignal, frameGuard?: CoordinateGuard): Promise<InputState> {
+    this.validatePoint(x, y);
+    return this.enqueue(async (abort) => {
+      this.requireArmed(); this.requireCalibration();
+      frameGuard?.();
+      const target = this.coordinateTarget(x, y), origin = this.pointer ?? { x: 0, y: 0 };
+      this.coordinateBudget((this.pointer ? 0 : this.homeReportCount())
+        + this.coordinateReports(target.x - origin.x, target.y - origin.y).length);
+      // pointerTo intentionally preserves held buttons while dragging. Hover
+      // must neutralize them first, including when a raw report lost position.
+      if (this.buttons !== 0) await this.mouseReport(0, 0, 0, 0, abort);
+      if (!this.pointer) await this.homeInternal(abort);
+      await this.moveTo(target.x, target.y, 0, abort);
       return this.state;
     }, signal);
   }
@@ -373,10 +396,11 @@ export class InputController {
     return this.enqueue(async (abort) => {
       this.requireArmed(); this.requireCalibration();
       frameGuard?.();
+      const target = this.coordinateTarget(x, y);
       const origin = this.pointer ?? { x: 0, y: 0 };
-      this.coordinateBudget((this.pointer ? 0 : this.homeReportCount()) + this.coordinateReports(x - origin.x, y - origin.y).length);
+      this.coordinateBudget((this.pointer ? 0 : this.homeReportCount()) + this.coordinateReports(target.x - origin.x, target.y - origin.y).length);
       if (!this.pointer) await this.homeInternal(abort);
-      await this.moveTo(x, y, 0, abort);
+      await this.moveTo(target.x, target.y, 0, abort);
       await this.mouseReport(0, 0, 0, 1, abort);
       try { await delay(50, undefined, { signal: abort }); }
       finally { await this.request("MOVE", [0, 0, 0, 0]); this.buttons = 0; }
@@ -390,13 +414,14 @@ export class InputController {
     return this.enqueue(async (abort) => {
       this.requireArmed(); this.requireCalibration();
       frameGuard?.();
-      const reports = this.coordinateReports(x2 - x1, y2 - y1);
+      const start = this.coordinateTarget(x1, y1), end = this.coordinateTarget(x2, y2);
+      const reports = this.coordinateReports(end.x - start.x, end.y - start.y);
       const origin = this.pointer ?? { x: 0, y: 0 };
-      this.coordinateBudget((this.pointer ? 0 : this.homeReportCount()) + this.coordinateReports(x1 - origin.x, y1 - origin.y).length + reports.length);
+      this.coordinateBudget((this.pointer ? 0 : this.homeReportCount()) + this.coordinateReports(start.x - origin.x, start.y - origin.y).length + reports.length);
       const plannedDurationMs = Math.max(durationMs, reports.length * POINTER_REPORT_GAP_MS);
       if (!this.pointer) await this.homeInternal(abort);
-      await this.moveTo(x1, y1, 0, abort);
-      const startKnown = this.pointer !== undefined;
+      await this.moveTo(start.x, start.y, 0, abort);
+      const dragOrigin = this.pointer!;
       await this.mouseReport(0, 0, 0, 1, abort);
       try {
         if (reports.length) {
@@ -405,9 +430,7 @@ export class InputController {
             await delay(Math.ceil(plannedDurationMs / reports.length), undefined, { signal: abort });
           }
         } else await delay(plannedDurationMs, undefined, { signal: abort });
-        // An off-grid start already rounded its first leg; an aligned endpoint
-        // alone cannot make the accumulated drag position known again.
-        this.pointer = startKnown && this.onCountGrid(x2, y2) ? { x: x2, y: y2 } : undefined;
+        this.pointer = this.estimateAfterReports(dragOrigin, reports);
       } finally { await this.request("MOVE", [0, 0, 0, 0]); this.buttons = 0; }
       return { ...this.state, plannedDurationMs };
     }, signal);
@@ -491,16 +514,30 @@ export class InputController {
     this.validatePoint(x, y);
     const pointer = this.pointer;
     if (!pointer) throw new Error("Pointer position is unknown; home it first.");
-    for (const report of this.coordinateReports(x - pointer.x, y - pointer.y)) {
+    const reports = this.coordinateReports(x - pointer.x, y - pointer.y);
+    for (const report of reports) {
       await this.mouseReport(...report, buttons, signal);
       // Wait after the last packet too, before a click/drag can follow it.
       await delay(POINTER_REPORT_GAP_MS, undefined, { signal });
     }
-    this.pointer = this.onCountGrid(x, y) ? { x, y } : undefined;
+    this.pointer = this.estimateAfterReports(pointer, reports);
   }
 
-  private onCountGrid(x: number, y: number): boolean {
-    return Number.isInteger(x * this.scaleX!) && Number.isInteger(y * this.scaleY!);
+  private coordinateTarget(x: number, y: number): { x: number; y: number } {
+    // Quantize the destination once, independently of the previous requested
+    // pixels. The last legal count is strictly inside the display bounds.
+    return {
+      x: Math.min(Math.round(x * this.scaleX!), Math.ceil(this.screen.width * this.scaleX!) - 1) / this.scaleX!,
+      y: Math.min(Math.round(y * this.scaleY!), Math.ceil(this.screen.height * this.scaleY!) - 1) / this.scaleY!,
+    };
+  }
+
+  private estimateAfterReports(origin: { x: number; y: number }, reports: readonly (readonly [number, number, number])[]): { x: number; y: number } {
+    // Sum actual integer reports, then convert once. Summing pixel deltas (or
+    // keeping requested pixels) would accumulate fractional-scale rounding.
+    let countsX = Math.round(origin.x * this.scaleX!), countsY = Math.round(origin.y * this.scaleY!);
+    for (const [dx, dy] of reports) { countsX += dx; countsY += dy; }
+    return { x: countsX / this.scaleX!, y: countsY / this.scaleY! };
   }
 
   private coordinateReports(dx: number, dy: number): readonly (readonly [number, number, number])[] {
@@ -538,6 +575,7 @@ export class InputController {
 
   private request(op: HidOperation, args: readonly number[] = [], signal?: AbortSignal): Promise<HidStatus> {
     if (op !== "STATUS") this.bridgeUsed = true;
+    if (op === "MOVE" || op === "KEY" || op === "CONSUMER" || op === "RELEASE" || op === "PAUSE") this.revision += 1;
     return this.bridge.request(op, args, signal);
   }
 

@@ -14,7 +14,7 @@ const delta = (args: string) => event({
 });
 const finish = (reason: string) => event({ choices: [{ delta: {}, finish_reason: reason }] });
 
-function mockChat(t: TestContext, response: () => Response) {
+function mockChat(t: TestContext, response: () => Response, config: Partial<typeof DEFAULT_CONFIG.llm> = {}) {
   const apiKeyEnv = "QDD_LLM_STREAM_TEST_KEY";
   const previous = process.env[apiKeyEnv];
   process.env[apiKeyEnv] = "test-key";
@@ -22,12 +22,47 @@ function mockChat(t: TestContext, response: () => Response) {
     if (previous === undefined) delete process.env[apiKeyEnv];
     else process.env[apiKeyEnv] = previous;
   });
-  const requests: { messages: ChatMessage[] }[] = [];
+  const requests: { messages: ChatMessage[]; tool_choice: string; thinking?: { type: string }; reasoning_effort?: string }[] = [];
   t.mock.method(globalThis, "fetch", async (_url: unknown, init: RequestInit) => {
-    requests.push(JSON.parse(String(init.body)) as { messages: ChatMessage[] });
+    requests.push(JSON.parse(String(init.body)) as (typeof requests)[number]);
     return response();
   });
-  return { chat: createChat({ ...DEFAULT_CONFIG.llm, apiKeyEnv }), requests };
+  return { chat: createChat({ ...DEFAULT_CONFIG.llm, ...config, apiKeyEnv }), requests };
+}
+
+test("successive requests always use automatic tool choice", async (t) => {
+  const { chat, requests } = mockChat(t, () => new Response(delta("{}") + finish("tool_calls")), { thinking: "disabled" });
+  const tools = [{
+    type: "function" as const,
+    function: { name: "write_file", description: "Write a file", parameters: { type: "object" } },
+  }];
+  await chat([], tools);
+  await chat([], tools);
+  assert.deepEqual(requests.map((request) => request.tool_choice), ["auto", "auto"]);
+});
+
+for (const baseUrl of ["https://api.deepseek.com", "https://compatible.example/v1"]) {
+  for (const thinking of ["enabled", "disabled"] as const) {
+    for (const reasoningEffort of ["default", "none", "low", "high", "max"] as const) {
+      test(`automatic tool choice preserves reasoning settings: ${baseUrl}, ${thinking}, ${reasoningEffort}`, async (t) => {
+        const effectiveThinking = reasoningEffort === "none" ? "disabled" : reasoningEffort === "default" ? thinking : "enabled";
+        const deepSeek = baseUrl === "https://api.deepseek.com";
+        const { chat, requests } = mockChat(t, () => new Response(delta("{}") + finish("tool_calls")), {
+          baseUrl, thinking, reasoningEffort,
+        });
+        const tools = [{
+          type: "function" as const,
+          function: { name: "write_file", description: "Write a file", parameters: { type: "object" } },
+        }];
+        await chat([], tools);
+        assert.deepEqual(requests.map((request) => request.tool_choice), ["auto"]);
+        for (const request of requests) {
+          assert.deepEqual(request.thinking, deepSeek ? { type: effectiveThinking } : undefined);
+          assert.equal(request.reasoning_effort, reasoningEffort === "default" ? undefined : reasoningEffort);
+        }
+      });
+    }
+  }
 }
 
 test("long tool arguments survive SSE, CRLF and UTF-8 chunk boundaries exactly", async (t) => {
@@ -93,6 +128,21 @@ test("legacy empty assistant messages are omitted without changing valid tool hi
     messages[8],
   ]);
   assert.deepEqual(messages, original);
+});
+
+test("runtime system reminders retain their role on the provider wire", async (t) => {
+  const { chat, requests } = mockChat(t, () => new Response(
+    event({ choices: [{ delta: { content: "已恢复" } }] }) + finish("stop"),
+  ));
+  const messages: ChatMessage[] = [
+    { role: "system", content: "你是助手，用户是店长。" },
+    { role: "user", content: "说明任务状态" },
+    { role: "assistant", content: "任务已完成。" },
+    { role: "system", content: "【harness 系统提醒，不是店长的新消息】用 reply 收尾。" },
+  ];
+  await chat(messages, []);
+  assert.deepEqual(requests[0]!.messages, messages);
+  assert.equal(requests[0]!.messages.filter((message) => message.role === "user").length, 1);
 });
 
 for (const ending of [finish("stop"), "data: [DONE]\n\n"]) {

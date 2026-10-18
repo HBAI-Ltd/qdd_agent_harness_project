@@ -40,10 +40,19 @@ Aidol 创造营参赛项目——钱多多门店人工智能助手：店铺管�
 ### 需求对齐与能力缺口
 
 - **对话意图**：问候、解释、一次性查数与分析、已有结论的追问用 `reply` 回答；需要看板、交互工具或修改当前页面时才写文件并用 `finish` 发布。技能、定时任务与通知按实际工具结果回复，不要求附带页面。回复结论先行，业务事实说明来源与统计区间，区分事实、可能原因和推演假设。
+- **可靠收尾**：普通会话、定时任务与页面内 `qdd.ask` 的模型请求统一使用 `tool_choice: "auto"`，不强制服务商返回工具调用，也不因工具选择策略改变思考设置。普通会话与定时任务仍由 harness 提醒模型调用 `reply` / `finish`；若连续三轮未返回工具调用，会明确报错并保留对话供切换模型后续聊，不将未发布的页面或未完成的任务当作成功。页面内 `qdd.ask` 允许直接用正文回答。
+- **执行轮数**：普通会话与定时任务不再设置固定步数上限，持续执行直到 `reply` / `finish` 收尾、用户取消或发生错误。旧配置中的 `llm.maxSteps` 不再生效；取消、重复调用拦截、查询熔断和连续三轮无工具调用的错误处理仍保留。页面内 `qdd.ask` 的独立轮数限制不变。
+- **角色边界**：钱多多始终是助手，店长是用户；助手的建议不代表用户选择或授权。任务已完成、被拒绝或暂时无法继续时，用 `reply` 说明实际结果，不在正文反复宣布完成或追加未被要求的轮询、改配置、测试推送。运行时收尾/查询熔断提醒以 `system` 消息发送，不作为用户发言保存；续聊时移除旧版本误存为用户消息的两类固定提醒，保留真实用户输入和带来源标记的工具图片。
 - **引导式提问**：`llm.clarify` 可设为 `required`（默认）/ `auto` / `off`。`required` 在首次会话写新页面前必须先用 `clarify` 对齐，明确需求只问一个确认题；`auto` 只问影响结果的歧义；`off` 与无人值守不调用提问。续聊和修改已有页面不重复强制确认。候选项来自真实数据、推荐项在前；前端或终端回答（终端支持编号多选、回车选推荐、直接输入自定义）。未回答不代表写入授权。
 - **能力缺口**：`gaps` 由 harness 校验生成（如结论数字未能核验），无需模型提交；网关把检测到的缺口固定展示在页面顶部，页面代码无法移除。数据缺失、估测假设或能力受限仍需在页面或回复正文中说明。
 
 对话提示词位于 `apps/cli/src/agent/prompt.ts`。策略与结束工具的回归测试位于 `apps/cli/src/agent/conversation-prompt.test.ts`，使用 Node.js 内置测试运行器：`npm run build` 后执行 `node --test apps/cli/dist/agent/conversation-prompt.test.js`；也包含在 `npm test` 中。
+
+### 对话中的摄像头录像
+
+Web 对话中的 `/captures/<32位任务ID>/recording.mp4` 通过 `POST /api/chat/videos` 读取，请求头为 `Authorization: Bearer <网关 token>`，JSON 请求体例如 `{"url":"http://127.0.0.1:8790/captures/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/recording.mp4"}`；成功返回 `200 video/mp4`，前端下载完成后以 blob URL 播放。仅允许运行时已安装且已连接的摄像头来源，不转发凭据、不跟随重定向；最大 256 MiB，读取超时 120 秒，关闭媒体时取消读取。无须放宽采集服务的跨域权限；文件过期、连接器断开或返回非 MP4 时显示具体错误。
+
+离线回归：构建后运行 `node --test apps/cli/dist/chat-images.test.js`，前端运行 `node --test apps/web/tests/media.test.ts apps/web/tests/chat-view.test.mjs`；真实浏览器合成视频验证运行 `node scripts/test-chat-media-browser.mjs`（需要本机 Chrome/Edge 和 FFmpeg）。
 
 ### 图片与截图连续分析
 
@@ -64,6 +73,7 @@ Aidol 创造营参赛项目——钱多多门店人工智能助手：店铺管�
 
 ### 工作台：技能、定时任务、连接器
 
+- **创建边界与推送路径**：提交前选定唯一推送方式。每轮推送结果摘要用 `notify`，由调度器发送成功摘要或失败信息，任务 prompt 和技能不再调用 `send_notification`；仅条件触发或需要自定义完整正文时，不设 `notify`，由 prompt/技能调用 `send_notification`。编辑已有任务改走后者时同步设 `notify: null`。创建成功并完成用户明确要求的其它步骤后直接回复，不先双重配置再编辑补救；授权被拒后等待用户新指示，不切换工具改造旧任务。只有用户明确要求修改/复用已有任务，或工具结果证实本轮配置有误需纠正时才编辑，不因相似名称、相同频率或已停用就擅自替换。
 - **对话编辑定时任务**：先用 `list_schedules` 查看任务 ID 和配置，再调用 `edit_schedules`（每次编辑一个任务，需店长确认）。必填 `id`，可选 `name`、`cron`、`prompt`、`enabled`、`skill`（名称或 ID）、`slug`（已有页面）、`notify`（连接器 ID 或 `auto`）。未传字段保持不变，`skill`/`slug`/`notify` 传 `null` 解除绑定。例如 `{"id":"任务ID","cron":"30 9 * * *","enabled":true}`；修改只影响后续执行，不会取消正在执行的任务。定时执行会话不可调用创建或编辑工具。回归测试位于 `apps/cli/src/edit-schedules.test.ts`，运行 `npm run build` 后执行 `node --test apps/cli/dist/edit-schedules.test.js`。
 - **待办与总览**：`GET /api/overview` / `GET /api/pending` 汇总所有会话里待店长处理的授权和问题；授权等待时长由 `approvalTimeoutMin`（默认 60 分钟）控制。
 - **技能**（`workspace/skills/`）：可复用的做事方法；agent 可从对话中 `save_skill`（需店长确认）、`load_skill`。
@@ -120,6 +130,8 @@ Agent 的白名单播放器规范支持在任务 iframe 内生成监控播放页
 
 FLV 在点击播放后创建 `autoPlay: true` 的 SDK 实例，成功状态兼容 `playing` / `videoFrame` 事件和 `getState().playing`；WASM 使用 canvas 时不能只检查 video 元素。天翼本地接口目前只保留一路预览，监控页面应显式切换摄像头，诊断不能额外请求预览抢占画面；hls.js 解析清单成功不代表视频已解码。
 
+HLS 优先使用同源 hls.js，在 `MEDIA_ATTACHED` 后加载地址、`MANIFEST_PARSED` 后请求播放，只有实际 `playing` 才显示播放中。Chromium 的原生 HLS 检测可能返回 `maybe` 却报 `DEMUXER_ERROR_COULD_NOT_PARSE`，因此仅在 hls.js 或 MSE 不可用时回退原生。天翼本地流已转为 H.264，不应把该解复用错误直接归因于设备 H.265。小猫值班室支持重新取流，失败保留错误详情并释放播放器。
+
 天翼本地服务对 `/streams/<id>/index.m3u8` 和对应 TS 分片开放跨源读取，任务 iframe 可直接播放返回的 HLS 地址。监控相关回归可用 `npm test --prefix mcp/apps/tysl-console`（含实际 HTTP 媒体响应验证）和 `node scripts/test-camera-player-browser.mjs`（本地合成 FLV、WASM 与 Worker 验证）运行；当前生成的总台另有 `node scripts/test-generated-monitor.mjs` 验证播放与切换逻辑。
 
 FLV 使用同源解码器；HLS 使用 `enableWorker: false`，避免被 CSP 拦截的 CDN worker。Agent 规范要求点击播放、失败提示、手动重试、切换/离页释放资源，以及 RTMP 转流提示；不承诺所有编码、有声自动播放或全屏可用。可许愿：“生成监控页面，通过已授权工具获取 HTTP-FLV 或 HLS 地址，在任务 iframe 播放；仅有 RTMP 时提示需要转流。”
@@ -172,6 +184,14 @@ npm run qdd -- reply <会话id> "按周汇总"
 
 DeepSeek 官方 API 的 `deepseek-flash` 当前对应 V4.1 Flash（2026-10-17）。如需使用最大输出预算，在 `harness.config.json` 的对应 `llm.models` 条目中设置 `"maxTokens": 393216`（384 × 1024），不要把该值设为所有模型的通用默认值。[官方参数文档](https://api-docs.deepseek.com/api/create-chat-completion/)规定 `max_tokens` 上限为 393216；实际输出仍受输入与输出合计上下文长度限制，长输出可能增加耗时和费用。修改配置后需重启后端。
 
+## 默认技能
+
+工作台侧栏的「技能」（`/skills`）默认提供 `android-operator` 和 `xiaohongshu-hid-control`，标记为「内置 · 默认已加载」。新会话会自动获得完整操作说明，无需先手动导入或调用 `load_skill`；原有自建技能仍按需加载。技能页可以查看完整说明，也可以运行技能打开新对话。
+
+原始文档及小红书配套 `agent.py` 保存在根目录 `skills/`，内置技能随项目更新，不写入或覆盖运行时用户技能，也不能在工作台编辑、删除。操作设备前仍需接入相应 MCP，并使用支持视觉及工具调用的模型；默认加载不代表已连接设备或自动执行任何操作。
+
+默认技能与已有用户技能的存储、完整上下文加载回归位于 `apps/cli/src/builtin-skills.test.ts`，通过 `npm test` 执行。技能页回归可用 `node --test apps/web/tests/skills-view.test.mjs` 执行。
+
 ## 目录结构
 
 ```text
@@ -181,6 +201,7 @@ apps/esp/            FoloToy AI Passport ESP32-C3 固件（ESP-IDF 5.5.3，独�
 apps/android-screen/ 安卓内网投屏 App（MediaProjection）
 apps/android-mcp/    手机内网画面与 ESP32 BLE 键鼠 MCP（电脑运行）
 packages/shared/     共享类型（含前端 API 契约）
+skills/              默认 Android / 小红书技能、完整参考文档及配套脚本
 docs/api.md          前端对接文档
 workspace/           运行时生成（已 gitignore）：style.md、metrics.json、datasets/、store.json 门店数据（初始为空，不自动填充示例）、site/、sessions/、schedule-sessions/、state/、.gateway-token
 ```

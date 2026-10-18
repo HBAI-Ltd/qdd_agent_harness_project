@@ -1,0 +1,21 @@
+{
+  "name": "@qdd/android-mcp-rust",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Native Rust Android screen and ESP32 HID MCP bridge",
+  "scripts": {
+    "build": "node tools/cargo.mjs build",
+    "typecheck": "node tools/cargo.mjs check",
+    "test": "node tools/cargo.mjs test",
+    "start": "node tools/cargo.mjs run",
+    "size": "node tools/cargo.mjs size",
+    "clean": "node tools/cargo.mjs clean",
+    "test:exe": "node tools/test-exe.mjs"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/sdk": "1.32.1",
+    "esbuild": "0.28.2",
+    "pngjs": "7.0.0"
+  }
+}

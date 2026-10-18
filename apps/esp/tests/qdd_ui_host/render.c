@@ -149,8 +149,18 @@ static void write_frame(const char *name) {
     fclose(file);
 }
 
-static void check_intro(lv_display_t *display) {
+static void legacy_onboarding(void) {
     qdd_ui_require_onboarding(true);
+    qdd_ui_require_onboarding(false);
+}
+
+static void legacy_skips(bool desktop, bool app, bool bluetooth) {
+    legacy_onboarding();
+    qdd_ui_onboarding_skips(desktop, app, bluetooth);
+}
+
+static void check_intro(lv_display_t *display) {
+    legacy_onboarding();
     qdd_setup_model_t setup = {0}; qdd_setup_intro(&setup);
     qdd_wifi_view_t wifi = {0};
     qdd_hid_state_t state = {0};
@@ -167,7 +177,7 @@ static void check_intro(lv_display_t *display) {
     qdd_ui_refresh(&state, (qdd_ble_status_t){0}, false, 87, 2000, "", 0);
     lv_refr_now(display); check_labels(lv_screen_active());
     assert(setup.page == QDD_SETUP_HOME && qdd_ui_guide_step() == 1);
-    assert(has_visible_label(lv_screen_active(), "连接无线网络") && !has_label(lv_screen_active(), "紧急停止"));
+    assert(has_visible_label(lv_screen_active(), "连接无线网") && !has_label(lv_screen_active(), "紧急停止"));
     assert(!has_visible_label(lv_screen_active(), "正在扫描 Wi-Fi") && !scan_spinner(lv_screen_active()) && !wifi.scanning);
     write_frame("first_connection_step_one");
     qdd_setup_help(&setup); qdd_ui_wifi(&setup, wifi);
@@ -175,8 +185,8 @@ static void check_intro(lv_display_t *display) {
     lv_refr_now(display); check_labels(lv_screen_active());
     assert(has_visible_label(lv_screen_active(), "返回上一级") && has_visible_label(lv_screen_active(), "确认返回"));
     assert(!has_label(lv_screen_active(), "开始连接"));
-    assert(qdd_setup_key(&setup, QDD_SETUP_OK, 0, false) == QDD_SETUP_NONE && setup.page == QDD_SETUP_MENU && setup.selection == 2);
-    puts("First-connection intro PASS: real-device key guide, short confirm to Wi-Fi step one, no scan or emergency action, settings help unchanged");
+    assert(qdd_setup_key(&setup, QDD_SETUP_OK, 0, false) == QDD_SETUP_NONE && setup.page == QDD_SETUP_MENU && setup.selection == QDD_SETUP_MENU_HELP);
+    puts("First-connection intro PASS: real-device key guide, short confirm to Wi-Fi step one without automatically scanning, no scan or emergency action, settings help unchanged");
 }
 
 static void check_pairing_settings(lv_display_t *display) {
@@ -250,8 +260,8 @@ static void check_pairing_settings(lv_display_t *display) {
 }
 
 static void check_completed_guide(lv_display_t *display) {
-    qdd_ui_require_onboarding(true);
-    qdd_ui_onboarding_skips(false, false);
+    legacy_onboarding();
+    legacy_skips(true, false, false);
     qdd_setup_model_t setup = {0};
     qdd_wifi_view_t wifi = {.connected = true, .port = 3333};
     strcpy(wifi.ip, "192.168.1.147");
@@ -312,10 +322,11 @@ static void check_completed_guide(lv_display_t *display) {
     qdd_ui_wifi(&setup, wifi);
     qdd_ui_refresh(&state, (qdd_ble_status_t){0}, false, 87, 2000, "", 0);
     assert(qdd_ui_guide_step() == 5);
-    qdd_ui_require_onboarding(true);
+    legacy_onboarding();
+    legacy_skips(true, false, false);
     s_onboarding = (qdd_onboarding_view_t){0};
     qdd_ui_refresh(&state, (qdd_ble_status_t){0}, true, 87, 2000, "", 0);
-    assert(qdd_ui_guide_step() == 2 && has_visible_label(lv_screen_active(), "跳过此步"));
+    assert(qdd_ui_guide_step() == 3 && has_visible_label(lv_screen_active(), qdd_ui_guide_step() == 4 ? "开始配对" : "下一步"));
     qdd_ui_require_onboarding(false);
 }
 
@@ -378,6 +389,70 @@ static uint32_t download_qr_hash(void) {
     return hash;
 }
 
+static void check_menu_arrow(bool visible) {
+    unsigned accent_pixels = 0;
+    for (int y = 228; y < 242; y++) for (int x = 216; x < 228; x++) {
+        accent_pixels += pixels[y * 240 + x] == 0xF46D; // F58C6C, the small down-arrow ink.
+        if (!visible) assert(pixels[y * 240 + x] == 0x10A2); // No stale arrow after paging.
+    }
+    assert(visible ? accent_pixels >= 15 : accent_pixels == 0);
+    if (visible) {
+        assert(pixels[233 * 240 + 221] == 0xF46D); // Visible vertical shaft.
+        assert(pixels[236 * 240 + 218] == 0xF46D && pixels[236 * 240 + 225] == 0xF46D);
+        assert(pixels[239 * 240 + 221] != 0x10A2); // Both legs meet at the antialiased lower tip.
+    }
+}
+
+static void check_menu_up_arrow(bool visible) {
+    unsigned count = 0;
+    for (int y = 90; y < 104; y++) for (int x = 216; x < 228; x++) {
+        count += pixels[y * 240 + x] == 0xF46D;
+        if (!visible) assert(pixels[y * 240 + x] == 0x10A2);
+    }
+    assert(visible ? count >= 15 : count == 0);
+}
+
+static void check_settings_menu(lv_display_t *display) {
+    qdd_setup_model_t setup = {0}; qdd_setup_menu(&setup);
+    const qdd_wifi_view_t wifi = {.port = 3333};
+    qdd_ui_wifi(&setup, wifi); lv_refr_now(display); check_labels(lv_screen_active());
+    const char *first_page[] = {"驱动下载", "连接无线网", "手机蓝牙配对", "按键指南"};
+    for (unsigned i = 0; i < 4; i++) {
+        assert(has_visible_label(lv_screen_active(), first_page[i]));
+        lv_area_t area; lv_obj_get_coords(find_label(lv_screen_active(), first_page[i]), &area);
+        assert(area.y1 == 108 + (int)i * 35);
+    }
+    assert(!has_visible_label(lv_screen_active(), "重置设备") && !has_visible_label(lv_screen_active(), "USB备用下载"));
+    assert(has_visible_label(lv_screen_active(), "返回主界面"));
+    check_menu_arrow(true); check_menu_up_arrow(false); write_frame("device_menu");
+    lv_mem_monitor_t before, after; lv_mem_monitor(&before); unsigned cached = flushes;
+    for (unsigned i = 0; i < 100; i++) { qdd_ui_wifi(&setup, wifi); lv_refr_now(display); }
+    lv_mem_monitor(&after); assert(flushes == cached && before.free_size == after.free_size && before.used_cnt == after.used_cnt);
+    for (unsigned i = 0; i < QDD_SETUP_MENU_HELP; i++) assert(qdd_setup_key(&setup, QDD_SETUP_DOWN, 0, false) == QDD_SETUP_NONE);
+    qdd_ui_wifi(&setup, wifi); lv_refr_now(display); check_menu_arrow(true); check_menu_up_arrow(false);
+    assert(qdd_setup_key(&setup, QDD_SETUP_DOWN, 0, false) == QDD_SETUP_NONE && setup.selection == QDD_SETUP_MENU_RESET);
+    qdd_ui_wifi(&setup, wifi); lv_refr_now(display); check_labels(lv_screen_active());
+    assert(has_visible_label(lv_screen_active(), "重置设备") && !has_visible_label(lv_screen_active(), "按键指南"));
+    for (unsigned i = 0; i < 4; i++) assert(!has_visible_label(lv_screen_active(), first_page[i]));
+    check_menu_arrow(false); check_menu_up_arrow(true); write_frame("device_menu_second_page");
+    cached = flushes; lv_mem_monitor(&before);
+    for (unsigned i = 0; i < 100; i++) { qdd_ui_wifi(&setup, wifi); lv_refr_now(display); }
+    lv_mem_monitor(&after); assert(flushes == cached && before.free_size == after.free_size && before.used_cnt == after.used_cnt);
+    assert(qdd_setup_key(&setup, QDD_SETUP_UP, 0, false) == QDD_SETUP_NONE && setup.selection == QDD_SETUP_MENU_HELP);
+    qdd_ui_wifi(&setup, wifi); lv_refr_now(display); check_menu_arrow(true); check_menu_up_arrow(false);
+    assert(has_visible_label(lv_screen_active(), "手机蓝牙配对") && !has_visible_label(lv_screen_active(), "重置设备"));
+    write_frame("device_menu_return_first_page");
+    for (unsigned i = QDD_SETUP_MENU_HELP; i > 0; i--) assert(qdd_setup_key(&setup, QDD_SETUP_UP, 0, false) == QDD_SETUP_NONE);
+    assert(qdd_setup_key(&setup, QDD_SETUP_UP, 0, false) == QDD_SETUP_NONE && setup.selection == QDD_SETUP_MENU_EXIT);
+    qdd_ui_wifi(&setup, wifi); lv_refr_now(display); check_menu_arrow(false); check_menu_up_arrow(true);
+    assert(has_visible_label(lv_screen_active(), "返回主界面"));
+    assert(qdd_setup_key(&setup, QDD_SETUP_DOWN, 0, false) == QDD_SETUP_NONE && setup.selection == QDD_SETUP_MENU_DOWNLOAD);
+    qdd_ui_wifi(&setup, wifi); lv_refr_now(display); check_menu_arrow(true); check_menu_up_arrow(false);
+    assert(has_visible_label(lv_screen_active(), "驱动下载") && !has_visible_label(lv_screen_active(), "USB备用下载"));
+    qdd_setup_exit(&setup); qdd_ui_wifi(&setup, wifi);
+    puts("Settings menu PASS: driver/Wi-Fi/BLE/help order, USB hidden; both arrow pixels/page clearing; fixed return and wrap; cached refresh allocations stable.");
+}
+
 static void check_download_settings(lv_display_t *display) {
     qdd_setup_model_t setup = {0};
     qdd_wifi_view_t wifi = {.connected = true, .port = 3333}; strcpy(wifi.ip, "192.168.1.88");
@@ -387,21 +462,21 @@ static void check_download_settings(lv_display_t *display) {
     s_onboarding = (qdd_onboarding_view_t){.downloaded = true, .phone_seen = true, .phone_fresh = true,
         .phone_projecting = true, .pc_fresh = true};
     const qdd_onboarding_view_t original_onboarding = s_onboarding;
-    qdd_ui_require_onboarding(true); qdd_ui_wifi(&setup, wifi);
+    legacy_onboarding(); qdd_ui_wifi(&setup, wifi);
     qdd_ui_refresh(&state, (qdd_ble_status_t){0}, false, 87, 2000, "", 0);
     assert(qdd_ui_guide_step() == 0);
     qdd_setup_menu(&setup);
-    for (unsigned i = 0; i < 4; i++) assert(qdd_setup_key(&setup, QDD_SETUP_DOWN, 0, false) == QDD_SETUP_NONE);
+    assert(setup.selection == QDD_SETUP_MENU_DOWNLOAD);
     qdd_ui_wifi(&setup, wifi); lv_refr_now(display); check_labels(lv_screen_active());
-    assert(has_visible_label(lv_screen_active(), "手机投屏下载")); write_frame("settings_download_selected");
+    assert(has_visible_label(lv_screen_active(), "驱动下载")); write_frame("settings_download_selected");
     assert(qdd_setup_key(&setup, QDD_SETUP_OK, 0, false) == QDD_SETUP_NONE && setup.page == QDD_SETUP_DOWNLOAD);
     qdd_ui_wifi(&setup, wifi); lv_refr_now(display); check_labels(lv_screen_active());
-    assert(has_visible_label(lv_screen_active(), "手机投屏下载"));
-    assert(has_visible_label(lv_screen_active(), "扫码或浏览器打开地址下载"));
-    assert(has_visible_label(lv_screen_active(), "手机/电脑/ESP同一局域网"));
+    assert(has_visible_label(lv_screen_active(), "驱动下载"));
+    assert(has_visible_label(lv_screen_active(), "扫码或电脑打开下方网址"));
+    assert(has_visible_label(lv_screen_active(), "手机也连接同一无线网"));
     assert(has_visible_label(lv_screen_active(), "192.168.1.88:3334"));
     assert(has_visible_label(lv_screen_active(), "返回设置"));
-    assert(!has_visible_label(lv_screen_active(), "跳过此步") && !has_visible_label(lv_screen_active(), "紧急停止"));
+    assert(!has_visible_label(lv_screen_active(), qdd_ui_guide_step() == 4 ? "开始配对" : "下一步") && !has_visible_label(lv_screen_active(), "紧急停止"));
     assert(download_qr(lv_screen_active()) && !lv_obj_has_flag(download_qr(lv_screen_active()), LV_OBJ_FLAG_HIDDEN));
     const uint32_t first_qr = download_qr_hash(); write_frame("settings_download");
     const unsigned cached_flushes = flushes;
@@ -414,7 +489,7 @@ static void check_download_settings(lv_display_t *display) {
     assert(flushes == cached_flushes && before.free_size == after.free_size && before.used_cnt == after.used_cnt);
     assert(qdd_ui_guide_step() == 0);
     assert(qdd_setup_key(&setup, QDD_SETUP_OK, 0, false) == QDD_SETUP_NONE);
-    assert(setup.page == QDD_SETUP_MENU && setup.selection == 4);
+    assert(setup.page == QDD_SETUP_MENU && setup.selection == QDD_SETUP_MENU_DOWNLOAD);
     qdd_ui_wifi(&setup, wifi); lv_refr_now(display); write_frame("settings_download_return");
     // Returning selects the download item, not its neighbouring reset action.
     assert(qdd_setup_key(&setup, QDD_SETUP_OK, 0, false) == QDD_SETUP_NONE && setup.page == QDD_SETUP_DOWNLOAD);
@@ -425,7 +500,7 @@ static void check_download_settings(lv_display_t *display) {
     write_frame("settings_download_changed_ip");
     wifi.connected = false; wifi.ip[0] = 0; qdd_ui_wifi(&setup, wifi); lv_refr_now(display); check_labels(lv_screen_active());
     assert(lv_obj_has_flag(download_qr(lv_screen_active()), LV_OBJ_FLAG_HIDDEN));
-    assert(has_visible_label(lv_screen_active(), "请先连接无线网络") && has_visible_label(lv_screen_active(), "返回设置"));
+    assert(has_visible_label(lv_screen_active(), "请先连接无线网") && has_visible_label(lv_screen_active(), "返回设置"));
     assert(!has_visible_label(lv_screen_active(), "192.168.1.99:3334")); write_frame("settings_download_offline");
     for (unsigned i = 0; i < 4; i++) {
         assert(qdd_setup_key(&setup, i % 2 ? QDD_SETUP_UP : QDD_SETUP_DOWN, 0, false) == QDD_SETUP_NONE);
@@ -438,10 +513,10 @@ static void check_download_settings(lv_display_t *display) {
     assert(qdd_ui_guide_step() == 0 && has_visible_label(lv_screen_active(), "已紧急停止"));
     lv_mem_monitor(&before); size_t minimum_free = before.free_size, maximum_free = before.free_size;
     for (unsigned i = 0; i < 120; i++) {
-        qdd_setup_menu(&setup); setup.selection = 4;
+        qdd_setup_menu(&setup); setup.selection = QDD_SETUP_MENU_DOWNLOAD;
         assert(qdd_setup_key(&setup, QDD_SETUP_OK, 0, false) == QDD_SETUP_NONE);
         qdd_ui_wifi(&setup, wifi); lv_refr_now(display); (void)download_qr_hash();
-        assert(qdd_setup_key(&setup, QDD_SETUP_OK, 0, false) == QDD_SETUP_NONE && setup.selection == 4);
+        assert(qdd_setup_key(&setup, QDD_SETUP_OK, 0, false) == QDD_SETUP_NONE && setup.selection == QDD_SETUP_MENU_DOWNLOAD);
         qdd_ui_wifi(&setup, wifi); lv_refr_now(display);
         qdd_setup_exit(&setup); qdd_ui_wifi(&setup, wifi);
         qdd_ui_refresh(&state, (qdd_ble_status_t){0}, false, 87, 2000, "", 0); lv_refr_now(display);
@@ -459,8 +534,134 @@ static void check_download_settings(lv_display_t *display) {
     printf("Download 24KiB LVGL pool: free=%zu, largest=%zu, peak_used=%zu.\n", after.free_size, after.free_biggest_size, after.max_used);
 }
 
+static void check_guide_footer(unsigned step) {
+    const char *actions[] = {"", "选择无线网", "下一步", "下一步", "开始配对", "下一步", "进入主页"};
+    const char *expected[] = {"上一步", actions[step], "下一步"};
+    for (unsigned row = 0; row < 3; row++) {
+        lv_obj_t *found = NULL;
+        for (uint32_t i = 0; i < lv_obj_get_child_count(lv_screen_active()); i++) {
+            lv_obj_t *child = lv_obj_get_child(lv_screen_active(), (int32_t)i);
+            if (!lv_obj_check_type(child, &lv_label_class)) continue;
+            lv_area_t area; lv_obj_get_coords(child, &area);
+            if (area.y1 == 254 + (int)row * 22 && strcmp(lv_label_get_text(child), expected[row]) == 0) found = child;
+        }
+        assert(found);
+        lv_area_t area; lv_obj_get_coords(found, &area);
+        assert(area.x1 == 20 && area.x2 == 203 && area.y2 - area.y1 + 1 == 20);
+        assert(lv_obj_get_style_text_align(found, 0) == LV_TEXT_ALIGN_CENTER);
+        assert(lv_obj_get_style_bg_opa(found, 0) == LV_OPA_COVER);
+        assert(lv_color_eq(lv_obj_get_style_bg_color(found, 0), lv_color_hex(row == 1 ? 0xD4380D : 0x222222)));
+    }
+    // Three independent cards retain clear gaps and avoid the rounded screen edge.
+    assert(pixels[275 * 240 + 30] == 0x10A2 && pixels[297 * 240 + 30] == 0x10A2);
+    lv_obj_t *notice = find_label(lv_screen_active(), "长按确认：设置");
+    assert(notice);
+    lv_area_t notice_area; lv_obj_get_coords(notice, &notice_area);
+    assert(notice_area.y1 == 235 && notice_area.y2 < 254);
+    if (step == 3) {
+        lv_obj_t *qr = download_qr(lv_screen_active());
+        lv_area_t area; lv_obj_get_coords(qr, &area);
+        assert(area.y1 == 90 && area.y2 == 217 && area.x2 - area.x1 + 1 == 128);
+    }
+}
+
+static void check_usb_install(lv_display_t *display) {
+    qdd_setup_model_t setup = {0}; qdd_wifi_view_t wifi = {.port = 3333};
+    qdd_hid_state_t state = {0}; const qdd_hid_state_t untouched = state;
+    s_onboarding = (qdd_onboarding_view_t){0}; qdd_ui_require_onboarding(true);
+    qdd_ui_driver((qdd_driver_usb_view_t){0}); qdd_ui_wifi(&setup, wifi);
+    qdd_ui_refresh(&state, (qdd_ble_status_t){0}, false, 87, 2000, "", 0);
+    lv_refr_now(display); check_labels(lv_screen_active());
+    assert(qdd_ui_guide_step() == 1 && has_visible_label(lv_screen_active(), "连接无线网"));
+    assert(has_visible_label(lv_screen_active(), "选择无线网"));
+    check_guide_footer(1);
+    assert(!scan_spinner(lv_screen_active()) && !wifi.scanning);
+    write_frame("onboarding_hotspot_manual");
+    wifi.connected = true; strcpy(wifi.ip, "192.168.254.254");
+    qdd_ui_wifi(&setup, wifi); qdd_ui_refresh(&state, (qdd_ble_status_t){0}, false, 87, 2000, "", 0);
+    assert(qdd_ui_guide_step() == 1); // Real connection never steals navigation.
+    qdd_ui_guide_navigate(false);
+    assert(qdd_ui_guide_step() == 1); // The first page does not wrap into finishing.
+    qdd_ui_guide_navigate(true);
+    qdd_ui_refresh(&state, (qdd_ble_status_t){0}, false, 87, 2000, "", 0);
+    lv_refr_now(display); check_labels(lv_screen_active());
+    assert(qdd_ui_guide_step() == 2 && has_visible_label(lv_screen_active(), "下载电脑软件"));
+    check_guide_footer(2);
+    assert(has_visible_label(lv_screen_active(), "http://192.168.254.254:3334/"));
+    assert(has_visible_label(lv_screen_active(), "电脑和手机连同一无线网"));
+    assert(!has_visible_label(lv_screen_active(), "紧急停止"));
+    write_frame("onboarding_computer_hotspot");
+    for (unsigned page = 3; page <= 6; page++) {
+        qdd_ui_guide_navigate(true);
+        qdd_ui_refresh(&state, (qdd_ble_status_t){0}, false, 87, 2000, "", 0);
+        lv_refr_now(display); check_labels(lv_screen_active());
+        assert(qdd_ui_guide_step() == page);
+        check_guide_footer(page);
+        assert(!has_visible_label(lv_screen_active(), "可以远程操作"));
+        assert(memcmp(&state, &untouched, sizeof(state)) == 0);
+        char name[40]; snprintf(name, sizeof(name), "onboarding_manual_%u", page); write_frame(name);
+    }
+    for (unsigned page = 5; page >= 1; page--) {
+        qdd_ui_guide_navigate(false);
+        qdd_ui_refresh(&state, (qdd_ble_status_t){0}, false, 87, 2000, "", 0);
+        lv_refr_now(display); check_labels(lv_screen_active());
+        assert(qdd_ui_guide_step() == page);
+        assert(memcmp(&state, &untouched, sizeof(state)) == 0);
+    }
+    while (qdd_ui_guide_step() < 6) qdd_ui_guide_navigate(true);
+    qdd_ui_guide_navigate(false);
+    qdd_ui_refresh(&state, (qdd_ble_status_t){0}, false, 87, 2000, "", 0);
+    assert(qdd_ui_guide_step() == 5);
+    qdd_ui_guide_navigate(true); qdd_ui_guide_navigate(true);
+    qdd_ui_refresh(&state, (qdd_ble_status_t){0}, false, 87, 2000, "", 0);
+    assert(qdd_ui_guide_step() == 7); // Constructing MAIN does not enable hidden stop.
+    qdd_ui_guide_navigate(true); // Double confirm before LVGL presentation stays neutral.
+    assert(qdd_ui_guide_step() == 7);
+    lv_refr_now(display);
+    assert(qdd_ui_guide_step() == 0 && has_visible_label(lv_screen_active(), "等待电脑连接"));
+    // An explicitly dismissed guide keeps showing real status through address changes.
+    strcpy(wifi.ip, "192.168.1.2"); qdd_ui_wifi(&setup, wifi);
+    qdd_ui_refresh(&state, (qdd_ble_status_t){0}, false, 87, 2000, "", 0);
+    assert(qdd_ui_guide_step() == 0 && !has_visible_label(lv_screen_active(), "可以远程操作"));
+    qdd_setup_menu(&setup); setup.page = QDD_SETUP_USB_DOWNLOAD; // Compatibility-only page, absent from menu.
+    wifi.connected = false; wifi.ip[0] = 0;
+    qdd_ui_wifi(&setup, wifi); lv_refr_now(display); check_labels(lv_screen_active());
+    assert(has_visible_label(lv_screen_active(), "已有接收页可直接打开\n首次下载请先连接无线网"));
+    const qdd_driver_usb_view_t phases[] = {
+        {.phase = QDD_DRIVER_USB_CHECKING},
+        {.phase = QDD_DRIVER_USB_TRANSFERRING, .total_bytes = 943153, .transferred_bytes = 471576},
+        {.phase = QDD_DRIVER_USB_SENT, .total_bytes = 943153, .transferred_bytes = 943153},
+        {.phase = QDD_DRIVER_USB_CANCELLED},
+        {.phase = QDD_DRIVER_USB_ERROR, .error = QDD_DRIVER_USB_ERROR_CONTROL}
+    };
+    const char *titles[] = {"正在校验安装包", "安装包传输中", "安装包已发送", "传输已取消", "安装包传输失败"};
+    for (unsigned i = 0; i < sizeof(phases) / sizeof(phases[0]); i++) {
+        qdd_ui_driver(phases[i]); qdd_ui_wifi(&setup, wifi);
+        qdd_ui_refresh(&state, (qdd_ble_status_t){0}, false, 87, 2000, "", 0); lv_refr_now(display); check_labels(lv_screen_active());
+        assert(has_visible_label(lv_screen_active(), titles[i]));
+        if (i == 1) assert(has_visible_label(lv_screen_active(), "已传输 49%"));
+        if (i == 2) assert(has_visible_label(lv_screen_active(), "传输完成不等于已安装"));
+        lv_mem_monitor_t before, after; lv_mem_monitor(&before); const unsigned cached = flushes;
+        for (unsigned n = 0; n < 100; n++) {
+            qdd_ui_driver(phases[i]); qdd_ui_wifi(&setup, wifi);
+            qdd_ui_refresh(&state, (qdd_ble_status_t){0}, false, 87, 2000, "", 0); lv_refr_now(display);
+        }
+        lv_mem_monitor(&after); assert(flushes == cached && before.free_size == after.free_size && before.used_cnt == after.used_cnt);
+    }
+    qdd_setup_exit(&setup); qdd_ui_wifi(&setup, wifi);
+    qdd_ui_require_onboarding(false); qdd_ui_driver((qdd_driver_usb_view_t){0});
+    // Previously configured boards also freeze their first visible guide page.
+    qdd_ui_refresh(&state, (qdd_ble_status_t){0}, false, 87, 2000, "", 0);
+    assert(qdd_ui_guide_step() == 1);
+    wifi.connected = true; strcpy(wifi.ip, "192.168.1.2"); qdd_ui_wifi(&setup, wifi);
+    qdd_ui_refresh(&state, (qdd_ble_status_t){0}, false, 87, 2000, "", 0);
+    assert(qdd_ui_guide_step() == 1 && !scan_spinner(lv_screen_active()));
+    legacy_onboarding();
+    puts("Manual guide PASS: six previous/next pages, no connection-triggered jumps, truthful finish, short hotspot URL, USB fallback and cached refresh.");
+}
+
 int main(int argc, char **argv) {
-    assert(argc == 2 || (argc == 3 && (strcmp(argv[2], "--scan") == 0 || strcmp(argv[2], "--guide") == 0 || strcmp(argv[2], "--pair") == 0 || strcmp(argv[2], "--intro") == 0 || strcmp(argv[2], "--download") == 0)));
+    assert(argc == 2 || (argc == 3 && (strcmp(argv[2], "--scan") == 0 || strcmp(argv[2], "--guide") == 0 || strcmp(argv[2], "--pair") == 0 || strcmp(argv[2], "--intro") == 0 || strcmp(argv[2], "--download") == 0 || strcmp(argv[2], "--menu") == 0 || strcmp(argv[2], "--usb") == 0)));
     FILE *inventory = fopen(argv[1], "rb");
     assert(inventory);
     char glyphs[2048] = {0};
@@ -481,10 +682,13 @@ int main(int argc, char **argv) {
     lv_display_set_buffers(display, draw_buffer, NULL, sizeof(draw_buffer), LV_DISPLAY_RENDER_MODE_PARTIAL);
     lv_display_set_flush_cb(display, flush);
     qdd_ui_create();
+    if (argc == 3 && strcmp(argv[2], "--usb") == 0) { check_usb_install(display); return 0; }
+    if (argc == 3 && strcmp(argv[2], "--menu") == 0) { check_settings_menu(display); return 0; }
     if (argc == 3 && strcmp(argv[2], "--intro") == 0) { check_intro(display); return 0; }
     if (argc == 3 && strcmp(argv[2], "--pair") == 0) { check_pairing_settings(display); return 0; }
     if (argc == 3 && strcmp(argv[2], "--scan") == 0) { check_scan_activity(display); return 0; }
     if (argc == 3 && strcmp(argv[2], "--download") == 0) { check_download_settings(display); return 0; }
+    check_usb_install(display);
     qdd_hid_state_t state = {0};
     qdd_ble_status_t ble = {0};
     qdd_setup_model_t help = {0}; qdd_setup_help(&help);
@@ -514,11 +718,12 @@ int main(int argc, char **argv) {
     lv_refr_now(display); check_labels(lv_screen_active());
     assert(has_label(lv_screen_active(), "已紧急停止"));
     state.locked = false;
+    check_settings_menu(display);
     qdd_setup_menu(&help); qdd_ui_wifi(&help, (qdd_wifi_view_t){0});
     lv_refr_now(display); check_labels(lv_screen_active());
     assert(has_label(lv_screen_active(), "返回主界面")); write_frame("device_menu");
-    assert(has_label(lv_screen_active(), "重置设备"));
-    help.selection = 3; assert(qdd_setup_key(&help, QDD_SETUP_OK, 0, false) == QDD_SETUP_NONE);
+    assert(!has_visible_label(lv_screen_active(), "重置设备"));
+    help.selection = QDD_SETUP_MENU_RESET; assert(qdd_setup_key(&help, QDD_SETUP_OK, 0, false) == QDD_SETUP_NONE);
     assert(help.page == QDD_SETUP_RESET && help.selection == 0);
     qdd_ui_wifi(&help, (qdd_wifi_view_t){0}); lv_refr_now(display); check_labels(lv_screen_active());
     assert(has_label(lv_screen_active(), "清除并重新开始"));
@@ -575,7 +780,8 @@ int main(int argc, char **argv) {
     assert(before.free_size == after.free_size && before.used_cnt == after.used_cnt);
     qdd_wifi_view_t guide_wifi = {.connected = true, .port = 3333};
     strcpy(guide_wifi.ip, "192.168.101.147");
-    qdd_ui_require_onboarding(true);
+    legacy_onboarding();
+    legacy_skips(true, false, false);
     qdd_setup_model_t guide_setup = {0};
     qdd_ui_wifi(&guide_setup, guide_wifi);
     state = (qdd_hid_state_t){0};
@@ -589,16 +795,17 @@ int main(int argc, char **argv) {
         if (i == 4) { state.connected = state.encrypted = state.authenticated = state.bonded = state.ready = true; ble = (qdd_ble_status_t){0}; }
         if (i == 5) { state.heartbeat_seen = true; state.last_ping_ms = 1900; }
         if (i == 6) state.locked = true;
+        legacy_skips(true, false, false);
         qdd_ui_refresh(&state, ble, i >= 5, 87, 2000, "", 0);
         lv_refr_now(display);
         check_labels(lv_screen_active());
         if (i < 2) {
-            assert(has_label(lv_screen_active(), "扫码或浏览器打开地址下载"));
-            assert(has_label(lv_screen_active(), "手机/电脑/ESP同一局域网"));
-            assert(has_visible_label(lv_screen_active(), "跳过此步") && has_visible_label(lv_screen_active(), "设置"));
+            assert(has_label(lv_screen_active(), "手机扫码下载并安装"));
+            assert(has_label(lv_screen_active(), "长按确认：设置"));
+            assert(has_visible_label(lv_screen_active(), qdd_ui_guide_step() == 4 ? "开始配对" : "下一步") && has_visible_label(lv_screen_active(), "上一步"));
         }
         if (i < 5) assert(!has_label(lv_screen_active(), "紧急停止") && !has_label(lv_screen_active(), "取消急停"));
-        if (i == 2 || i == 3) assert(has_visible_label(lv_screen_active(), "跳过此步") && qdd_ui_guide_step() == 4);
+        if (i == 2 || i == 3) assert(has_visible_label(lv_screen_active(), qdd_ui_guide_step() == 4 ? "开始配对" : "下一步") && qdd_ui_guide_step() == 4);
         write_frame(guide_names[i]);
         if (i == 4) {
             s_onboarding.phone_projecting = false;
@@ -613,31 +820,33 @@ int main(int argc, char **argv) {
     // actual missing Bluetooth link, with its regular emergency stop action.
     state = (qdd_hid_state_t){0};
     s_onboarding = (qdd_onboarding_view_t){0};
-    qdd_ui_require_onboarding(true);
+    legacy_onboarding();
+    legacy_skips(true, false, false);
     qdd_ui_refresh(&state, (qdd_ble_status_t){0}, false, 87, 2000, "", 0);
     lv_refr_now(display); check_labels(lv_screen_active());
-    assert(qdd_ui_guide_step() == 2 && has_visible_label(lv_screen_active(), "跳过此步"));
-    qdd_ui_onboarding_skips(true, false);
+    assert(qdd_ui_guide_step() == 3 && has_visible_label(lv_screen_active(), qdd_ui_guide_step() == 4 ? "开始配对" : "下一步"));
+    legacy_skips(true, true, false);
     qdd_ui_refresh(&state, (qdd_ble_status_t){0}, false, 87, 2000, "", 0);
     lv_refr_now(display); check_labels(lv_screen_active());
     assert(qdd_ui_guide_step() == 4 && !has_label(lv_screen_active(), "紧急停止"));
     write_frame("onboarding_skip_app");
-    qdd_ui_onboarding_skips(true, true);
+    legacy_skips(true, true, true);
     qdd_ui_refresh(&state, (qdd_ble_status_t){0}, false, 87, 2000, "", 0);
     lv_refr_now(display); check_labels(lv_screen_active());
-    assert(qdd_ui_guide_step() == 5 && !has_visible_label(lv_screen_active(), "跳过此步"));
-    assert(has_visible_label(lv_screen_active(), "设置") && !has_label(lv_screen_active(), "紧急停止"));
+    assert(qdd_ui_guide_step() == 5 && has_visible_label(lv_screen_active(), "下一步"));
+    assert(has_visible_label(lv_screen_active(), "上一步") && !has_label(lv_screen_active(), "紧急停止"));
     write_frame("onboarding_skip_bluetooth");
     state.heartbeat_seen = true; state.last_ping_ms = 1900;
+    while (qdd_ui_guide_step() >= 1 && qdd_ui_guide_step() <= 6) qdd_ui_guide_navigate(true);
     qdd_ui_refresh(&state, (qdd_ble_status_t){0}, true, 87, 2000, "", 0);
     lv_refr_now(display); check_labels(lv_screen_active());
     assert(qdd_ui_guide_step() == 0 && has_visible_label(lv_screen_active(), "请先配对手机"));
     assert(has_visible_label(lv_screen_active(), "紧急停止"));
     write_frame("onboarding_skip_complete_unconnected");
-    qdd_ui_require_onboarding(true); // Configuration/reset clears skip markers.
+    legacy_onboarding(); // Configuration/reset clears skip markers.
     qdd_ui_refresh(&state, (qdd_ble_status_t){0}, true, 87, 2000, "", 0);
     lv_refr_now(display); check_labels(lv_screen_active());
-    assert(qdd_ui_guide_step() == 2 && has_visible_label(lv_screen_active(), "跳过此步"));
+    assert(qdd_ui_guide_step() == 2 && has_visible_label(lv_screen_active(), "下一步"));
     qdd_ui_require_onboarding(false);
     if (argc == 3 && strcmp(argv[2], "--guide") == 0) {
         check_completed_guide(display);
@@ -689,11 +898,11 @@ int main(int argc, char **argv) {
     wifi.count = 64;
     for (unsigned i = 0; i < 64; i++) snprintf(s_networks[i].ssid, sizeof(s_networks[i].ssid), "Network-%u", i + 1);
     setup.selection = 63; qdd_ui_wifi(&setup, wifi); lv_refr_now(display); check_labels(lv_screen_active());
-    assert(has_label(lv_screen_active(), "无线网络 16/17")); write_frame("wifi_64_last_network");
+    assert(has_label(lv_screen_active(), "连接无线网 16/17")); write_frame("wifi_64_last_network");
     setup.selection = 64; qdd_ui_wifi(&setup, wifi); lv_refr_now(display); check_labels(lv_screen_active());
-    assert(has_label(lv_screen_active(), "无线网络 17/17")); assert(has_label(lv_screen_active(), "重新查找网络"));
+    assert(has_label(lv_screen_active(), "连接无线网 17/17")); assert(has_label(lv_screen_active(), "重新查找网络"));
     setup.selection = 65; qdd_ui_wifi(&setup, wifi); lv_refr_now(display); check_labels(lv_screen_active());
-    assert(has_label(lv_screen_active(), "无线网络 17/17")); write_frame("wifi_64_back");
+    assert(has_label(lv_screen_active(), "连接无线网 17/17")); write_frame("wifi_64_back");
     wifi.count = 7; setup.selection = 0;
     qdd_ui_wifi(&setup, wifi); lv_refr_now(display);
     strcpy(s_networks[0].ssid, "Updated network"); wifi.scan_revision = ++s_scan_revision;
@@ -702,10 +911,11 @@ int main(int argc, char **argv) {
     qdd_setup_exit(&setup);
     // Earlier skip scenarios intentionally leave an unpaired guide active.
     // Exercise its unchanged QR content before isolating the main-page checks.
+    legacy_skips(true, false, false);
     qdd_ui_wifi(&setup, wifi);
     qdd_ui_refresh(&state, ble, true, 87, 2000, "", 0);
     lv_refr_now(display);
-    assert(qdd_ui_guide_step() == 2);
+    assert(qdd_ui_guide_step() == 3);
     const unsigned qr_flushes = flushes;
     lv_mem_monitor(&before);
     for (unsigned i = 0; i < 100; i++) {
@@ -718,6 +928,7 @@ int main(int argc, char **argv) {
     state.connected = state.encrypted = state.authenticated = state.bonded = state.ready = true;
     s_onboarding = (qdd_onboarding_view_t){.phone_seen = true, .phone_fresh = true,
         .phone_projecting = true, .pc_fresh = true};
+    while (qdd_ui_guide_step() >= 1 && qdd_ui_guide_step() <= 6) qdd_ui_guide_navigate(true);
     // Both the dynamic network address and configuration screen must cache updates.
     for (unsigned screen = 0; screen < 2; screen++) {
         if (screen) { qdd_setup_enter(&setup); qdd_setup_select(&setup, "Home Wi-Fi", false); }

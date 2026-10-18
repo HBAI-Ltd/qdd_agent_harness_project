@@ -30,6 +30,7 @@ let browser;
 let bundle;
 let css = "";
 const requests = [];
+let cameraVideoMissing = true;
 const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180"><rect width="320" height="180" fill="teal"/></svg>';
 const files = new Map();
 const server = createServer((req, res) => {
@@ -37,6 +38,15 @@ const server = createServer((req, res) => {
   requests.push({ path: url.pathname, auth: req.headers.authorization, query: url.search });
   if (url.pathname === "/bundle.js") return res.writeHead(200, { "Content-Type": "text/javascript" }).end(bundle);
   if (url.pathname === "/style.css") return res.writeHead(200, { "Content-Type": "text/css" }).end(css);
+  if (url.pathname === "/api/chat/videos") {
+    if (req.headers.authorization !== "Bearer fixture-only") return res.writeHead(401).end();
+    if (cameraVideoMissing) return res.writeHead(404, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "录像已不存在或已过期，请重新采集" }));
+    const file = files.get("/clip.mp4");
+    return res.writeHead(200, { "Content-Type": file.mime }).end(file.bytes);
+  }
+  if (url.pathname.startsWith("/captures/")) {
+    return res.writeHead(403, { "Cross-Origin-Resource-Policy": "same-origin" }).end();
+  }
   if (url.pathname.startsWith("/api/attachments/")) {
     if (req.headers.authorization !== "Bearer fixture-only") return res.writeHead(401).end();
     const key = url.pathname.endsWith("/photo") ? "/photo.svg" : "/clip.mp4";
@@ -77,7 +87,7 @@ try {
       URL.createObjectURL=blob=>{const url=create(blob);urls.add(url);return url};
       URL.revokeObjectURL=url=>{urls.delete(url);revoke(url)};
       createApp({render:()=>visible.value?h("main",[
-        h(MarkdownContent,{content:content.value}),
+        h(MarkdownContent,{content:content.value,gatewayUrl:location.origin,token:token.value}),
         h(AttachmentList,{gatewayUrl:location.origin,token:token.value,items:[
           {key:"photo",id:"photo",path:"folder/photo.svg",size:100,mime:"image/svg+xml"},
           {key:"clip",id:"clip",path:"clip.mp4",size:100,mime:"video/mp4"}
@@ -125,6 +135,21 @@ try {
     await page.waitForFunction(() => !document.querySelector("video"));
     console.log(`${file}: decoded frames and stopped on source removal`);
   }
+  await setContent(`[监控录像](http://127.0.0.1:8790/captures/${"a".repeat(32)}/recording.mp4)`);
+  await page.waitForSelector(".markdown-content .chat-media button");
+  assert.equal(requests.filter((req) => req.path === "/api/chat/videos").length, 0);
+  await page.click(".markdown-content .chat-media button");
+  await page.waitForSelector(".markdown-content [role=alert]");
+  assert.match(await page.$eval(".markdown-content [role=alert]", (node) => node.textContent), /录像已不存在或已过期/);
+  cameraVideoMissing = false;
+  await page.click(".markdown-content .chat-media button");
+  await page.waitForFunction(() => document.querySelector(".markdown-content video")?.currentTime > 0);
+  assert.equal(await page.$(".markdown-content .chat-media-error"), null);
+  assert.ok(requests.some((req) => req.path === "/api/chat/videos" && req.auth === "Bearer fixture-only" && !req.query));
+  assert.equal(await page.evaluate(() => window.activeBlobUrls.size), 1);
+  await setContent("录像已关闭");
+  await page.waitForFunction(() => window.activeBlobUrls.size === 0);
+  console.log("Camera MP4 uses authenticated gateway and decodes via blob URL.");
   await page.click(".attachments .chat-media button");
   await page.waitForFunction(() => document.querySelector(".attachments img")?.naturalWidth === 320);
   assert.equal(await page.evaluate(() => window.activeBlobUrls.size), 1);

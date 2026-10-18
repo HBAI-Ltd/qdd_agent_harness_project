@@ -18,8 +18,10 @@ import { AndroidTools, createMcpServer, createMcpSession } from "./mcp.js";
 import type { AndroidToolsOptions } from "./mcp.js";
 import { startHttpMcp } from "./http.js";
 import { ScreenClient, ScreenError } from "./screen.js";
+import type { PointerCalibrationState } from "./screen.js";
 import { LiveScreenSource } from "./live.js";
 import { PNG } from "pngjs";
+import { renderTargetPreview as renderTargetPreviewPixels } from "./target-preview.js";
 
 type ToolResponse = Awaited<ReturnType<Client["callTool"]>>;
 
@@ -614,6 +616,14 @@ function controlFixture(actionFrameTimeoutMs = 100) {
 
 function calibrationFixture(actionFrameTimeoutMs = 100) {
   const fixture = controlFixture(actionFrameTimeoutMs);
+  const capture = fixture.adb.capture.bind(fixture.adb);
+  let position = 0;
+  fixture.adb.capture = async (serial) => {
+    const frame = await capture(serial), png = PNG.sync.read(frame.png);
+    // Distinct rendered cursor pixels are part of this visible-cursor fixture.
+    png.data[((++position % frame.height) * frame.width + 50) * 4] = 255;
+    return { ...frame, png: PNG.sync.write(png) };
+  };
   const tools = new AndroidTools(fixture.adb, fixture.input, {
     now: () => fixture.clock.now, actionFrameTimeoutMs, calibrationSettleMs: 0,
   });
@@ -623,13 +633,7 @@ function calibrationFixture(actionFrameTimeoutMs = 100) {
 type TargetRenderer = NonNullable<AndroidToolsOptions["targetPreviewRenderer"]>;
 const fakeTargetRenderer: TargetRenderer = async (bytes, _mime, width, height, x, y, signal) => {
   signal?.throwIfAborted();
-  const cropWidth = Math.min(50, width), cropHeight = Math.min(70, height);
-  const crop = { x: Math.max(0, Math.min(width - cropWidth, x - Math.floor(cropWidth / 2))),
-    y: Math.max(0, Math.min(height - cropHeight, y - Math.floor(cropHeight / 2))),
-    width: cropWidth, height: cropHeight, scale: 2 };
-  const marked = PNG.sync.read(bytes); marked.data[(y * width + x) * 4] = 255;
-  return { png: PNG.sync.write(marked),
-    zoomPng: fixturePng(crop.width * 2, crop.height * 2), crop, simulatedTarget: true };
+  return renderTargetPreviewPixels(bytes, _mime, width, height, x, y);
 };
 function targetPreviewFixture(targetPreviewRenderer: TargetRenderer = fakeTargetRenderer) {
   const fixture = controlFixture();
@@ -651,15 +655,20 @@ test("official SDK target preview returns labeled original and zoom images witho
   const metadata = jsonResult(response), images = response.content.filter((item) => item.type === "image");
   assert.equal(images.length, 2);
   assert.deepEqual(images.map(({ mimeType }) => mimeType), ["image/png", "image/png"]);
-  assert.deepEqual(readPngDimensions(Buffer.from(images[0]!.data, "base64")), { width: 100, height: 200 });
-  assert.deepEqual(readPngDimensions(Buffer.from(images[1]!.data, "base64")), { width: 100, height: 140 });
+  assert.deepEqual(readPngDimensions(Buffer.from(images[0]!.data, "base64")), { width: 254, height: 252 });
+  assert.deepEqual(readPngDimensions(Buffer.from(images[1]!.data, "base64")), { width: 254, height: 372 });
   assert.notEqual(metadata["frameId"], before["frameId"]);
   assert.notEqual(metadata["sourceFrameId"], before["sourceFrameId"]);
   assert.equal(metadata["simulatedTarget"], true);
   assert.equal(metadata["realMouseMoved"], false); assert.equal(metadata["realClickSent"], false);
   assert.deepEqual(metadata["target"], { x: 90, y: 180, coordinateSpace: "pixels" });
-  assert.deepEqual(metadata["crop"], { x: 50, y: 130, width: 50, height: 70, scale: 2 });
-  assert.deepEqual(metadata["zoomTarget"], { x: 80, y: 100, coordinateSpace: "zoomPixels" });
+  assert.deepEqual(metadata["annotation"], { coordinateSpace: "originalPhonePixels", label: "PHONE PX: X=90 Y=180",
+    original: { width: 254, height: 252, sourceRect: { x: 0, y: 0, width: 100, height: 200 },
+      legend: { x: 0, y: 200, width: 254, height: 52 } },
+    zoom: { width: 254, height: 372, sourceRect: { x: 0, y: 0, width: 200, height: 320 },
+      legend: { x: 0, y: 320, width: 254, height: 52 } } });
+  assert.deepEqual(metadata["crop"], { x: 0, y: 40, width: 100, height: 160, scale: 2 });
+  assert.deepEqual(metadata["zoomTarget"], { x: 180, y: 280, coordinateSpace: "zoomPixels" });
   assert.equal(metadata["sourceMimeType"], "image/png"); assert.equal(metadata["mimeType"], "image/png");
   const digest = (data: Buffer) => createHash("sha256").update(data).digest("hex");
   assert.equal(metadata["sourceSha256"], digest(fixture.adb.latestPng));
@@ -682,6 +691,7 @@ test("target preview and tap share normalized1000 pixel conversion including dis
       const fixture = targetPreviewFixture(), frame = jsonResult(await fixture.tools.call("android_screenshot"));
       const result = jsonResult(await fixture.tools.call("android_preview_tap", { frameId: frame["frameId"], x, y, coordinateSpace: "normalized1000" }));
       assert.deepEqual(result["target"], { x: expected[0], y: expected[1], coordinateSpace: "pixels" });
+      assert.equal((result["annotation"] as { label: string }).label, `PHONE PX: X=${expected[0]} Y=${expected[1]}`);
       assert.deepEqual(result["tapArguments"], { action: "tap", frameId: result["frameId"], x: expected[0], y: expected[1], coordinateSpace: "pixels" });
       assert.deepEqual(fixture.bridge.records, []);
     });
@@ -693,7 +703,7 @@ test("target preview production renderer returns actual PNG overlays while retai
   const response = await fixture.tools.call("android_preview_tap", { frameId: frame["frameId"], x: 50, y: 100 });
   const result = jsonResult(response), images = response.content.filter((item) => item.type === "image");
   assert.equal(images.length, 2);
-  assert.deepEqual(readPngDimensions(Buffer.from(images[0]!.data, "base64")), { width: 100, height: 200 });
+  assert.deepEqual(readPngDimensions(Buffer.from(images[0]!.data, "base64")), { width: 254, height: 252 });
   assert.notEqual(result["sourceSha256"], result["annotatedImageSha256"]);
   assert.equal(result["sourceSha256"], createHash("sha256").update(fixture.adb.latestPng).digest("hex"));
   assert.equal(result["simulatedTarget"], true); assert.equal(result["realClickSent"], false);
@@ -799,6 +809,123 @@ async function calibrationProbe(fixture: ReturnType<typeof calibrationFixture>) 
 }
 const finishCalibration = (probe: Record<string, unknown>, extra: Record<string, unknown> = {}) => ({
   phase: "finish", probeId: probe["probeId"], frameId: probe["frameId"], startX: 72, startY: 140, endX: 24, endY: 108, ...extra,
+});
+
+function actualPointerFixture(change: (state: PointerCalibrationState, moves: number, reads: number) => PointerCalibrationState = (state) => state) {
+  const fixture = controlFixture(); let reads = 0;
+  const tools = new AndroidTools(fixture.adb, fixture.input, {
+    now: () => fixture.clock.now, actionFrameTimeoutMs: 100, calibrationSettleMs: 0,
+  });
+  Object.assign(fixture.adb, { async getPointerCalibration(): Promise<PointerCalibrationState> {
+    const moves = fixture.bridge.records.filter(({ op }) => op === "MOVE").length;
+    const point = moves < 2 ? { x: 72, y: 140, sequence: moves + 1, ageMs: 0 } : { x: 24, y: 108, sequence: 3, ageMs: 0 };
+    return change({ active: true, deviceId: "USB-ONE", sessionId: "11111111-1111-4111-8111-111111111111",
+      width: 100, height: 200, rotation: 0, point }, moves, ++reads);
+  } });
+  return { ...fixture, tools };
+}
+
+test("automatic calibration measures actual mouse events with no visible system cursor and sends no click", async () => {
+  const fixture = actualPointerFixture(), frame = jsonResult(await fixture.tools.call("android_screenshot"));
+  const result = jsonResult(await fixture.tools.call("android_pointer_calibration", { phase: "auto", frameId: frame["frameId"] }));
+  assert.equal(result["measurementSource"], "android-mouse-events"); assert.equal(result["calibrated"], true);
+  assert.equal(result["scaleX"], 2); assert.equal(result["scaleY"], 3); assert.equal(result["realClickSent"], false);
+  assert.equal(result["sha256"], frame["sha256"], "Actual-event calibration works even when system-cursor screenshots are byte-identical.");
+  assert.deepEqual(fixture.bridge.records.filter(({ op }) => op === "MOVE").map(({ args }) => args), [[1, 1, 0, 0], [-96, -96, 0, 0]]);
+  assert.equal(fixture.input.state.calibrated, true);
+});
+
+test("automatic calibration requires a foreground calibration page and matching geometry before HID", async (context) => {
+  for (const [label, change] of [
+    ["inactive", (state: PointerCalibrationState) => ({ ...state, active: false, sessionId: null, point: null })],
+    ["geometry", (state: PointerCalibrationState) => ({ ...state, width: 101 })],
+    ["other phone", (state: PointerCalibrationState) => ({ ...state, deviceId: "different-phone" })],
+  ] as const) await context.test(label, async () => {
+    const fixture = actualPointerFixture(change), frame = jsonResult(await fixture.tools.call("android_screenshot"));
+    errorResult(await fixture.tools.call("android_pointer_calibration", { phase: "auto", frameId: frame["frameId"] }), /foreground|geometry/);
+    assert.deepEqual(fixture.bridge.records, []);
+  });
+});
+
+test("automatic calibration rejects missing endpoint support and irrelevant direction before HID", async () => {
+  const fixture = calibrationFixture(), frame = jsonResult(await fixture.tools.call("android_screenshot"));
+  errorResult(await fixture.tools.call("android_pointer_calibration", { phase: "auto", frameId: frame["frameId"] }), /Update|open/);
+  errorResult(await fixture.tools.call("android_pointer_calibration", { phase: "auto", frameId: frame["frameId"], direction: "up-left" }), /Unexpected/);
+  assert.deepEqual(fixture.bridge.records, []);
+});
+
+test("automatic calibration rejects stale events, clipped movement and lost focus without replacing scales", async (context) => {
+  for (const [label, change] of [
+    ["stale", (state: PointerCalibrationState, moves: number) => moves < 1 ? state : ({ ...state, point: { ...state.point!, ageMs: 1001 } })],
+    ["clipped", (state: PointerCalibrationState, moves: number) => moves < 2 ? state : ({ ...state, point: { ...state.point!, x: 0 } })],
+    ["lost focus", (state: PointerCalibrationState, moves: number) => moves < 2 ? state : ({ ...state, active: false, point: null, sessionId: null })],
+    ["new page", (state: PointerCalibrationState, moves: number) => moves < 2 ? state : ({ ...state, sessionId: "22222222-2222-4222-8222-222222222222" })],
+  ] as const) await context.test(label, async () => {
+    const fixture = actualPointerFixture(change); fixture.input.setCalibration(1.25, 1.5);
+    const frame = jsonResult(await fixture.tools.call("android_screenshot"));
+    errorResult(await fixture.tools.call("android_pointer_calibration", { phase: "auto", frameId: frame["frameId"] }), /fresh|clipped|foreground|geometry/);
+    assert.equal(fixture.input.state.scaleX, 1.25); assert.equal(fixture.input.state.scaleY, 1.5);
+    assert.equal(fixture.input.state.armed, false);
+    assert.ok(fixture.bridge.records.filter(({ op }) => op === "MOVE").every(({ args }) => args[3] === 0));
+  });
+});
+
+test("automatic calibration rejects a changed pointer during result image acquisition", async () => {
+  const fixture = actualPointerFixture(); fixture.input.setCalibration(1.25, 1.5);
+  const frame = jsonResult(await fixture.tools.call("android_screenshot"));
+  const capture = fixture.adb.capture.bind(fixture.adb);
+  fixture.adb.capture = async (serial) => {
+    const value = await capture(serial);
+    if (fixture.bridge.records.filter(({ op }) => op === "MOVE").length === 2) {
+      Object.assign(fixture.adb, { getPointerCalibration: async () => ({ active: true, deviceId: "USB-ONE",
+        sessionId: "11111111-1111-4111-8111-111111111111", width: 100, height: 200, rotation: 0,
+        point: { x: 25, y: 108, sequence: 4, ageMs: 0 } }) });
+    }
+    return value;
+  };
+  errorResult(await fixture.tools.call("android_pointer_calibration", { phase: "auto", frameId: frame["frameId"] }), /changed|stale/);
+  assert.equal(fixture.input.state.scaleX, 1.25); assert.equal(fixture.input.state.armed, false);
+});
+
+test("automatic calibration settles before the probe and never moves after focus loss or cancellation during that rest", async (context) => {
+  for (const kind of ["focus", "cancel"] as const) await context.test(kind, async () => {
+    const fixture = actualPointerFixture(); fixture.input.setCalibration(1.25, 1.5);
+    const frame = jsonResult(await fixture.tools.call("android_screenshot")), cancel = new AbortController();
+    let warmupAt = 0;
+    Object.assign(fixture.adb, { async getPointerCalibration(): Promise<PointerCalibrationState> {
+      const moves = fixture.bridge.records.filter(({ op }) => op === "MOVE").length;
+      if (moves === 1 && !warmupAt) warmupAt = performance.now();
+      const focused = kind !== "focus" || warmupAt === 0 || performance.now() - warmupAt < 200;
+      return { active: focused, deviceId: "USB-ONE", sessionId: focused ? "11111111-1111-4111-8111-111111111111" : null,
+        width: 100, height: 200, rotation: 0, point: focused ? { x: 72, y: 140, sequence: moves + 1, ageMs: 0 } : null };
+    } });
+    if (kind === "cancel") setTimeout(() => cancel.abort(new Error("Cancel automatic rest")), 200);
+    errorResult(await fixture.tools.call("android_pointer_calibration", { phase: "auto", frameId: frame["frameId"] }, cancel.signal), /foreground|Cancel|cancelled|aborted/);
+    assert.equal(fixture.bridge.records.filter(({ op }) => op === "MOVE").length, 1);
+    assert.equal(fixture.input.state.scaleX, 1.25); assert.equal(fixture.input.state.armed, false);
+  });
+});
+
+test("identical calibration images return not measurable with both images and no finish ticket", async () => {
+  const fixture = controlFixture(), frame = jsonResult(await fixture.tools.call("android_screenshot"));
+  const response = await fixture.tools.call("android_pointer_calibration", { phase: "probe", frameId: frame["frameId"] });
+  const result = jsonResult(response);
+  assert.equal(result["measurable"], false); assert.equal(result["reason"], "identical_images");
+  assert.equal(result["probeId"], undefined); assert.equal(response.content.filter(({ type }) => type === "image").length, 2);
+  assert.equal(fixture.input.state.armed, false); assert.equal(fixture.input.state.calibrated, false);
+  errorResult(await fixture.tools.call("android_pointer_calibration", finishCalibration(result)), /probeId|pending/);
+});
+
+test("an old automatic calibration resting round cannot pause a newer input owner", async () => {
+  const fixture = actualPointerFixture(), frame = jsonResult(await fixture.tools.call("android_screenshot"));
+  const probing = fixture.tools.call("android_pointer_calibration", { phase: "auto", frameId: frame["frameId"] });
+  for (let attempt = 0; attempt < 100 && !fixture.bridge.records.some(({ op }) => op === "MOVE"); attempt++) await nextTurn();
+  assert.equal(fixture.bridge.records.filter(({ op }) => op === "MOVE").length, 1);
+  const newer = fixture.tools.fork(); jsonResult(await newer.call("android_hid_arm"));
+  const count = fixture.bridge.records.length;
+  errorResult(await probing, /changed/);
+  assert.equal(fixture.input.state.armed, true); assert.equal(newer.ownsInput, true);
+  assert.equal(fixture.bridge.records.length, count, "Old cleanup must not send PAUSE into the newer round.");
 });
 
 test("pointer calibration returns ordered original images through the official SDK and finishes without more HID", async (context) => {

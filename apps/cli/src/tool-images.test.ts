@@ -31,7 +31,6 @@ async function fixture(t: TestContext) {
   const root = await mkdtemp(path.join(tmpdir(), "qdd-tool-images-"));
   const loaded = await loadConfig(root);
   loaded.config.llm.clarify = "off";
-  loaded.config.llm.maxSteps = 8;
   await ensureWorkspace(loaded.paths);
   const sources = await DataSources.open(loaded, { connectMcp: false });
   t.after(async () => {

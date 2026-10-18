@@ -42,7 +42,7 @@ class QddFontsTest(unittest.TestCase):
 
     def test_fonts_are_compiled_and_bound_without_demo_shell(self):
         ui = (ROOT / "main/qdd_ui.c").read_text(encoding="utf8")
-        cmake = (ROOT / "main/CMakeLists.txt").read_text()
+        cmake = (ROOT / "main/CMakeLists.txt").read_text(encoding="utf-8")
         for size in (14, 20):
             self.assertIn(f"../assets/fonts/qdd_cjk_{size}.c", cmake)
             self.assertIn(f"&qdd_cjk_{size}", ui)

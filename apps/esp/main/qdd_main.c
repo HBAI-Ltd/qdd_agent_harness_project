@@ -10,6 +10,7 @@
 #include "freertos/task.h"
 #include "qdd_ble.h"
 #include "qdd_hid.h"
+#include "qdd_text.h"
 #include "qdd_ui.h"
 #include "qdd_ui_model.h"
 #include "qdd_control.h"
@@ -17,6 +18,8 @@
 #include "qdd_setup_model.h"
 #include "qdd_wifi.h"
 #include "qdd_onboarding.h"
+#include "qdd_alloc_trace.h"
+#include "qdd_driver_usb.h"
 #include "qdd_reset.h"
 #include <stdatomic.h>
 #include <stdio.h>
@@ -31,8 +34,12 @@
 #define EVENT_CONFIG_LONG 256u
 #define EVENT_SKIP_APP 512u
 #define EVENT_SKIP_BLUETOOTH 1024u
+#define EVENT_DESKTOP_READY 2048u
+#define EVENT_WIFI_SETUP 4096u
+#define EVENT_GUIDE_PAIR 8192u
 #define SKIP_APP 1u
 #define SKIP_BLUETOOTH 2u
+#define SKIP_DESKTOP 4u
 
 static atomic_uint s_events;
 static atomic_bool s_buttons_ready;
@@ -41,6 +48,7 @@ static atomic_bool s_configuring;
 static atomic_uint s_home_selection;
 static atomic_uint s_onboarding_skips;
 static qdd_hid_state_t s_state;
+static qdd_text_t s_text;
 static qdd_stream_t s_usb_stream, s_tcp_stream;
 static qdd_control_t s_control;
 static qdd_usb_presence_t s_usb_presence;
@@ -49,6 +57,7 @@ static qdd_wifi_credentials_t s_pending_wifi;
 static bool s_pending_ssid, s_pending_password, s_was_scanning;
 static uint32_t s_tcp_epoch;
 static uint32_t s_link_epoch;
+static bool s_guide_pair_requested;
 static const char *s_message = "";
 static uint64_t s_message_ms;
 static portMUX_TYPE s_view_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -81,16 +90,25 @@ static void on_key(bsp_btn_t button, bsp_btn_ev_t event, void *context) {
     else if (event == BSP_BTN_LONG && button == BSP_BTN_OK) atomic_fetch_or(&s_events, EVENT_CONFIG_LONG);
     return;
   }
+  const unsigned guide_step = atomic_load(&s_physical_stop) ? 0 : qdd_ui_guide_step();
   if (event == BSP_BTN_PRESS && (button == BSP_BTN_UP || button == BSP_BTN_DOWN)) {
+    if (guide_step) { qdd_ui_guide_navigate(button == BSP_BTN_DOWN); return; }
     // Two vertical choices: update synchronously so a rapid navigation + OK
     // sequence never acts on a worker's older selection snapshot.
-    if (qdd_ui_home_choices(qdd_ui_guide_step()) > 1) atomic_fetch_xor(&s_home_selection, 1u);
+    if (qdd_ui_home_choices(guide_step) > 1) atomic_fetch_xor(&s_home_selection, 1u);
   } else if (button == BSP_BTN_OK && event == BSP_BTN_CLICK) {
-    const qdd_ui_home_action_t action = qdd_ui_home_action(qdd_ui_guide_step(),
+    const qdd_ui_home_action_t action = qdd_ui_home_action(guide_step,
         atomic_load(&s_home_selection), atomic_load(&s_physical_stop));
     if (action == QDD_UI_HOME_SETTINGS) {
       atomic_store(&s_configuring, true);
       atomic_fetch_or(&s_events, EVENT_MENU);
+    } else if (action == QDD_UI_HOME_NEXT) {
+      qdd_ui_guide_navigate(true);
+    } else if (action == QDD_UI_HOME_PAIR) {
+      atomic_fetch_or(&s_events, EVENT_GUIDE_PAIR);
+    } else if (action == QDD_UI_HOME_WIFI_SETUP) {
+      atomic_store(&s_configuring, true);
+      atomic_fetch_or(&s_events, EVENT_WIFI_SETUP);
     } else if (action == QDD_UI_HOME_SKIP_APP || action == QDD_UI_HOME_SKIP_BLUETOOTH) {
       atomic_fetch_or(&s_events, action == QDD_UI_HOME_SKIP_APP ? EVENT_SKIP_APP : EVENT_SKIP_BLUETOOTH);
     } else if (action == QDD_UI_HOME_UNLOCK) {
@@ -99,6 +117,9 @@ static void on_key(bsp_btn_t button, bsp_btn_ev_t event, void *context) {
       atomic_store(&s_physical_stop, true);
       atomic_fetch_or(&s_events, EVENT_STOP);
     }
+  } else if (button == BSP_BTN_OK && event == BSP_BTN_LONG && guide_step) {
+    atomic_store(&s_configuring, true);
+    atomic_fetch_or(&s_events, EVENT_MENU);
   }
 }
 
@@ -120,6 +141,8 @@ static bool controller_live(void) {
 static void drop_controller(qdd_source_t source) {
   if (!qdd_control_drop(&s_control, source)) return;
   qdd_hid_pause(&s_state, false);
+  qdd_ble_text_cancel_pending();
+  qdd_text_abort(&s_text, s_state.connected);
   s_state.heartbeat_seen = false;
 }
 
@@ -143,7 +166,8 @@ static void setup_action(qdd_setup_action_t action) {
     qdd_ble_open_pairing();
     ui_feedback("PAIRING");
   } else if (action == QDD_SETUP_SCAN) {
-    atomic_store(&s_onboarding_skips, 0);
+    // Revisiting Wi-Fi must not undo the user's desktop instruction skip.
+    atomic_fetch_and(&s_onboarding_skips, SKIP_DESKTOP);
     if (qdd_wifi_scan() != ESP_OK) qdd_setup_error(&s_setup, "暂时找不到网络，请重试");
   } else if (action == QDD_SETUP_SELECT) {
     const qdd_wifi_view_t wifi = qdd_wifi_view();
@@ -152,7 +176,7 @@ static void setup_action(qdd_setup_action_t action) {
       qdd_setup_select(&s_setup, ap.ssid, ap.open);
     }
   } else if (action == QDD_SETUP_SAVE) {
-    atomic_store(&s_onboarding_skips, 0);
+    atomic_fetch_and(&s_onboarding_skips, SKIP_DESKTOP);
     if (qdd_wifi_save(&s_setup.credentials) != ESP_OK) qdd_setup_error(&s_setup, "连接失败，请检查密码");
   } else if (action == QDD_SETUP_EXIT) {
     // Exiting never clears the physical stop latch or authorizes input.
@@ -169,9 +193,48 @@ static void setup_key(qdd_setup_key_t key) {
   setup_action(qdd_setup_key(&s_setup, key, wifi.count, wifi.scanning));
 }
 
+// Main worker alone owns text. BLE callbacks publish bounded numeric events;
+// only one confirmed ATT indication is allowed before preparing the next frame.
+static bool text_fast_allowed(void) {
+  return !atomic_load(&s_physical_stop) && !atomic_load(&s_configuring) &&
+      !(atomic_load(&s_events) & (EVENT_STOP | EVENT_MENU));
+}
+
+static void sync_text(void) {
+  const qdd_ble_text_events_t events = qdd_ble_text_events();
+  // A known phone acceptance remains terminal even if the target then loses focus.
+  if (events.ack_received) qdd_text_ack(&s_text, events.ack_id, events.ack_epoch, events.ack_status);
+  if (events.indication_done) qdd_text_indication_done(&s_text, events.indication_token, events.indication_success);
+  if (events.editor_changed) {
+    if (!events.ready || events.editor_epoch != s_text.editor_epoch) qdd_ble_text_cancel_pending();
+    qdd_text_editor(&s_text, events.ready, events.editor_epoch);
+  }
+  const bool secure = s_state.connected && s_state.encrypted && s_state.bonded;
+  const bool allowed = secure && controller_live() && !atomic_load(&s_configuring) &&
+      !atomic_load(&s_physical_stop) && !(atomic_load(&s_events) & (EVENT_STOP | EVENT_MENU)) &&
+      !qdd_hid_text_permission(&s_state, now_ms());
+  if (!allowed) { qdd_ble_text_cancel_pending(); qdd_text_abort(&s_text, secure); }
+  qdd_text_tick(&s_text, now_ms());
+  if (s_text.status < QDD_TEXT_QUEUED || s_text.status > QDD_TEXT_AWAITING_ACK) qdd_ble_text_cancel_pending();
+  // CANCEL is neutral cleanup after PAUSE/lease loss. A pending text fragment
+  // never resumes after its gate closes, and COMMIT is never replayed.
+  if (!secure || (!allowed && !s_text.cancel_id)) return;
+  uint8_t frame[QDD_TEXT_FRAME_MAX];
+  const size_t length = qdd_text_frame(&s_text, qdd_ble_text_mtu(), frame, sizeof(frame));
+  if (!length) return;
+  if (frame[1] != 4 && (atomic_load(&s_physical_stop) || atomic_load(&s_configuring) ||
+      (atomic_load(&s_events) & (EVENT_STOP | EVENT_MENU)))) { qdd_text_abort(&s_text, true); return; }
+  uint32_t token = 0;
+  const qdd_ble_text_send_t result = qdd_ble_text_indicate(frame, length, frame[1] == 4 ? UINT64_MAX : s_state.last_ping_ms + QDD_HEARTBEAT_MS,
+      frame[1] == 4 ? NULL : text_fast_allowed, &token);
+  if (result == QDD_BLE_TEXT_QUEUED) qdd_text_indication_queued(&s_text, token);
+  else if (result == QDD_BLE_TEXT_FAILED) qdd_text_abort(&s_text, false);
+}
+
 static void sync_safety(void) {
+  if (qdd_ui_guide_step() != 4) s_guide_pair_requested = false;
   qdd_ble_pairing_context(atomic_load(&s_configuring) ?
-      s_setup.page == QDD_SETUP_PAIR : qdd_ui_guide_step() == 4);
+      s_setup.page == QDD_SETUP_PAIR : s_guide_pair_requested);
   qdd_ble_poll();
   const qdd_ble_status_t ble = qdd_ble_status();
   if (s_link_epoch != ble.link_epoch) {
@@ -180,6 +243,10 @@ static void sync_safety(void) {
   }
   qdd_hid_set_link(&s_state, ble.connected, ble.encrypted, ble.authenticated, ble.bonded);
   qdd_hid_set_ready(&s_state, ble.ready, ble.consumer_ready);
+  if (qdd_driver_usb_take_reply_failure()) {
+    drop_controller(QDD_SOURCE_USB);
+    ui_feedback("USB_REPLY_FAILED");
+  }
   const qdd_source_t previous_owner = s_control.owner;
   if (qdd_control_tick(&s_control, usb_live(), qdd_wifi_tcp_live(), now_ms())) {
     qdd_hid_pause(&s_state, false);
@@ -187,9 +254,16 @@ static void sync_safety(void) {
     if (previous_owner == QDD_SOURCE_TCP) qdd_wifi_close_client();
   }
   qdd_hid_tick(&s_state, now_ms(), controller_live());
+  qdd_driver_usb_tick(usb_live(), s_state.armed || s_control.owner != QDD_SOURCE_NONE);
   const unsigned events = atomic_exchange(&s_events, 0);
-  if (events & (EVENT_SKIP_APP | EVENT_SKIP_BLUETOOTH)) {
+  if ((events & EVENT_GUIDE_PAIR) && qdd_ui_guide_step() == 4 && !atomic_load(&s_configuring)) {
+    s_guide_pair_requested = true;
+    qdd_ble_open_pairing();
+    ui_feedback("PAIRING");
+  }
+  if (events & (EVENT_DESKTOP_READY | EVENT_SKIP_APP | EVENT_SKIP_BLUETOOTH)) {
     unsigned skipped = 0;
+    if (events & EVENT_DESKTOP_READY) skipped |= SKIP_DESKTOP;
     if (events & EVENT_SKIP_APP) skipped |= SKIP_APP;
     if (events & EVENT_SKIP_BLUETOOTH) skipped |= SKIP_BLUETOOTH;
     atomic_fetch_or(&s_onboarding_skips, skipped);
@@ -199,10 +273,11 @@ static void sync_safety(void) {
     if (!s_state.locked || s_state.armed) qdd_hid_pause(&s_state, true);
     if (events & EVENT_STOP) ui_feedback("PHYSICAL_STOP");
   }
-  if (events & EVENT_MENU) {
+  if (events & (EVENT_MENU | EVENT_WIFI_SETUP)) {
     qdd_hid_pause(&s_state, false);
     qdd_wifi_allow_reconnect(false);
-    qdd_setup_menu(&s_setup);
+    if (events & EVENT_WIFI_SETUP) setup_action(qdd_setup_enter(&s_setup));
+    else qdd_setup_menu(&s_setup);
   }
   if (atomic_load(&s_configuring)) {
     if (s_state.armed) qdd_hid_pause(&s_state, false);
@@ -218,12 +293,13 @@ static void sync_safety(void) {
     ui_feedback("UNLOCKED");
   }
   if (s_state.release_required) (void)qdd_hid_release(&s_state, report, NULL);
+  sync_text();
 }
 
 static bool write_reply(qdd_source_t source, const char *reply) {
   const size_t length = strlen(reply);
   const bool written = source == QDD_SOURCE_TCP ? qdd_wifi_write(reply, length) :
-    usb_serial_jtag_write_bytes(reply, length, pdMS_TO_TICKS(10)) == (int)length;
+    qdd_driver_usb_reply(reply, length);
   if (!written && s_control.owner == source) {
     drop_controller(source);
     (void)qdd_hid_release(&s_state, report, NULL);
@@ -236,8 +312,9 @@ static void on_net_line(const char *line, qdd_source_t source) {
   qdd_net_command_t command = {0};
   const char *error = qdd_net_parse(line, &command) ? NULL : "BAD_COMMAND";
   if (!error && source != QDD_SOURCE_USB) error = "USB_ONLY";
-  if (!error && command.operation != QDD_NET_STATUS && command.operation != QDD_NET_DIAGNOSTICS) {
-    if (!qdd_control_usb_config(&s_control, s_state.armed)) error = "CONTROL_BUSY";
+  if (!error && command.operation != QDD_NET_STATUS && command.operation != QDD_NET_DIAGNOSTICS &&
+      command.operation != QDD_NET_DOWNLOAD_DIAGNOSTICS && command.operation != QDD_NET_OOM_TRACE) {
+    if (qdd_driver_usb_reserved() || !qdd_control_usb_config(&s_control, s_state.armed)) error = "CONTROL_BUSY";
     else if (atomic_load(&s_configuring)) error = "CONFIGURING";
     else {
       esp_err_t result = ESP_OK;
@@ -267,13 +344,18 @@ static void on_net_line(const char *line, qdd_source_t source) {
       if (result != ESP_OK) error = "WIFI_FAILED";
     }
   }
-  if (!error && command.operation == QDD_NET_DIAGNOSTICS) {
+  if (!error && (command.operation == QDD_NET_DIAGNOSTICS || command.operation == QDD_NET_DOWNLOAD_DIAGNOSTICS ||
+      command.operation == QDD_NET_OOM_TRACE)) {
     // Only this main worker uses the diagnostic reply. Keep the larger JSON
     // off its stack and separate from HTTP/UDP buffers and control replies.
     static char diagnostic[512];
     const int prefix = snprintf(diagnostic, sizeof(diagnostic), "QDDNET/1 %lu OK ", (unsigned long)command.id);
     const size_t size = prefix > 0 && (size_t)prefix < sizeof(diagnostic) - 2 ?
-        qdd_wifi_diagnostics(diagnostic + prefix, sizeof(diagnostic) - (size_t)prefix - 2) : 0;
+        (command.operation == QDD_NET_OOM_TRACE ?
+            qdd_alloc_trace_diagnostics(diagnostic + prefix, sizeof(diagnostic) - (size_t)prefix - 2) :
+         command.operation == QDD_NET_DOWNLOAD_DIAGNOSTICS ?
+            qdd_onboarding_download_diagnostics(diagnostic + prefix, sizeof(diagnostic) - (size_t)prefix - 2) :
+            qdd_wifi_diagnostics(diagnostic + prefix, sizeof(diagnostic) - (size_t)prefix - 2)) : 0;
     if (size) {
       diagnostic[(size_t)prefix + size] = '\n';
       diagnostic[(size_t)prefix + size + 1] = 0;
@@ -281,7 +363,8 @@ static void on_net_line(const char *line, qdd_source_t source) {
       (void)write_reply(source, diagnostic);
       return;
     }
-    error = "WIFI_FAILED";
+    error = command.operation == QDD_NET_OOM_TRACE ? "TRACE_FAILED" :
+        command.operation == QDD_NET_DOWNLOAD_DIAGNOSTICS ? "DOWNLOAD_FAILED" : "WIFI_FAILED";
   }
   const qdd_wifi_view_t wifi = qdd_wifi_view();
   char reply[QDD_REPLY_MAX];
@@ -292,12 +375,45 @@ static void on_net_line(const char *line, qdd_source_t source) {
   (void)write_reply(source, reply);
 }
 
+static void on_text_line(const char *line, qdd_source_t source) {
+  qdd_text_command_t command = {0};
+  const char *error = qdd_text_parse(line, &command) ? NULL : "BAD_COMMAND";
+  if (!error && command.operation != QDD_TEXT_STATUS) {
+    if (qdd_driver_usb_reserved()) error = "CONTROL_BUSY";
+    else if (atomic_load(&s_configuring)) error = "CONFIGURING";
+    else if (atomic_load(&s_physical_stop) || (atomic_load(&s_events) & (EVENT_STOP | EVENT_MENU))) error = "LOCKED";
+    else error = qdd_control_allow(&s_control, source, QDD_MOVE, now_ms());
+    if (!error) error = qdd_hid_text_permission(&s_state, now_ms());
+  }
+  if (!error) error = qdd_text_execute(&s_text, &command, now_ms());
+  char reply[QDD_REPLY_MAX];
+  qdd_text_reply(reply, sizeof(reply), command.request_id, error, &s_text,
+      command.operation == QDD_TEXT_STATUS && command.id == 0);
+  memset(&command, 0, sizeof(command));
+  // Reply queued before the main loop pumps BLE; this ACK is never phone acceptance.
+  (void)write_reply(source, reply);
+}
+
 static void on_line(const char *line, const char *error, void *context) {
   const qdd_source_t source = (qdd_source_t)(uintptr_t)context;
   qdd_command_t command = {0};
   sync_safety();
+  if (!error && strncmp(line, "QDDDRV/1 ", 9) == 0) {
+    qdd_driver_command_t driver = {0};
+    const char *driver_error = qdd_driver_parse(line, &driver) ? NULL : "BAD_COMMAND";
+    if (!driver_error && source != QDD_SOURCE_USB) driver_error = "USB_ONLY";
+    if (driver_error) {
+      char reply[96];
+      (void)qdd_driver_format_error(reply, sizeof(reply), driver.id, driver_error);
+      (void)write_reply(source, reply);
+    } else qdd_driver_usb_submit(&driver);
+    return;
+  }
+  if (!error && strncmp(line, "QDDTXT/1 ", 9) == 0) { on_text_line(line, source); return; }
   if (!error && strncmp(line, "QDDNET/1 ", 9) == 0) { on_net_line(line, source); return; }
   if (!error && !qdd_parse_command(line, &command)) error = "BAD_COMMAND";
+  if (!error && qdd_driver_usb_reserved() && command.op != QDD_STATUS &&
+      command.op != QDD_PAIR_STATUS && command.op != QDD_PAUSE && command.op != QDD_RELEASE) error = "CONTROL_BUSY";
   if (!error && atomic_load(&s_configuring) && command.op != QDD_STATUS &&
       command.op != QDD_PAIR_STATUS && command.op != QDD_PAUSE && command.op != QDD_RELEASE &&
       !(command.op == QDD_PING && s_control.owner == source)) error = "CONFIGURING";
@@ -344,8 +460,10 @@ static void display_task(void *context) {
     portEXIT_CRITICAL(&s_view_lock);
     if (bsp_lvgl_lock(10)) {
       const unsigned skipped = atomic_load(&s_onboarding_skips);
-      qdd_ui_onboarding_skips((skipped & SKIP_APP) != 0, (skipped & SKIP_BLUETOOTH) != 0);
+      qdd_ui_onboarding_skips((skipped & SKIP_DESKTOP) != 0,
+          (skipped & SKIP_APP) != 0, (skipped & SKIP_BLUETOOTH) != 0);
       qdd_ui_home_selection(atomic_load(&s_home_selection));
+      qdd_ui_driver(qdd_driver_usb_view());
       qdd_ui_wifi(&setup, qdd_wifi_view());
       qdd_ui_refresh(&state, qdd_ble_status(), control_live, battery, now_ms(), message, message_ms);
       bsp_lvgl_unlock();
@@ -359,7 +477,9 @@ void app_main(void) {
   bool reset_applied = false;
   const esp_err_t storage_error = qdd_reset_boot(&reset_applied);
   esp_err_t error = bsp_i2c_init();
-  if (error != ESP_OK || bsp_display_init() != ESP_OK || !bsp_lvgl_init()) {
+  // A 20-row DMA draw buffer saves 9.6 KB versus the BSP's 40-row default,
+  // leaving more shared internal RAM for simultaneous Wi-Fi/BLE allocations.
+  if (error != ESP_OK || bsp_display_init() != ESP_OK || !bsp_lvgl_init_with_buffer_rows(20)) {
     ESP_LOGE("qdd", "Display initialization failed; bridge remains disabled");
     return;
   }
@@ -375,6 +495,7 @@ void app_main(void) {
   serial.tx_buffer_size = 1024;
   serial.rx_buffer_size = 512;
   if (error == ESP_OK) error = usb_serial_jtag_driver_install(&serial);
+  if (error == ESP_OK) error = qdd_driver_usb_start();
   if (error != ESP_OK) {
     atomic_store(&s_physical_stop, true);
     qdd_hid_pause(&s_state, true);

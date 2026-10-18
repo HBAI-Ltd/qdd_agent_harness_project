@@ -7,7 +7,7 @@ import { test, type TestContext } from "node:test";
 import { loadConfig } from "./config.js";
 import { DataSources } from "./datasource/registry.js";
 import { Auth } from "./gateway/auth.js";
-import { ChatImageError, MAX_CHAT_IMAGE_BYTES, readChatImage } from "./gateway/chat-images.js";
+import { ChatImageError, MAX_CHAT_IMAGE_BYTES, MAX_CHAT_VIDEO_BYTES, readChatImage, readChatVideo } from "./gateway/chat-images.js";
 import { startGateway, type Gateway } from "./gateway/server.js";
 import { ensureWorkspace } from "./web/site.js";
 
@@ -15,7 +15,7 @@ const TOKEN = "chat-image-gateway-token";
 const CAPTURE = `/captures/${"a".repeat(32)}/frame_000001.jpg`;
 // Offline JPEG marker fixture: transfer and signature checks never use camera pictures.
 const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x02, 0xff, 0xd9]);
-type Mode = "jpeg" | "redirect" | "html" | "spoof" | "truncated" | "missing" | "forbidden" | "error" | "large-header" | "large-stream" | "slow" | "slow-body";
+type Mode = "mp4" | "large-video" | "jpeg" | "redirect" | "html" | "spoof" | "truncated" | "missing" | "forbidden" | "error" | "large-header" | "large-stream" | "slow" | "slow-body";
 
 async function setup(t: TestContext, provider: "haik" | "tysl" | "ezviz" = "haik") {
   const parent = path.resolve(tmpdir());
@@ -32,6 +32,8 @@ async function setup(t: TestContext, provider: "haik" | "tysl" | "ezviz" = "haik
       captures.push({ url: req.url, headers: req.headers });
       res.setHeader("Cross-Origin-Resource-Policy", "same-origin");
       if (req.headers.origin) return void res.writeHead(403).end("cross-site denied");
+      if (mode === "mp4") return void res.writeHead(200, { "Content-Type": "video/mp4" }).end(Buffer.from("000000186674797069736f6d0000020069736f6d69736f32", "hex"));
+      if (mode === "large-video") return void res.writeHead(200, { "Content-Type": "video/mp4", "Content-Length": MAX_CHAT_VIDEO_BYTES + 1 }).end();
       if (mode === "redirect") return void res.writeHead(302, { Location: "/secret" }).end();
       if (mode === "missing") return void res.writeHead(404).end("secret upstream text");
       if (mode === "forbidden") return void res.writeHead(403).end("secret upstream text");
@@ -189,4 +191,37 @@ test("chat image reader bounds both initial response and body waits", async (t) 
     setMode(mode);
     await assert.rejects(readChatImage({ url: origin + CAPTURE }, new Set([origin]), { timeoutMs: 25 }), (error: unknown) => error instanceof ChatImageError && error.status === 504);
   }
+});
+
+test("chat video gateway reads only installed camera MP4 artifacts with admin authorization", async (t) => {
+  const { origin, install, api, captures, setMode, otherRequests } = await setup(t, "tysl");
+  const url = origin + CAPTURE.replace("frame_000001.jpg", "recording.mp4");
+  const video = (value = url, headers = {}) => api("/api/chat/videos", { method: "POST", headers, body: JSON.stringify({ url: value }) });
+  setMode("mp4");
+  assert.equal((await video()).status, 403);
+  await install();
+  assert.equal((await video(url, { Authorization: "" })).status, 401);
+  assert.equal((await api("/api/chat/videos")).status, 405);
+  const response = await video(url, { Cookie: "secret" });
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("content-type"), "video/mp4");
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  assert.equal(Buffer.from(await response.arrayBuffer()).toString("ascii", 4, 8), "ftyp");
+  assert.equal(captures.length, 1);
+  assert.equal(captures[0]?.headers.cookie, undefined);
+  assert.equal(captures[0]?.headers.authorization, undefined);
+  for (const invalid of [url + "?token=secret", url + "#fragment", url.replace("recording.mp4", "other.mp4"), origin + "/health", url.replace("/captures/", "/private/../captures/")]) {
+    assert.equal((await video(invalid)).status, 400);
+  }
+  assert.equal((await video("http://127.0.0.1:1" + new URL(url).pathname)).status, 403);
+  assert.equal(captures.length, 1);
+  for (const [mode, status] of [["redirect", 502], ["html", 502], ["jpeg", 502], ["missing", 404], ["forbidden", 403], ["large-video", 413]] as const) {
+    setMode(mode);
+    assert.equal((await video()).status, status, mode);
+  }
+  assert.deepEqual(otherRequests, []);
+  setMode("slow");
+  await assert.rejects(readChatVideo({ url }, new Set([origin]), { timeoutMs: 25 }), (error: unknown) => error instanceof ChatImageError && error.status === 504);
+  await api("/api/connectors/mcp%3Atysl", { method: "DELETE" });
+  assert.equal((await video()).status, 403);
 });

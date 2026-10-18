@@ -3,7 +3,7 @@ import { HARNESS_VERSION, SERVICE_NAME, type JsonObject, type McpServerConfig, t
 import { contentImages, type ImageReceiver } from "../tool-images.js";
 
 export interface McpTool extends ToolSpec {
-  annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean };
+  annotations?: { title?: string; readOnlyHint?: boolean; destructiveHint?: boolean };
 }
 
 interface RpcResponse {

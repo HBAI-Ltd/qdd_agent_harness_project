@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
-import { downloadAttachment, downloadChatImage } from "@/api/workspace";
-import { isCameraCaptureUrl, type MediaKind } from "@/utils/media";
+import { downloadAttachment, downloadChatImage, downloadChatVideo } from "@/api/workspace";
+import { isCameraCaptureUrl, isCameraRecordingUrl, type MediaKind } from "@/utils/media";
 
 const props = defineProps<{
   src?: string | undefined;
@@ -18,6 +18,7 @@ const error = ref("");
 const video = ref<HTMLVideoElement>();
 const isImage = computed(() => props.kind === "image");
 const captureImage = computed(() => isImage.value && !props.attachmentId && isCameraCaptureUrl(props.src ?? ""));
+const captureVideo = computed(() => props.kind === "video" && !props.attachmentId && isCameraRecordingUrl(props.src ?? ""));
 let version = 0;
 let controller: AbortController | undefined;
 let objectUrl = "";
@@ -69,17 +70,17 @@ async function start() {
   loading.value = true;
   timeout = setTimeout(() => {
     if (current === version) fail("媒体加载超时，请检查网络或链接有效期后重试。");
-  }, 20_000);
+  }, captureVideo.value ? 120_000 : 20_000);
   try {
-    if (props.attachmentId || captureImage.value) {
-      if (captureImage.value && (!props.gatewayUrl || !props.token?.trim())) {
-        fail("请连接网关后查看监控截图。");
+    if (props.attachmentId || captureImage.value || captureVideo.value) {
+      if ((captureImage.value || captureVideo.value) && (!props.gatewayUrl || !props.token?.trim())) {
+        fail(captureVideo.value ? "请连接网关后查看监控录像。" : "请连接网关后查看监控截图。");
         return;
       }
       controller = new AbortController();
       const blob = props.attachmentId
         ? await downloadAttachment(props.gatewayUrl ?? "", props.token ?? "", props.attachmentId, controller.signal)
-        : await downloadChatImage(props.gatewayUrl!, props.token!, props.src!, controller.signal);
+        : await (captureVideo.value ? downloadChatVideo : downloadChatImage)(props.gatewayUrl!, props.token!, props.src!, controller.signal);
       if (current !== version) return;
       objectUrl = URL.createObjectURL(blob);
       source.value = objectUrl;

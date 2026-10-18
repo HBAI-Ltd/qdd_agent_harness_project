@@ -42,6 +42,15 @@ test("camera instructions use the installed FLV player and fixed-version whiteli
     assert.ok(prompt.includes(requirement), requirement);
 });
 
+test("HLS guidance prefers transmuxing over Chromium native capability hints", () => {
+  const prompt = systemPrompt(input);
+  for (const requirement of [
+    "仅 hls.js 不可用或 MSE 不支持时", "MEDIA_ATTACHED", "MANIFEST_PARSED",
+    "DEMUXER_ERROR_COULD_NOT_PARSE", "networkError", "NotAllowedError",
+    "重新取流按钮", "不可允许 flv 却仍调用 HLS 播放器", "本地服务转为 H.264",
+  ]) assert.ok(prompt.includes(requirement), requirement);
+});
+
 test("camera instructions expose configured media policy without granting script or iframe permissions", () => {
   for (const origins of [[], ["https://media.example.test:8443"], ["*"]]) {
     const prompt = systemPrompt({ ...input, mediaOrigins: origins });

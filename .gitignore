@@ -10,3 +10,4 @@ coverage/
 Thumbs.db
 workspace/
 harness.config.json
+mcp/

@@ -683,10 +683,13 @@ describe("gateway", () => {
     assert.match(outputs[4]!, /¥9,548\.90：在本次工具结果中找不到出处/);
     assert.deepEqual(result.page?.tools, ["store__aggregate"]); // 未使用的移除、使用的补上
 
-    // 失败（超出步数）也保留对话，可续聊
-    const looping: ChatFn = async () => call("store__get_store_info", { n: Math.random() });
-    const limited: LoadedConfig = { ...base, config: { ...base.config, llm: { ...base.config.llm, maxSteps: 3 } } };
-    const hub = new (gateway.hub.constructor as new (...a: unknown[]) => typeof gateway.hub)(limited, sources, () => looping);
+    // 模型请求失败也保留对话，可续聊
+    let requests = 0;
+    const failing: ChatFn = async () => {
+      if (++requests > 3) throw new Error("模型请求失败");
+      return call("store__get_store_info", {});
+    };
+    const hub = new SessionHub(base, sources, () => failing);
     const meta = await hub.create("随便看看");
     const end = await hub.wait(meta.id);
     assert.equal(end.status, "error");

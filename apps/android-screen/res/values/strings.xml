@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
   <string name="app_name">设备投屏</string>
+  <string name="qdd_ime_name">设备中文输入</string>
 </resources>

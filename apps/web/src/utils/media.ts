@@ -35,3 +35,14 @@ export function isCameraCaptureUrl(value: string): boolean {
     return false;
   }
 }
+
+/** Generated camera recordings use the authenticated gateway, like capture frames. */
+export function isCameraRecordingUrl(value: string): boolean {
+  if (!safeMediaUrl(value)) return false;
+  try {
+    const url = new URL(value);
+    return !url.search && !url.hash && /^\/captures\/[a-f0-9]{32}\/recording\.mp4$/.test(url.pathname);
+  } catch {
+    return false;
+  }
+}

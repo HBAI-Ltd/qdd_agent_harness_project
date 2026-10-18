@@ -278,6 +278,30 @@ static void pairing_management_tests(void) {
   assert(strcmp(reply, "QDDHID/1 1 ERR BAD_COMMAND\n") == 0);
 }
 
+static void just_works_security_tests(void) {
+  qdd_hid_state_t state = {0};
+  qdd_hid_set_link(&state, true, true, false, true);
+  qdd_hid_set_ready(&state, true, true);
+  assert(!state.authenticated); // Just Works has no MITM flag; never synthesize it.
+  assert(execute(&state, "QDDHID/1 1 PING", 100) == NULL);
+  assert(execute(&state, "QDDHID/1 2 ARM", 100) == NULL && state.armed);
+  assert(qdd_hid_text_permission(&state, 100) == NULL);
+  const unsigned before = reports;
+  assert(execute(&state, "QDDHID/1 3 KEY 0 4", 100) == NULL);
+  assert(qdd_hid_release(&state, report, NULL) && reports == before + 4);
+  qdd_hid_set_link(&state, true, false, false, true);
+  assert(!state.armed && !state.ready);
+  assert(strcmp(execute(&state, "QDDHID/1 4 ARM", 100), "NOT_AUTHENTICATED") == 0);
+  qdd_hid_set_link(&state, true, true, false, false);
+  qdd_hid_set_ready(&state, true, true);
+  assert(strcmp(execute(&state, "QDDHID/1 5 ARM", 100), "NOT_AUTHENTICATED") == 0);
+  const unsigned unbonded_reports = reports;
+  assert(qdd_hid_release(&state, report, NULL) && reports == unbonded_reports);
+  qdd_hid_set_link(&state, true, true, true, true); // Existing MITM bond still works.
+  qdd_hid_set_ready(&state, true, true);
+  assert(execute(&state, "QDDHID/1 6 ARM", 100) == NULL && state.armed);
+}
+
 int main(void) {
   parser_tests();
   stream_tests();
@@ -286,6 +310,7 @@ int main(void) {
   automatic_control_tests();
   pnp_tests();
   pairing_management_tests();
+  just_works_security_tests();
   puts("QDD HID protocol and safety tests: PASS");
   return 0;
 }

@@ -33,7 +33,7 @@ typedef struct {
 typedef struct {
   bool connected;
   bool encrypted;
-  bool authenticated;
+  bool authenticated; // Diagnostic MITM flag, not a Just Works permission gate.
   bool bonded;
   bool armed;
   bool locked;
@@ -73,6 +73,8 @@ void qdd_hid_tick(qdd_hid_state_t *state, uint64_t now_ms, bool usb_connected);
 bool qdd_hid_release(qdd_hid_state_t *state, qdd_report_fn report, void *context);
 const char *qdd_hid_execute(qdd_hid_state_t *state, const qdd_command_t *command,
                             uint64_t now_ms, qdd_report_fn report, void *context);
+// Unicode commits never implicitly ARM or bypass the shared HID lease.
+const char *qdd_hid_text_permission(const qdd_hid_state_t *state, uint64_t now_ms);
 void qdd_format_reply(char *buffer, size_t size, uint32_t id, const char *error,
                       const qdd_hid_state_t *state, const char *device_name);
 void qdd_format_pairing_reply(char *buffer, size_t size, uint32_t id, const char *error,

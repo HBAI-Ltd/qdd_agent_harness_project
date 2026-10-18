@@ -53,14 +53,66 @@ function pixel(data: Buffer, width: number, x: number, y: number): Buffer {
   return data.subarray(offset, offset + 4);
 }
 
+function captionGlyph(image: PNG, sourceHeight: number, column: number, row = 0): number[] {
+  const color = Buffer.from(row === 0 ? [255, 255, 255, 255] : [255, 0, 255, 255]);
+  const x = 8 + column * 12, y = sourceHeight + 8 + row * 22;
+  return Array.from({ length: 7 }, (_, dy) => {
+    let bits = 0;
+    for (let dx = 0; dx < 5; dx += 1) {
+      const sample = pixel(image.data, image.width, x + dx * 2, y + dy * 2);
+      for (let sy = 0; sy < 2; sy += 1) for (let sx = 0; sx < 2; sx += 1) {
+        assert.deepEqual(pixel(image.data, image.width, x + dx * 2 + sx, y + dy * 2 + sy), sample);
+      }
+      bits = bits * 2 + Number(sample.equals(color));
+    }
+    return bits;
+  });
+}
+
+test("both target preview PNGs visibly label the ORIGINAL phone X/Y rather than zoom coordinates", () => {
+  const source = image(300, 400), result = renderTargetPreview(source.png, "image/png", 300, 400, 180, 220);
+  const label = "PHONE PX: X=180 Y=220";
+  const coordinateGlyphs = [[1, [4, 12, 4, 4, 4, 4, 14]], [8, [14, 17, 17, 14, 17, 17, 14]],
+    [0, [14, 17, 19, 21, 25, 17, 14]], [2, [14, 17, 1, 2, 4, 8, 31]]] as const;
+  for (const [png, sourceHeight] of [[result.png, 400], [result.zoomPng, 320]] as const) {
+    const rendered = PNG.sync.read(png);
+    assert.equal(rendered.height, sourceHeight + 52, "A separate legend must not cover the phone image.");
+    for (const [digit, rows] of coordinateGlyphs) {
+      for (let index = label.indexOf(String(digit)); index >= 0; index = label.indexOf(String(digit), index + 1)) {
+        assert.deepEqual(captionGlyph(rendered, sourceHeight, index), rows);
+      }
+    }
+    assert.deepEqual(captionGlyph(rendered, sourceHeight, label.indexOf("X=")), [17, 17, 10, 4, 10, 17, 17]);
+    assert.deepEqual(captionGlyph(rendered, sourceHeight, label.indexOf("Y=")), [17, 17, 10, 4, 4, 4, 4]);
+    assert.deepEqual(captionGlyph(rendered, sourceHeight, 0, 1), [15, 16, 16, 14, 1, 1, 30]); // SIMULATED TARGET
+  }
+});
+
+for (const [width, height, x, y] of [[8192, 1, 8191, 0], [1, 8192, 0, 8191]] as const) {
+  test(`coordinate legends remain complete at the supported display edge ${x},${y}`, () => {
+    const source = image(width, height), result = renderTargetPreview(source.png, "image/png", width, height, x, y);
+    assert.equal(result.annotation.coordinateSpace, "originalPhonePixels");
+    assert.equal(result.annotation.label, `PHONE PX: X=${x} Y=${y}`);
+    for (const [bytes, canvas] of [[result.png, result.annotation.original], [result.zoomPng, result.annotation.zoom]] as const) {
+      const rendered = PNG.sync.read(bytes), last = result.annotation.label.length - 1;
+      assert.deepEqual(captionGlyph(rendered, canvas.sourceRect.height, last),
+        y === 0 ? [14, 17, 19, 21, 25, 17, 14] : [4, 12, 4, 4, 4, 4, 14]);
+      assert.ok(8 + last * 12 + 10 <= rendered.width - 8);
+      assert.equal(rendered.height, canvas.sourceRect.height + 52);
+    }
+    const full = PNG.sync.read(result.png);
+    assert.deepEqual(pixel(full.data, full.width, x, y), pixel(source.data, width, x, y));
+  });
+}
+
 test("target preview preserves the original PNG and center while marking a simulated target", () => {
   const source = image(300, 400), original = Buffer.from(source.png);
   const result = renderTargetPreview(source.png, "image/png", 300, 400, 180, 220);
   const full = PNG.sync.read(result.png), zoom = PNG.sync.read(result.zoomPng);
   assert.equal(result.simulatedTarget, true);
-  assert.deepEqual({ width: full.width, height: full.height }, { width: 300, height: 400 });
+  assert.deepEqual({ width: full.width, height: full.height }, { width: 300, height: 452 });
   assert.deepEqual(result.crop, { x: 100, y: 140, width: 160, height: 160, scale: 2 });
-  assert.deepEqual({ width: zoom.width, height: zoom.height }, { width: 320, height: 320 });
+  assert.deepEqual({ width: zoom.width, height: zoom.height }, { width: 320, height: 372 });
   assert.deepEqual(source.png, original);
   for (let dy = -2; dy <= 2; dy += 1) {
     for (let dx = -2; dx <= 2; dx += 1) {
@@ -76,8 +128,8 @@ test("target preview zoom is exactly the same marked crop at 2x nearest-neighbor
   const source = image(260, 320);
   const result = renderTargetPreview(source.png, "image/png", 260, 320, 137, 157);
   const full = PNG.sync.read(result.png), zoom = PNG.sync.read(result.zoomPng);
-  for (let y = 0; y < zoom.height; y += 1) {
-    for (let x = 0; x < zoom.width; x += 1) {
+  for (let y = 0; y < result.annotation.zoom.sourceRect.height; y += 1) {
+    for (let x = 0; x < result.annotation.zoom.sourceRect.width; x += 1) {
       assert.deepEqual(pixel(zoom.data, zoom.width, x, y),
         pixel(full.data, full.width, result.crop.x + Math.floor(x / 2), result.crop.y + Math.floor(y / 2)));
     }
@@ -91,6 +143,14 @@ for (const [x, y] of [[0, 0], [199, 0], [0, 299], [199, 299]] as const) {
     const source = image(200, 300);
     const result = renderTargetPreview(source.png, "image/png", 200, 300, x, y);
     const full = PNG.sync.read(result.png), zoom = PNG.sync.read(result.zoomPng);
+    assert.equal(result.annotation.label, `PHONE PX: X=${x} Y=${y}`);
+    for (const canvas of [result.annotation.original, result.annotation.zoom]) {
+      assert.equal(canvas.legend.y, canvas.sourceRect.height);
+      assert.equal(canvas.legend.height, 52);
+      assert.ok(canvas.legend.x + canvas.legend.width <= canvas.width);
+      assert.ok(canvas.legend.y + canvas.legend.height <= canvas.height);
+      assert.ok(canvas.width >= result.annotation.label.length * 12 - 2 + 16);
+    }
     assert.deepEqual(result.crop, { x: x === 0 ? 0 : 40, y: y === 0 ? 0 : 140, width: 160, height: 160, scale: 2 });
     assert.deepEqual(pixel(full.data, full.width, x, y), pixel(source.data, 200, x, y));
     assert.deepEqual(pixel(zoom.data, zoom.width, (x - result.crop.x) * 2, (y - result.crop.y) * 2), pixel(source.data, 200, x, y));
@@ -102,9 +162,14 @@ for (const [width, height, x, y] of [[1, 1, 0, 0], [7, 240, 6, 230], [240, 7, 23
     const source = image(width, height), original = Buffer.from(source.png);
     const result = renderTargetPreview(source.png, "image/png", width, height, x, y);
     const full = PNG.sync.read(result.png), zoom = PNG.sync.read(result.zoomPng);
-    assert.equal(zoom.width, Math.min(width, 160) * 2);
-    assert.equal(zoom.height, Math.min(height, 160) * 2);
-    assert.deepEqual(pixel(full.data, width, x, y), pixel(source.data, width, x, y));
+    assert.equal(result.annotation.original.sourceRect.width, width);
+    assert.equal(result.annotation.original.sourceRect.height, height);
+    assert.equal(result.annotation.zoom.sourceRect.width, Math.min(width, 160) * 2);
+    assert.equal(result.annotation.zoom.sourceRect.height, Math.min(height, 160) * 2);
+    assert.equal(zoom.height, Math.min(height, 160) * 2 + 52);
+    assert.deepEqual(pixel(full.data, full.width, x, y), pixel(source.data, width, x, y));
+    assert.ok(zoom.width >= 206 && full.width >= 206, "Tiny images retain a readable complete legend.");
+    assert.deepEqual(captionGlyph(full, height, 0, 1), [15, 16, 16, 14, 1, 1, 30]);
     assert.deepEqual(source.png, original);
   });
 }
@@ -113,8 +178,8 @@ test("target preview accepts JPEG and returns two PNG images at declared origina
   const original = Buffer.from(JPEG_FIXTURE);
   const result = renderTargetPreview(JPEG_FIXTURE, "image/jpeg", 2, 3, 1, 2);
   const full = PNG.sync.read(result.png), zoom = PNG.sync.read(result.zoomPng);
-  assert.deepEqual({ width: full.width, height: full.height }, { width: 2, height: 3 });
-  assert.deepEqual({ width: zoom.width, height: zoom.height }, { width: 4, height: 6 });
+  assert.deepEqual({ width: full.width, height: full.height }, { width: 218, height: 55 });
+  assert.deepEqual({ width: zoom.width, height: zoom.height }, { width: 218, height: 58 });
   assert.deepEqual(result.crop, { x: 0, y: 0, width: 2, height: 3, scale: 2 });
   assert.deepEqual(JPEG_FIXTURE, original);
   assert.deepEqual(pixel(zoom.data, zoom.width, 2, 4), pixel(full.data, full.width, 1, 2));

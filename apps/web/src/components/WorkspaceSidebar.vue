@@ -8,6 +8,7 @@ import { ElTag } from "element-plus/es/components/tag/index";
 import type { InputInstance } from "element-plus";
 import type { SessionMeta, SessionStatus } from "@qdd/shared";
 import AgentIcon from "@/components/AgentIcon.vue";
+import logoUrl from "@/assets/logo.svg";
 import { useWorkspaceContext, type WorkspaceView } from "@/composables/workspaceContext";
 
 const props = defineProps<{
@@ -100,11 +101,8 @@ defineExpose({ focusSearch });
     :inert="isMobile && !mobileOpen ? true : undefined">
     <div class="brand-row">
       <a class="brand" href="/chat" aria-label="钱多多对话首页" title="钱多多对话首页" @click.prevent="navigation.openView('chat')">
-        <span class="brand-mark" aria-hidden="true">钱</span>
-        <span class="sidebar-label brand-name">
-          钱多多
-          <span class="brand-caption">门店人工智能助手</span>
-        </span>
+        <span class="brand-mark" aria-hidden="true"><img :src="logoUrl" alt="" /></span>
+        <span class="sidebar-label brand-caption">门店人工智能助手</span>
       </a>
       <ElButton
         v-if="!isMobile"
@@ -262,10 +260,11 @@ defineExpose({ focusSearch });
   transition: width .2s ease, flex-basis .2s ease, transform .2s ease;
 }
 .brand-row { flex-shrink: 0; gap: 8px; padding: 0 6px; margin-bottom: 18px; }
-.brand { gap: 12px; letter-spacing: 0; }
-.brand-mark { width: 40px; height: 40px; border-radius: 10px; font-size: 23px; font-weight: 650; }
-.brand-name { font-size: 21px; font-weight: 650; }
-.brand-caption { margin-top: 5px; font-size: 12px; font-weight: 400; letter-spacing: 0; }
+.brand { flex-direction: column; align-items: flex-start; gap: 6px; letter-spacing: 0; }
+/* Crop the source image's outer whitespace without changing the original asset. */
+.brand-mark { position: relative; overflow: hidden; width: 158px; height: 62px; border-radius: 6px; }
+.brand-mark img { position: absolute; width: 305px; max-width: none; height: auto; left: -75px; top: -43px; }
+.brand-caption { font-size: 12px; font-weight: 400; letter-spacing: 0; }
 .sidebar-control { width: 30px; height: 30px; padding: 0; flex-shrink: 0; margin: 0; color: var(--qdd-muted); background: transparent; }
 .sidebar-control:hover { color: var(--qdd-text); background: var(--qdd-hover); }
 .new-conversation {
@@ -345,6 +344,8 @@ defineExpose({ focusSearch });
 .is-collapsed .sidebar-label { display: none; }
 .is-collapsed .brand-row { flex-direction: column; gap: 10px; padding: 0; margin-bottom: 16px; }
 .is-collapsed .brand { gap: 0; }
+.is-collapsed .brand-mark { width: 40px; height: 40px; }
+.is-collapsed .brand-mark img { width: 204px; left: -50px; top: -28px; }
 .is-collapsed .new-conversation { width: 100%; justify-content: center; margin: 0 0 10px; padding: 0; }
 .is-collapsed .workspace-menu { width: 100%; }
 .is-collapsed .workspace-menu :deep(.el-menu-item) { justify-content: center; padding: 0 !important; }

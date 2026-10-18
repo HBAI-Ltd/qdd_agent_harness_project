@@ -3,7 +3,7 @@
 #include "esp_err.h"
 
 #define QDD_WIFI_SCAN_LIMIT 64
-#define QDD_WIFI_DIAGNOSTICS_MAX 450u
+#define QDD_WIFI_DIAGNOSTICS_MAX 486u
 typedef struct { char ssid[33]; int8_t rssi; uint8_t bssid[6]; bool open; } qdd_wifi_ap_t;
 typedef struct {
     bool configured, connected, connecting, scanning, failed;
@@ -26,6 +26,10 @@ qdd_wifi_view_t qdd_wifi_view(void);
 // with an empty output on insufficient capacity/busy. Arrays: rssi/ch/ps=[err,value],
 // ev=[connected,disconnected,beaconTimeout,lastReason,disconnectAge,beaconAge],
 // heap=[free,minFree,largest], oom=[count,lastSize,lastCaps],
+// oomFirst=[allocatorFunction,firstSize,firstCaps], persistent since boot.
+// Function: 0=none,1=malloc,2=calloc,3=realloc,4/5/6=malloc/calloc/realloc_prefer,
+// 7/8=aligned_alloc/aligned_calloc,9/10=malloc/realloc_default,255=other.
+// This identifies the allocator entry only, not its caller or an address.
 // tx=[hookErr,ok,fail,lastAge],
 // tcp=[epoch,rxBytes,txBytes,fullWrites,failedWrites,rxAge,txAge,lastErrno,lastClose].
 // TCP counts are cumulative; fullWrites means accepted by the socket, not delivered.

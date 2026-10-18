@@ -1,5 +1,5 @@
 import {localApi as api} from './session.js';
-import {createCaptchaFlow} from './captcha-flow.js';
+import {createCaptchaFlow,getCaptchaAuth} from './captcha-flow.js';
 import {transactionTypes,refundTypes} from './transaction-types.js';
 import {formatFen as money} from './money.js';
 const $=id=>document.getElementById(id);
@@ -48,7 +48,7 @@ function loadCaptchaScript(){
  if(typeof window.initAliyunCaptcha==='function')return Promise.resolve();
  return captchaScriptPromise||(captchaScriptPromise=new Promise((resolve,reject)=>{const script=document.createElement('script');const timeout=setTimeout(()=>{script.remove();captchaScriptPromise=null;reject(new Error('人机验证服务加载超时，请检查网络'));},18000);script.src='https://o.alicdn.com/captcha-frontend/aliyunCaptcha/AliyunCaptcha.js';script.async=true;script.onload=()=>{clearTimeout(timeout);resolve();};script.onerror=()=>{clearTimeout(timeout);script.remove();captchaScriptPromise=null;reject(new Error('无法加载人机验证服务，请检查网络'));};document.head.append(script);}));
 }
-async function initializeCaptcha(callbacks){if(!status)await refresh();return loadCaptchaScript().then(()=>new Promise((resolve,reject)=>{try{window.initAliyunCaptcha({SceneId:status.auth.captcha.sceneId,mode:'popup',element:'#captcha-container',...(status.auth.loginSource==='apk'?{captchaVerifyCallback:(value,done)=>{const param=typeof value==='string'?value:typeof value?.captchaVerifyParam==='string'?value.captchaVerifyParam:typeof value?.CaptchaVerifyParam==='string'?value.CaptchaVerifyParam:JSON.stringify(value);return callbacks.success(param,done);},onBizResultCallback:()=>{}}:{success:callbacks.success}),fail:callbacks.fail,onClose:callbacks.close,getInstance:instance=>{setTimeout(()=>resolve(instance),2100);},slideStyle:{width:360,height:40},language:'cn',onError:callbacks.error});}catch(e){reject(e);}}));}
+async function initializeCaptcha(callbacks){if(!status?.auth?.captcha)await refresh();const auth=getCaptchaAuth(status);return loadCaptchaScript().then(()=>new Promise((resolve,reject)=>{try{window.initAliyunCaptcha({SceneId:auth.captcha.sceneId,mode:'popup',element:'#captcha-container',...(auth.loginSource==='apk'?{captchaVerifyCallback:(value,done)=>{const param=typeof value==='string'?value:typeof value?.captchaVerifyParam==='string'?value.captchaVerifyParam:typeof value?.CaptchaVerifyParam==='string'?value.CaptchaVerifyParam:JSON.stringify(value);return callbacks.success(param,done);},onBizResultCallback:()=>{}}:{success:callbacks.success}),fail:callbacks.fail,onClose:callbacks.close,getInstance:instance=>{setTimeout(()=>resolve(instance),2100);},slideStyle:{width:360,height:40},language:'cn',onError:callbacks.error});}catch(e){reject(e);}}));}
 // Official integration requires early loading and >2s between initialization and verification.
 loadCaptchaScript().catch(()=>{});
 let verificationPhone='';

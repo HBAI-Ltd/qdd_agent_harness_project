@@ -195,7 +195,7 @@ stdio 请直接调用 Node，避免 npm 启动横幅破坏协议。服务根据�
 | `android_hid_arm`、`android_hid_pause`、`android_release` | 显式启用、取消排队输入、释放按住的报告 |
 | `android_mouse_move`、`android_mouse_click`、`android_scroll` | 相对计数、当前位置点击、滚轮 |
 | `android_preview_tap` | 点击前只读显示目标标记及局部放大图，方便检查控件位置 |
-| `android_pointer_calibration` | 由 AI 读取光标位置，分测量、确认两步标定 |
+| `android_pointer_calibration` | `auto` 读取专用校准页的真实鼠标坐标；`probe/finish` 测量可见光标 |
 | `android_calibrate_pointer`、`android_pointer_home`、`android_tap`、`android_swipe` | 标定后估算坐标 |
 | `android_type`、`android_key`、`android_key_report` | 美式布局 ASCII、组合键、原始键盘报告 |
 | `android_consumer_report`、`android_home`、`android_back` | 原始消费控制用途码及主页/返回 |
@@ -270,7 +270,20 @@ hover 与 tap 使用相同的像素或 `normalized1000` 坐标，并需要标定
 
 ### 让 AI 测量鼠标位置并标定
 
-AI 按坐标点击、滑动时，优先使用 `android_pointer_calibration`。AI 从原画读取
+平板不把系统光标画进投屏时，在手机投屏 App 内主动点 **打开指针校准页**，保持该页前台，
+再取新截图并调用：
+
+```json
+{ "phase": "auto", "frameId": "<校准页截图frameId>" }
+```
+
+这次调用通过 ESP BLE 发送两次不按键的小幅鼠标移动，读取校准页收到的真实 Android 鼠标事件，
+自动计算两轴 counts/pixel，并返回实际坐标和新图。专用页面自己绘制实测位置，因此不依赖系统
+光标被截图捕获。测量前静置 550 ms；失焦、旋转、陈旧事件、边缘截断或其他输入介入时拒绝
+更新标定。完成后通过系统返回退出校准页。电脑接口不会打开 App、跳页面或代替系统共享授权。
+不要在业务页发送校准点击，也不能将“模拟目标”当作真实落点。加速度仍可能使坐标存在估计误差。
+
+有可见系统光标时，也可以使用 `android_pointer_calibration` 的 `probe/finish`。AI 从原画读取
 圆形鼠标的中心，服务计算比例，用户不用猜横向、纵向倍率。这是测量、确认两阶段
 流程，不是自动计算机视觉识别。
 

@@ -14,7 +14,6 @@ export const DEFAULT_CONFIG: HarnessConfig = {
     baseUrl: "https://api.deepseek.com",
     model: "deepseek-chat",
     apiKeyEnv: "DEEPSEEK_API_KEY",
-    maxSteps: 40,
     maxTokens: 393216,
     clarify: "required",
     thinking: "enabled",
@@ -145,9 +144,7 @@ export async function loadConfig(root = process.cwd()): Promise<LoadedConfig> {
   if (typeof config.workspace !== "string" || !config.workspace.trim()) throw new Error("workspace 必须是非空路径。");
   if (!isHttpUrl(config.llm.baseUrl)) throw new Error("llm.baseUrl 必须是有效的 http(s) URL。");
   if (typeof config.llm.apiKeyEnv !== "string" || !config.llm.apiKeyEnv.trim()) throw new Error("llm.apiKeyEnv 必须是非空环境变量名。");
-  for (const key of ["maxTokens", "maxSteps"] as const) {
-    if (!Number.isSafeInteger(config.llm[key]) || config.llm[key] <= 0) throw new Error(`llm.${key} 必须是正整数。`);
-  }
+  if (!Number.isSafeInteger(config.llm.maxTokens) || config.llm.maxTokens <= 0) throw new Error("llm.maxTokens 必须是正整数。");
   if (!["enabled", "disabled"].includes(config.llm.thinking)) throw new Error("llm.thinking 只能是 enabled 或 disabled。");
   if (typeof config.browser.enabled !== "boolean") throw new Error("browser.enabled 必须是布尔值。");
   if (typeof config.gateway.host !== "string" || !config.gateway.host.trim()) throw new Error("gateway.host 必须是非空字符串。");

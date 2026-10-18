@@ -28,6 +28,12 @@ class TransportContractTest(unittest.TestCase):
     def setUp(self):
         self.main = (ROOT / "main/qdd_main.c").read_text(encoding="utf8")
 
+    def test_application_selects_bounded_single_dma_buffer_before_radio_start(self):
+        startup = c_block(self.main, "void app_main(void)")
+        self.assertIn("bsp_lvgl_init_with_buffer_rows(20)", startup)
+        self.assertNotIn("bsp_lvgl_init()", startup)
+        self.assertLess(startup.index("bsp_lvgl_init_with_buffer_rows(20)"), startup.index("qdd_ble_start()"))
+
     def test_expired_tcp_owner_is_closed_after_pause(self):
         sync = self.main.split("static void sync_safety(void)", 1)[1].split("static bool write_reply", 1)[0]
         self.assertRegex(sync, re.compile(r"previous_owner = s_control.owner;.*?qdd_control_tick.*?qdd_hid_pause\(&s_state, false\);\s*s_state.heartbeat_seen = false;\s*if \(previous_owner == QDD_SOURCE_TCP\) qdd_wifi_close_client\(\);", re.S))
@@ -105,6 +111,38 @@ class TransportContractTest(unittest.TestCase):
         self.assertNotIn("qdd_hid_unlock", setup_exit)
         self.assertNotIn("qdd_hid_execute", setup_exit)
 
+    def test_neutral_usb_download_diagnostic_shares_bounded_snapshot(self):
+        net = c_block(self.main, "static void on_net_line(")
+        self.assertIn('source != QDD_SOURCE_USB', net)
+        gate = net.split("command.operation != QDD_NET_STATUS", 1)[1].split("{", 1)[0]
+        self.assertIn("QDD_NET_DOWNLOAD_DIAGNOSTICS", gate)
+        diagnostic = c_block(net, "if (!error && (command.operation == QDD_NET_DIAGNOSTICS")
+        self.assertIn("qdd_onboarding_download_diagnostics", diagnostic)
+        self.assertNotIn("qdd_hid_execute", diagnostic)
+        self.assertNotIn("qdd_wifi_save", diagnostic)
+        self.assertIn("static char diagnostic[512]", diagnostic)
+        onboarding = (ROOT / "main/qdd_onboarding.c").read_text(encoding="utf8")
+        handler = c_block(onboarding, "static esp_err_t download_status_handler(")
+        self.assertIn("qdd_onboarding_download_diagnostics", handler)
+
+    def test_neutral_usb_oom_trace_is_bounded_and_linker_wrapped(self):
+        net = c_block(self.main, "static void on_net_line(")
+        self.assertIn("source != QDD_SOURCE_USB", net)
+        gate = net.split("command.operation != QDD_NET_STATUS", 1)[1].split("{", 1)[0]
+        self.assertIn("QDD_NET_OOM_TRACE", gate)
+        diagnostic = c_block(net, "if (!error && (command.operation == QDD_NET_DIAGNOSTICS")
+        self.assertIn("qdd_alloc_trace_diagnostics", diagnostic)
+        self.assertNotIn("qdd_hid_execute", diagnostic)
+        self.assertNotIn("qdd_wifi_save", diagnostic)
+        trace = (ROOT / "main/qdd_alloc_trace.c").read_text(encoding="utf8")
+        record = c_block(trace, "record_failure(")
+        for forbidden in ("malloc(", "printf(", "vTask", "memcpy(", "strlen("):
+            self.assertNotIn(forbidden, record)
+        cmake = (ROOT / "main/CMakeLists.txt").read_text(encoding="utf8")
+        for name in ("malloc", "calloc", "heap_caps_malloc"):
+            self.assertIn("--wrap=" + name, cmake)
+        self.assertIn("#define QDD_ALLOC_TRACE_MAX 128u", (ROOT / "main/qdd_alloc_trace.h").read_text())
+
     def test_wifi_management_does_not_echo_credentials(self):
         net = self.main.split("static void on_net_line", 1)[1].split("static void on_line", 1)[0]
         self.assertIn("source != QDD_SOURCE_USB", net)
@@ -121,7 +159,7 @@ class TransportContractTest(unittest.TestCase):
         self.assertNotIn("EVENT_PAUSE", self.main)
         self.assertNotIn("EVENT_ARM", self.main)
         self.assertIn("atomic_fetch_xor(&s_home_selection, 1u)", callback)
-        self.assertRegex(callback, re.compile(r"qdd_ui_home_action\(qdd_ui_guide_step\(\),\s*atomic_load\(&s_home_selection\), atomic_load\(&s_physical_stop\)\)", re.S))
+        self.assertRegex(callback, re.compile(r"qdd_ui_home_action\(guide_step,\s*atomic_load\(&s_home_selection\), atomic_load\(&s_physical_stop\)\)", re.S))
         self.assertIn("action == QDD_UI_HOME_UNLOCK", callback)
         sync = self.main.split("static void sync_safety(void)", 1)[1].split("static bool write_reply", 1)[0]
         unlock = sync.split("if ((events & EVENT_UNLOCK)", 1)[1]
@@ -144,6 +182,7 @@ static atomic_uint s_events, s_home_selection;
 static atomic_bool s_physical_stop, s_configuring, s_buttons_ready;
 static unsigned s_guide_step;
 static unsigned qdd_ui_guide_step(void) { return s_guide_step; }
+static void qdd_ui_guide_navigate(bool forward) { s_guide_step = qdd_ui_guide_target(s_guide_step, forward); }
 """ + definitions + "\n" + callback + r"""
 static void reset(void) {
   atomic_store(&s_events, 0); atomic_store(&s_home_selection, 0);
@@ -185,25 +224,37 @@ int main(void) {
   assert(atomic_load(&s_events) == (EVENT_CONFIG_DOWN | EVENT_CONFIG_LONG));
   reset(); on_key(BSP_BTN_OK, BSP_BTN_LONG, 0);
   assert(!atomic_load(&s_events) && !atomic_load(&s_physical_stop));
-  // Every setup-guide step excludes STOP/UNLOCK, even with an old selection.
-  for (unsigned step = 1; step <= 5; step++) {
+  // Direct page navigation never scans, pairs, changes evidence or stops input.
+  for (unsigned step = 1; step <= 6; step++) {
     for (unsigned locked = 0; locked <= 1; locked++) {
       reset(); s_guide_step = step; atomic_store(&s_physical_stop, locked);
       on_key(BSP_BTN_DOWN, BSP_BTN_PRESS, 0);
+      assert(s_guide_step == (locked ? step : step + 1));
       assert(!atomic_load(&s_events) && atomic_load(&s_physical_stop) == locked);
-      assert(atomic_load(&s_home_selection) == (qdd_ui_home_choices(step) > 1));
+      assert(!atomic_load(&s_configuring) && atomic_load(&s_home_selection) == locked);
+      reset(); s_guide_step = step;
+      on_key(BSP_BTN_UP, BSP_BTN_PRESS, 0);
+      assert(s_guide_step == (step == 1 ? 1 : step - 1) && !atomic_load(&s_events));
+      on_key(BSP_BTN_UP, BSP_BTN_CLICK, 0); // Release does not navigate twice.
+      assert(s_guide_step == (step == 1 ? 1 : step - 1));
       for (unsigned selection = 0; selection <= 1; selection++) {
         reset(); s_guide_step = step; atomic_store(&s_physical_stop, locked);
         atomic_store(&s_home_selection, selection);
         on_key(BSP_BTN_OK, BSP_BTN_CLICK, 0);
-        const unsigned expected = selection == 1 || step == 1 || step == 5 ? EVENT_MENU :
-            step == 4 ? EVENT_SKIP_BLUETOOTH : EVENT_SKIP_APP;
+        const unsigned expected = locked ? (selection ? EVENT_MENU : EVENT_UNLOCK) : step == 1 ? EVENT_WIFI_SETUP : step == 4 ? EVENT_GUIDE_PAIR : 0;
         assert(atomic_load(&s_events) == expected);
         assert(atomic_load(&s_physical_stop) == locked);
-        assert(atomic_load(&s_configuring) == (expected == EVENT_MENU));
+        assert(atomic_load(&s_configuring) == (expected == EVENT_WIFI_SETUP || expected == EVENT_MENU));
       }
+      reset(); s_guide_step = step;
+      on_key(BSP_BTN_OK, BSP_BTN_LONG, 0);
+      assert(atomic_load(&s_configuring) && atomic_load(&s_events) == EVENT_MENU);
     }
   }
+  reset(); s_guide_step = 6;
+  on_key(BSP_BTN_OK, BSP_BTN_CLICK, 0);
+  on_key(BSP_BTN_OK, BSP_BTN_CLICK, 0);
+  assert(s_guide_step == 7 && !atomic_load(&s_events) && !atomic_load(&s_physical_stop));
   return 0;
 }
 """
@@ -232,7 +283,7 @@ int main(void) {
         self.assertNotIn("EVENT_STOP", configuring)
         # These three model/atomic-read functions are bounded and do no rendering.
         self.assertEqual(set(re.findall(r"\b(qdd_ui_\w+)\(", callback)),
-                         {"qdd_ui_home_choices", "qdd_ui_guide_step", "qdd_ui_home_action"})
+                         {"qdd_ui_home_choices", "qdd_ui_guide_step", "qdd_ui_home_action", "qdd_ui_guide_navigate"})
         self.assertNotIn("lv_", callback)
         ui = (ROOT / "main/qdd_ui.c").read_text(encoding="utf8")
         self.assertNotIn("电源", ui)
@@ -249,12 +300,79 @@ int main(void) {
         exit_action = self.main.split("action == QDD_SETUP_EXIT", 1)[1].split("static void setup_key", 1)[0]
         self.assertLess(exit_action.index("atomic_store(&s_home_selection, 0)"), exit_action.index("atomic_store(&s_configuring, false)"))
 
-    def test_download_guide_keeps_browser_download_and_same_lan_instructions(self):
+    def test_guide_navigation_never_starts_scan_or_pairing(self):
+        callback = c_block(self.main, "static void on_key(")
+        confirm = c_block(callback, "action == QDD_UI_HOME_NEXT")
+        self.assertIn("qdd_ui_guide_navigate(true)", confirm)
+        self.assertNotIn("EVENT_WIFI_SETUP", confirm)
+        self.assertNotIn("qdd_wifi_", callback)
+        self.assertNotIn("qdd_ble_", callback)
+        sync = c_block(self.main, "static void sync_safety(void)")
+        self.assertIn("s_guide_pair_requested", sync)
+        self.assertIn("events & EVENT_GUIDE_PAIR", sync)
+        self.assertIn("if (events & EVENT_WIFI_SETUP) setup_action(qdd_setup_enter(&s_setup))", sync)
         ui = (ROOT / "main/qdd_ui.c").read_text(encoding="utf8")
-        qr = ui.split("if (view->show_qr) {", 1)[1].split("} else {", 1)[0]
-        self.assertIn('"扫码或浏览器打开地址下载"', qr)
-        self.assertIn('"手机/电脑/ESP同一局域网"', qr)
-        self.assertIn('"%s:3334"', qr)
+        navigate = c_block(ui, "void qdd_ui_guide_navigate(")
+        self.assertNotIn("lv_", navigate)
+        self.assertNotIn("s_onboarding_complete", navigate)
+        self.assertNotIn("skip", navigate)
+        self.assertNotIn("/usb-receiver", ui)
+
+    def test_navigation_publish_cannot_overwrite_newer_button_selection(self):
+        ui = (ROOT / "main/qdd_ui.c").read_text(encoding="utf8")
+        self.assertNotIn("s_visible_guide_step", ui)
+        refresh = c_block(ui, "void qdd_ui_refresh(")
+        self.assertNotIn("atomic_store(&s_requested_guide_step", refresh)
+        self.assertIn("LV_EVENT_REFR_READY", ui)
+        source = r"""
+#include <assert.h>
+#include <stdatomic.h>
+#include <stdbool.h>
+#include "qdd_ui_model.h"
+typedef struct { unsigned unused; } lv_event_t;
+typedef enum { MAIN, GUIDE, SETUP } screen_kind_t;
+static screen_kind_t s_kind;
+static bool s_finish_after_refresh;
+static atomic_uint s_requested_guide_step;
+""" + c_block(ui, "unsigned qdd_ui_guide_step(") + "\n" + c_block(ui, "void qdd_ui_guide_navigate(") + "\n" + c_block(ui, "static void main_refresh_ready(") + r"""
+int main(void) {
+    atomic_store(&s_requested_guide_step, 2);
+    const unsigned worker_snapshot = atomic_load(&s_requested_guide_step);
+    qdd_ui_guide_navigate(true);
+    s_kind = GUIDE; s_finish_after_refresh = false;
+    main_refresh_ready(0); // Rendering an older worker snapshot cannot roll input back.
+    assert(worker_snapshot == 2 && qdd_ui_guide_step() == 3);
+    qdd_ui_guide_navigate(true); assert(qdd_ui_guide_step() == 4);
+    atomic_store(&s_requested_guide_step, 6);
+    qdd_ui_guide_navigate(true); qdd_ui_guide_navigate(true);
+    assert(qdd_ui_guide_step() == 7);
+    s_kind = MAIN;
+    main_refresh_ready(0); assert(qdd_ui_guide_step() == 7); // MAIN not submitted yet.
+    s_finish_after_refresh = true;
+    qdd_ui_guide_navigate(true); assert(qdd_ui_guide_step() == 7);
+    main_refresh_ready(0); assert(qdd_ui_guide_step() == 0);
+    assert(atomic_load(&s_requested_guide_step) == 8);
+    // A newly requested guide must survive an old pending main render commit.
+    atomic_store(&s_requested_guide_step, 1); s_finish_after_refresh = true;
+    main_refresh_ready(0); assert(qdd_ui_guide_step() == 1);
+    return 0;
+}
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            source_path = Path(directory) / "navigation.c"
+            executable = Path(directory) / ("navigation.exe" if os.name == "nt" else "navigation")
+            source_path.write_text(source, encoding="utf8")
+            compiled = subprocess.run([os.environ.get("CC", "cc"), "-std=c11", "-Wall", "-Wextra", "-Werror",
+                "-I", str(ROOT / "main"), str(source_path), str(ROOT / "main/qdd_ui_model.c"), "-o", str(executable)], capture_output=True, text=True)
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            subprocess.run([str(executable)], check=True, capture_output=True)
+
+    def test_download_guide_separates_usb_installation_from_phone_apk(self):
+        ui = (ROOT / "main/qdd_ui.c").read_text(encoding="utf8")
+        self.assertNotIn("手机下载APK · 电脑下载EXE", ui)
+        self.assertIn("QDD_SETUP_USB_DOWNLOAD", ui)
+        self.assertIn("QDD_SETUP_DOWNLOAD", ui)
+        self.assertIn("qdd_ui_driver(qdd_driver_usb_view())", self.main)
 
     def test_product_titles_are_generic_and_pairing_identifiers_are_unchanged(self):
         ui = (ROOT / "main/qdd_ui.c").read_text(encoding="utf8")
@@ -263,7 +381,7 @@ int main(void) {
         self.assertIn('"设备控制器"', ui)
         self.assertNotIn('"QDD"', ui)
         self.assertNotIn("安卓", ui + model + landing)
-        self.assertIn("下载设备投屏", landing)
+        self.assertIn("设备投屏.apk", landing)
         self.assertIn("设备操作台", landing + model)
         self.assertIn("qdd_ble_name()", ui)
 

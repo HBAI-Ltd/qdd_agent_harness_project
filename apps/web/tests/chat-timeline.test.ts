@@ -15,6 +15,23 @@ const legacy = (text: string): SessionEvent => ({ type: "tool", text, at }) as u
 const activities = (entry: AssistantEntry) => entry.parts.filter((part) => part.kind === "activity");
 const messages = (entry: AssistantEntry) => entry.parts.filter((part) => part.kind === "message");
 
+test("backend tool titles survive progress updates and replay while legacy events retain their names", () => {
+  const timeline = buildChatTimeline([
+    tool("capture", "running", { name: "mcp__tysl__tysl_capture_status", title: "天翼视联：查询画面采集进度" }),
+    tool("capture", "success", { name: "mcp__tysl__tysl_capture_status", progress: "已完成采集" }),
+  ]);
+  const entry = timeline[0];
+  assert.equal(entry?.kind, "assistant");
+  if (entry?.kind !== "assistant") return;
+  const event = activities(entry)[0]?.event;
+  assert.equal(event?.type, "tool");
+  if (event?.type !== "tool") return;
+  assert.equal(toolTitle(event), "天翼视联：查询画面采集进度");
+  assert.equal(event.name, "mcp__tysl__tysl_capture_status");
+  assert.equal(toolStatus(event), "已完成");
+  assert.equal(toolTitle({ type: "tool", at, name: "legacy", text: "旧记录" }), "legacy");
+});
+
 function deepFreeze<T>(value: T): T {
   if (value && typeof value === "object") {
     Object.freeze(value);

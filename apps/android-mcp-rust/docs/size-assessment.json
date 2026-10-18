@@ -1,0 +1,161 @@
+{
+  "assessedAt": "2026-10-18T02:07:37.292Z",
+  "target": "Windows x64; ESP32-C3 stores the download, PC executes it",
+  "native": {
+    "builtAt": "2026-10-18T02:06:15.801Z",
+    "platform": "win32-x64",
+    "buildId": "rust-6cd85079fe3bd5e6",
+    "runtime": "rust",
+    "embeddedAssets": [
+      {
+        "path": "assets/operator.html",
+        "bytes": 5756,
+        "sha256": "381bc821e6e021a26250a99b6659b880537dfd6f8a5b0c5a1638fc8f8c590a28"
+      },
+      {
+        "path": "assets/operator.css",
+        "bytes": 9052,
+        "sha256": "66334ec1a96cdc4ce3e1ff89a452dba6f4f8da3d8c88022f3a3100ac4b629d5e"
+      },
+      {
+        "path": "assets/operator.js",
+        "bytes": 55184,
+        "sha256": "a801face6dd88e900dc0a4467da6ee4bb17e9723e6213e11416ca64323476c80"
+      },
+      {
+        "path": "assets/remote-channel.js",
+        "bytes": 5122,
+        "sha256": "6ab5b28417a9e5d35d9134f2f158bdb09622cb1a56c3da33298e77b894a135f5"
+      },
+      {
+        "path": "assets/screen-channel.js",
+        "bytes": 2754,
+        "sha256": "c618224504caaa2ce6cc53223bbe63aabb8d748bb056a01a52ac6a1a6f66eb10"
+      }
+    ],
+    "pe": {
+      "machine": "x86_64",
+      "imports": [
+        "KERNEL32.dll",
+        "advapi32.dll",
+        "api-ms-win-core-synch-l1-2-0.dll",
+        "bcryptprimitives.dll",
+        "cfgmgr32.dll",
+        "crypt32.dll",
+        "iphlpapi.dll",
+        "kernel32.dll",
+        "ntdll.dll",
+        "secur32.dll",
+        "setupapi.dll",
+        "ws2_32.dll"
+      ],
+      "separateRuntimeDlls": []
+    },
+    "executable": "设备操作台.exe",
+    "bytes": 1863168,
+    "sha256": "9e0f2828471dbf1a3ca376cb8d6898c6ce6238cabe8fe67afa48a48ce4d44c66",
+    "zipBytes": 903569,
+    "zipSha256": "d99a2559cade6de351f91262fd4e3246c67d2fb2aad6f0791d519e8462ae6fc7",
+    "originalTypeScriptBaseline": "2026-10-18T01:40:37.867Z",
+    "cargoLockSha256": "1f0fc77afc3688b533bb5d2bca5f6a99f4a270ad417261cd98207c4e46f5da99",
+    "flashBudgets": {
+      "currentAppHeadroomBytes": 1414176,
+      "currentAssetsPartitionBytes": 2097152,
+      "rawFitsCurrentAppHeadroom": false,
+      "rawFitsAssetsPartition": true,
+      "zipFitsAssetsPartition": true,
+      "note": "Measured v39 partition capacities, not authorization to write. Assets contents and download metadata/firmware growth must be budgeted separately."
+    }
+  },
+  "node": {
+    "buildId": "3c8091bb77c3efd2c94d",
+    "builtAt": "2026-10-18T01:33:16.501Z",
+    "bytes": 95678464,
+    "zipBytes": 36142076,
+    "sha256": "c7ab0b2c329afab7a835e286adb1c322ce3676f37958383363d5e244285b4414"
+  },
+  "dependencyProbe": {
+    "measuredAt": "2026-10-18T01:58:36.889Z",
+    "purpose": "Dependency and codec baseline measured before creating the Rust package; not a complete product",
+    "target": "x86_64-pc-windows-msvc",
+    "rustc": "1.87.0",
+    "exeBytes": 1027584,
+    "zipBytes": 518862,
+    "exeSha256": "caea2246713239469c23247a616cb0cb4f378d512e81f8315c72fea005619d55",
+    "embeddedWebAssetBytes": 79185,
+    "dependencies": {
+      "serde": "1.0.219",
+      "serde_json": "1.0.140",
+      "base64": "0.22.1",
+      "sha2": "0.10.8",
+      "httparse": "1.10.1",
+      "tungstenite": "0.26.2",
+      "serialport": "4.7.3",
+      "image": "0.25.6",
+      "tokio": "1.44.2",
+      "tokio-util": "0.7.14"
+    },
+    "retainedPaths": [
+      "JSON-RPC stdio",
+      "HTTP client/server",
+      "WebSocket handshake and frame I/O",
+      "serial enumeration/open/read/write code (no real port opened)",
+      "JPEG and PNG decode, target marker/crop, 2x PNG output",
+      "Tokio TCP/timer/channel actor and cancellation"
+    ],
+    "verification": [
+      "JSON/image/actor selftest",
+      "loopback HTTP and JSON-RPC initialize",
+      "loopback WebSocket handshake/echo"
+    ],
+    "notIncluded": [
+      "Full 22 MCP tools and state logic",
+      "Full input ownership, calibrated timing and safety",
+      "Final desktop/discovery/TLS implementation"
+    ],
+    "realDeviceOperations": false,
+    "builtAt": "2026-10-18T01:42:41.843Z"
+  },
+  "flash": {
+    "totalBytes": 8388608,
+    "firmwareAppBytes": 1666016,
+    "firmwareAppSha256": "fcb04a400855a4847f1ac0a0d54164002d0464672766ed78243596cd3983ebde",
+    "firmwareMergedSha256": "f0bada5e21afe55b44399881505e1213c4b9fc47cacbf460ed4a5ae1a0bdeb4d",
+    "installedAppPartition": {
+      "type": 0,
+      "subtype": 16,
+      "offset": 131072,
+      "size": 3080192,
+      "name": "ota_0"
+    },
+    "appHeadroomBytes": 1414176,
+    "assetsPartitionBytes": 2097152,
+    "assetsContentsVerified": false,
+    "rawFitsApp": false,
+    "rawFitsAssets": true,
+    "rawAssetsRemainingBytes": 233984,
+    "zipFitsApp": true,
+    "zipAppRemainingBytes": 510607,
+    "layoutEvidence": "apps/esp/build/new-com6-v39-partition-table.bin read at 2026-10-18 08:56 Asia/Shanghai"
+  },
+  "reductionPercent": 98.05267776874011,
+  "validation": {
+    "rustUnitTests": 58,
+    "packagedOfficialSdkScenarios": 17,
+    "packagedBuildId": "rust-6cd85079fe3bd5e6",
+    "typescriptTypecheck": "PASS",
+    "typescriptBuild": "PASS",
+    "rustFormat": "PASS",
+    "rustCheckAllTargets": "PASS",
+    "separateRuntimeDlls": [],
+    "zipEntryHashVerified": true,
+    "realDeviceInput": false,
+    "flashPerformed": false
+  },
+  "unverified": [
+    "ESP assets contents",
+    "Embedding and serving this PC executable from ESP",
+    "Real ESP multi-MiB download and radio concurrency",
+    "Real BLE and physical pointer acceptance of the Rust program"
+  ]
+}

@@ -1,6 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {createCaptchaFlow} from '../web/captcha-flow.js';
+import {createCaptchaFlow,getCaptchaAuth} from '../web/captcha-flow.js';
+test('旧后端缺少auth或验证配置不完整时明确提示重启，恢复获取验证码按钮',async()=>{
+ for(const status of [null,{stage:'signed_out'},{auth:{}},{auth:{loginSource:'web'}},{auth:{loginSource:'web',captcha:{}}},{auth:{loginSource:'web',captcha:{sceneId:''}}}]){
+  const errors=[];let sends=0;
+  const flow=createCaptchaFlow({initialize:async()=>getCaptchaAuth(status),send:async()=>{sends++;},onState:()=>{},onError:e=>errors.push(e.message)});
+  await flow.start();assert.equal(flow.phase,'idle');assert.equal(sends,0);assert.match(errors[0],/请重启收钱吧服务后刷新页面/);
+ }
+});
+test('网页和App验证使用各自后端返回的配置',()=>{
+ for(const loginSource of ['web','apk']){const auth={loginSource,captcha:{sceneId:'synthetic-'+loginSource}};assert.equal(getCaptchaAuth({auth}),auth);}
+});
 function fixture(send){const instances=[],states=[],errors=[],timers=new Map();let next=0;const flow=createCaptchaFlow({initialize:async callbacks=>{const sdk={callbacks,starts:0,startTracelessVerification(){this.starts++;}};instances.push(sdk);return sdk;},send,onState:s=>states.push(s),onError:e=>errors.push(e.message),setTimer:fn=>{timers.set(++next,fn);return next;},clearTimer:id=>timers.delete(id)});return{flow,instances,states,errors,timers};}
 test('验证完成但发送失败后，下一次点击使用新SDK实例',async()=>{let count=0;const f=fixture(async()=>{if(++count===1)throw new Error('本地会话失效');return{sent:true};});await f.flow.start();assert.equal(f.flow.phase,'waiting');await f.instances[0].callbacks.success('first');assert.equal(f.flow.phase,'idle');await f.flow.start();assert.equal(f.instances.length,2);await f.instances[1].callbacks.success('second');assert.equal(f.flow.phase,'completed');assert.equal(count,2);});
 test('短信发送成功后不复用已完成实例，重复回调不重复发送',async()=>{let count=0;const f=fixture(async()=>{count++;return{sent:true};});await f.flow.start();await f.instances[0].callbacks.success('first');await f.instances[0].callbacks.success('duplicate');assert.equal(count,1);await f.flow.start();assert.equal(f.instances.length,2);await f.instances[0].callbacks.success('late');assert.equal(count,1);await f.instances[1].callbacks.success('next');assert.equal(count,2);});

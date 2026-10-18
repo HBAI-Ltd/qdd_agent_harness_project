@@ -20,6 +20,9 @@ $sources += @(Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot "tests") -Recu
 $sources += Join-Path $projectRoot "src/cn/qdd/screenbridge/CaptureWifiLock.java"
 $sources += Join-Path $projectRoot "src/cn/qdd/screenbridge/PreviewProfile.java"
 $sources += Join-Path $projectRoot "src/cn/qdd/screenbridge/CaptureConsent.java"
+$sources += Join-Path $projectRoot "src/cn/qdd/screenbridge/PointerCalibration.java"
+$sources += Join-Path $projectRoot "src/cn/qdd/screenbridge/Utf8ImeProtocol.java"
+$sources += Join-Path $projectRoot "src/cn/qdd/screenbridge/BoardBluetooth.java"
 & $javac -encoding UTF-8 -d $output @sources
 if ($LASTEXITCODE -ne 0) { throw "Stream test compilation failed." }
 & $java "-Djava.awt.headless=true" -cp $output cn.qdd.screenbridge.StreamTransportTest
@@ -40,3 +43,9 @@ if ($LASTEXITCODE -ne 0) { throw "Preview profile regression failed." }
 if ($LASTEXITCODE -ne 0) { throw "Board selection regression failed." }
 & $java -cp $output cn.qdd.screenbridge.BoardClientTest
 if ($LASTEXITCODE -ne 0) { throw "Board HTTP regression failed." }
+& $java -cp $output cn.qdd.screenbridge.BoardBluetoothTest
+if ($LASTEXITCODE -ne 0) { throw "Board BLE readiness regression failed." }
+& $java -cp $output cn.qdd.screenbridge.PointerCalibrationTest
+if ($LASTEXITCODE -ne 0) { throw "Pointer calibration regression failed." }
+& $java -cp $output cn.qdd.screenbridge.Utf8ImeProtocolTest
+if ($LASTEXITCODE -ne 0) { throw "UTF-8 IME protocol regression failed." }

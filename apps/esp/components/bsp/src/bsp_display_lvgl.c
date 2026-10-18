@@ -9,7 +9,7 @@
 
 static const char *TAG = "bsp_lvgl";
 
-#define BSP_LVGL_DRAW_BUFFER_LINES 40
+#define BSP_LVGL_DEFAULT_DRAW_BUFFER_ROWS 40
 
 static lv_display_t *s_disp;
 static bool s_port_initialized;
@@ -54,6 +54,13 @@ static void rounded_flush_event(lv_event_t *event)
 }
 
 lv_display_t *bsp_lvgl_init(void) {
+    return bsp_lvgl_init_with_buffer_rows(BSP_LVGL_DEFAULT_DRAW_BUFFER_ROWS);
+}
+
+lv_display_t *bsp_lvgl_init_with_buffer_rows(uint16_t draw_buffer_rows) {
+    // Reject a zero/oversized partial buffer before initializing the port.
+    // A configured display is immutable; valid repeated calls reuse it.
+    if (draw_buffer_rows == 0 || draw_buffer_rows > BSP_LCD_H) return NULL;
     if (s_disp) return s_disp;
     if (!bsp_display_panel()) {
         ESP_LOGE(TAG, "请先成功调用 bsp_display_init()");
@@ -79,9 +86,10 @@ lv_display_t *bsp_lvgl_init(void) {
     const lvgl_port_display_cfg_t dc = {
         .panel_handle = bsp_display_panel(),
         .io_handle    = bsp_display_io(),
-        // ⚠ C3 无 PSRAM,DMA 只能用内部 RAM。40 行单缓冲约 19.2KB，
-        // 可减少窗口命令和队列提交次数；仍保留单缓冲，避免双缓冲挤压音频/Wi-Fi。
-        .buffer_size   = (uint32_t)BSP_LCD_W * BSP_LVGL_DRAW_BUFFER_LINES,
+        // C3 无 PSRAM，port 的 buff_dma 路径以 MALLOC_CAP_DMA 分配内部 RAM。
+        // 默认 40 行约 19.2KB；应用可显式用 20 行约 9.6KB 换取 radio 余量。
+        // 始终单缓冲；较少行数会增加全屏刷新分片，需在应用上验证。
+        .buffer_size   = (uint32_t)BSP_LCD_W * draw_buffer_rows,
         .double_buffer = false,
         .hres = BSP_LCD_W, .vres = BSP_LCD_H,
         // 旋转/镜像必须在这里配:esp_lvgl_port 注册显示时会重新下发 MADCTL,

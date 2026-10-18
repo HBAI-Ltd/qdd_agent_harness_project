@@ -18,6 +18,8 @@ import java.util.UUID;
 
 public final class ScreenApplication extends Application {
   final FrameStore frames = new FrameStore();
+  volatile String imeStatus = "请手动启用并选择设备中文输入，再聚焦目标文本框";
+  final PointerCalibration pointerCalibration = new PointerCalibration();
   private int port;
   private FrameServer server;
   private String serverError;

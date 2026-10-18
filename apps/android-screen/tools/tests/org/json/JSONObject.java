@@ -7,6 +7,10 @@ import java.util.Map;
 public final class JSONObject {
   private final Map<String, Object> values = new LinkedHashMap<>();
   public JSONObject put(String key, Object value) throws JSONException { values.put(key, value); return this; }
+  public boolean optBoolean(String key) {
+    Object value = values.get(key);
+    return Boolean.TRUE.equals(value) || (value instanceof String && "true".equalsIgnoreCase((String)value));
+  }
   private static String quote(String value) { return "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\""; }
   @Override public String toString() {
     StringBuilder result = new StringBuilder("{");

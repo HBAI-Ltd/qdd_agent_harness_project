@@ -178,7 +178,7 @@ void qdd_hid_tick(qdd_hid_state_t *state, uint64_t now_ms, bool usb_connected) {
 }
 
 bool qdd_hid_release(qdd_hid_state_t *state, qdd_report_fn report, void *context) {
-  if (!state->connected || !state->encrypted || !state->authenticated) {
+  if (!state->connected || !state->encrypted || !state->bonded) {
     state->release_required = false;
     return true;
   }
@@ -195,12 +195,17 @@ bool qdd_hid_release(qdd_hid_state_t *state, qdd_report_fn report, void *context
 static const char *permission(const qdd_hid_state_t *state, uint64_t now_ms) {
   if (state->locked) return "LOCKED";
   if (!state->connected) return "NOT_CONNECTED";
-  if (!state->encrypted || !state->authenticated || !state->bonded) {
+  if (!state->encrypted || !state->bonded) {
     return "NOT_AUTHENTICATED";
   }
   if (!state->ready) return "HID_NOT_READY";
   if (!fresh(state, now_ms)) return "HEARTBEAT_EXPIRED";
   return NULL;
+}
+
+const char *qdd_hid_text_permission(const qdd_hid_state_t *state, uint64_t now_ms) {
+  const char *error = permission(state, now_ms);
+  return error ? error : !state->armed ? "NOT_ARMED" : NULL;
 }
 
 const char *qdd_hid_execute(qdd_hid_state_t *state, const qdd_command_t *command,

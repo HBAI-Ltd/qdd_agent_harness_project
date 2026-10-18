@@ -8,6 +8,7 @@ export type ChatEvent = SessionEvent | LegacyToolEvent;
 export interface ChatToolEvent extends LegacyToolEvent {
   callId?: string;
   name?: string;
+  title?: string;
   status?: "running" | "completed" | "failed" | "cancelled" | "ended";
   input?: Record<string, unknown>;
   output?: string;
@@ -129,6 +130,7 @@ export function buildChatTimeline(events: readonly ChatEvent[], pending?: Extrac
     if (event.type === "tool") {
       const tool: ChatToolEvent = "tool" in event ? {
         type: "tool", at: event.at, callId: event.tool.id, name: event.tool.name, status: TOOL_STATUS[event.tool.status],
+        ...(event.tool.title ? { title: event.tool.title } : {}),
         text: event.tool.progress ?? event.tool.name,
         ...(event.tool.args ? { input: event.tool.args } : {}),
         ...(event.tool.result !== undefined ? { output: event.tool.result } : {}),
@@ -175,6 +177,7 @@ export function buildChatTimeline(events: readonly ChatEvent[], pending?: Extrac
 }
 
 export function toolTitle(event: ChatToolEvent): string {
+  if (event.title) return event.title;
   if (event.name) return event.name;
   const query = /^查询\s+(\S+)/.exec(event.text);
   if (query?.[1]) return query[1];

@@ -1,0 +1,4 @@
+/build/
+/target/
+*.pdb
+qdd-android.json

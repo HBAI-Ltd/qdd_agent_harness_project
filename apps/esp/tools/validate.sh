@@ -46,6 +46,22 @@ run_static_checks() {
         -o "${test_dir}/test_qdd_hid"
     "${test_dir}/test_qdd_hid"
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/test_qdd_text.c main/qdd_text.c -o "${test_dir}/test_qdd_text"
+    "${test_dir}/test_qdd_text"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/test_qdd_driver_protocol.c main/qdd_driver_protocol.c -o "${test_dir}/test_qdd_driver_protocol"
+    "${test_dir}/test_qdd_driver_protocol"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Itests/qdd_driver_host -Itests/qdd_onboarding_host -Imain \
+        tests/test_qdd_driver_usb.c main/qdd_driver_protocol.c -o "${test_dir}/test_qdd_driver_usb"
+    "${test_dir}/test_qdd_driver_usb"
+    PYTHONDONTWRITEBYTECODE=1 "${python_bin}" tests/test_qdd_driver_usb_contract.py
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -fno-builtin -Itests/qdd_alloc_host -Imain \
+        tests/test_qdd_alloc_trace.c tests/test_qdd_alloc_trace_pointer.c \
+        -Wl,--wrap=heap_caps_malloc -o "${test_dir}/test_qdd_alloc_trace"
+    for alloc_case in success zero malloc calloc caps overflow; do
+        "${test_dir}/test_qdd_alloc_trace" "${alloc_case}"
+    done
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
         tests/test_qdd_ble_policy.c -o "${test_dir}/test_qdd_ble_policy"
     "${test_dir}/test_qdd_ble_policy"
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
@@ -67,6 +83,14 @@ run_static_checks() {
     "${CC:-cc}" -std=gnu11 -Wall -Wextra -Werror -Itests/qdd_onboarding_host -Imain \
         tests/test_qdd_onboarding.c main/qdd_onboarding_model.c -o "${test_dir}/test_qdd_onboarding"
     "${test_dir}/test_qdd_onboarding"
+    "${NODE:-node}" --test tests/test_driver_download.mjs
+    PYTHONDONTWRITEBYTECODE=1 "${python_bin}" tests/test_prepare_driver_script.py
+    PYTHONDONTWRITEBYTECODE=1 "${python_bin}" tests/test_prepare_usb_installer.py
+    PYTHONDONTWRITEBYTECODE=1 "${python_bin}" tests/test_prepare_usb_receiver.py
+    PYTHONDONTWRITEBYTECODE=1 "${python_bin}" tests/test_prepare_desktop_zip.py
+    "${CC:-cc}" -std=gnu11 -Wall -Wextra -Werror -Itests/qdd_onboarding_host -Imain \
+        tests/test_qdd_download_assets.c -o "${test_dir}/test_qdd_download_assets"
+    "${test_dir}/test_qdd_download_assets"
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -pedantic -Itests/qdd_wifi_host -Imain \
         tests/test_qdd_wifi.c main/qdd_control.c main/qdd_net_config.c -o "${test_dir}/test_qdd_wifi"
     "${test_dir}/test_qdd_wifi"
@@ -99,6 +123,13 @@ run_static_checks() {
         -o "${test_dir}/test_bsp_lvgl_init"
     "${test_dir}/test_bsp_lvgl_init"
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror \
+        -Itests/bsp_stubs -Icomponents/bsp/include \
+        tests/test_bsp_lvgl_buffer.c components/bsp/src/bsp_display_rounding.c \
+        -o "${test_dir}/test_bsp_lvgl_buffer"
+    for scenario in budget default min max invalid retry rounding; do
+        "${test_dir}/test_bsp_lvgl_buffer" "${scenario}"
+    done
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror \
         -Itests/audio_stubs -Icomponents/bsp/include -Icomponents/bsp/src \
         tests/test_bsp_audio_recovery.c components/bsp/src/bsp_es8311_sleep_check.c \
         -o "${test_dir}/test_bsp_audio_recovery"
@@ -113,11 +144,13 @@ run_static_checks() {
     PYTHONDONTWRITEBYTECODE=1 "${python_bin}" tests/test_deep_sleep_contract.py
     PYTHONDONTWRITEBYTECODE=1 "${python_bin}" tests/test_key_wake_contract.py
     PYTHONDONTWRITEBYTECODE=1 "${python_bin}" tests/test_qdd_ble_contract.py
+    PYTHONDONTWRITEBYTECODE=1 "${python_bin}" tests/test_qdd_text_integration.py
     PYTHONDONTWRITEBYTECODE=1 "${python_bin}" tests/test_qdd_fonts.py
     PYTHONDONTWRITEBYTECODE=1 "${python_bin}" tests/test_qdd_transport_contract.py
     PYTHONDONTWRITEBYTECODE=1 "${python_bin}" tests/test_check_repo.py
     PYTHONDONTWRITEBYTECODE=1 "${python_bin}" tests/test_verify_firmware.py
     PYTHONDONTWRITEBYTECODE=1 "${python_bin}" tests/test_archive_firmware.py
+    PYTHONDONTWRITEBYTECODE=1 "${python_bin}" tests/test_pack_download_assets.py
     PYTHONDONTWRITEBYTECODE=1 "${python_bin}" tests/test_install_passport_skills.py
     rm -rf "${test_dir}"
     echo "Host tests: PASS"

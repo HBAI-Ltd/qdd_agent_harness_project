@@ -1,3 +1,8 @@
+export function getCaptchaAuth(status){
+ const auth=status?.auth;
+ if(!['web','apk'].includes(auth?.loginSource)||typeof auth?.captcha?.sceneId!=='string'||!auth.captcha.sceneId.trim())throw new Error('本地服务未返回有效的人机验证配置，请重启收钱吧服务后刷新页面');
+ return auth;
+}
 export function createCaptchaFlow({initialize,send,onState,onError,retryLimit=()=>2,setTimer=setTimeout,clearTimer=clearTimeout,waitMs=90000,loadMs=20000}){
  let phase='idle',generation=0,instance=null,timer=null,retries=0;
  const update=next=>{phase=next;onState(next);};

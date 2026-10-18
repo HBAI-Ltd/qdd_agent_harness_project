@@ -2,7 +2,6 @@
   "workspace": "workspace",
   "llm": {
     "model": "deepseek-chat",
-    "maxSteps": 40,
     "reasoningEffort": "default",
     "models": [
       { "id": "deepseek-chat", "label": "DeepSeek V3", "model": "deepseek-chat" },

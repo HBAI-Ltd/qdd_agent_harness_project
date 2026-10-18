@@ -100,9 +100,8 @@ final class BoardSetup {
     synchronized (this) {
       if (!current(round, network, wifiAddress)) return;
       JSONObject bluetooth = status.optJSONObject("bluetooth");
-      bluetoothReady = bluetooth != null && bluetooth.optBoolean("connected") && bluetooth.optBoolean("encrypted")
-          && bluetooth.optBoolean("authenticated") && bluetooth.optBoolean("bonded") && bluetooth.optBoolean("ready");
-      guide = !bluetoothReady ? "下一步：打开蓝牙设置，连接 " + name + "。需要配对码时，输入设备控制器显示的数字。"
+      bluetoothReady = BoardBluetooth.ready(bluetooth);
+      guide = !bluetoothReady ? "下一步：打开手机蓝牙设置，选择 " + name + "，按系统提示确认配对。"
           : "蓝牙已连接。手机开始投屏并允许共享屏幕，再在同一 Wi-Fi 的电脑打开设备操作台.exe。点击电脑画面即可操作，按 Esc 退出。";
     }
   }

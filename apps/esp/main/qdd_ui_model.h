@@ -8,7 +8,7 @@
 
 typedef enum {
     QDD_UI_LOCKED, QDD_UI_COMPUTER, QDD_UI_PHONE, QDD_UI_HID,
-    QDD_UI_ENABLED, QDD_UI_WIFI, QDD_UI_DOWNLOAD, QDD_UI_INSTALL
+    QDD_UI_ENABLED, QDD_UI_WIFI, QDD_UI_DOWNLOAD, QDD_UI_INSTALL, QDD_UI_USB_INSTALL
 } qdd_ui_stage_t;
 
 typedef struct {
@@ -39,17 +39,24 @@ typedef struct {
     bool phone_fresh;
     bool pc_fresh;
     bool projecting;
+    bool skip_desktop;
     bool skip_app;
     bool skip_bluetooth;
     bool completed;
+    // Explicitly selected instruction page; zero preserves legacy routing.
+    unsigned page;
 } qdd_ui_onboarding_t;
 
 typedef enum {
     QDD_UI_HOME_STOP, QDD_UI_HOME_UNLOCK, QDD_UI_HOME_SETTINGS,
-    QDD_UI_HOME_SKIP_APP, QDD_UI_HOME_SKIP_BLUETOOTH
+    QDD_UI_HOME_SKIP_APP, QDD_UI_HOME_SKIP_BLUETOOTH,
+    QDD_UI_HOME_DESKTOP_READY, QDD_UI_HOME_WIFI_SETUP,
+    QDD_UI_HOME_NEXT, QDD_UI_HOME_PAIR
 } qdd_ui_home_action_t;
 
 unsigned qdd_ui_home_choices(unsigned guide_step);
+// Pages 1..6; 7 means explicitly leaving the instructions, not link readiness.
+unsigned qdd_ui_guide_target(unsigned page, bool forward);
 qdd_ui_home_action_t qdd_ui_home_action(unsigned guide_step, unsigned selection, bool locked);
 
 typedef struct {

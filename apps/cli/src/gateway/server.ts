@@ -1,5 +1,5 @@
 import { watch } from "node:fs";
-import { mkdir, readFile, stat } from "node:fs/promises";
+import { mkdir, readFile, realpath, stat } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import path from "node:path";
 import type { AnswerBody, AskBody, SelectModelBody, BrowserStreamEvent, CreateWishBody, GatewayEvent, HarnessConfig, JsonObject, Overview, PageView, RecordInput, SendMessageBody, ToolInfo } from "@qdd/shared";
@@ -72,7 +72,6 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
   const hub = new SessionHub(loaded, sources, options.chat, workbench);
   const scheduler = new Scheduler(loaded, hub, workbench);
   workbench.scheduler = scheduler;
-  const csp = pageCsp(config.cdnAllowlist, config.gateway.corsOrigins);
   const globalClients = new Set<ServerResponse>();
   const computeJs = await buildComputeScript();
   await mkdir(paths.state, { recursive: true });
@@ -142,10 +141,16 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
 
   function cors(req: IncomingMessage, res: ServerResponse): void {
     const origin = req.headers.origin;
-    if (origin && config.gateway.corsOrigins.includes(origin)) {
+    const pathname = new URL(req.url ?? "/", "http://gateway").pathname;
+    const pageRuntime = /^\/api\/(?:tools\/[^/]+|ask|state\/[a-z0-9-]+|records\/[^/]+(?:\/[^/]+)?)$/.test(pathname);
+    const requestedHeaders = (req.headers["access-control-request-headers"] ?? "").toString().toLowerCase().split(",").map((header) => header.trim()).filter(Boolean);
+    const pagePreflight = req.method === "OPTIONS" && requestedHeaders.includes("x-qdd-page") && requestedHeaders.includes("x-qdd-page-token")
+      && requestedHeaders.every((header) => ["content-type", "x-qdd-page", "x-qdd-page-token"].includes(header));
+    const sandboxedPage = origin === "null" && pageRuntime && (pagePreflight || (req.method !== "OPTIONS" && auth.pageOf(req) !== undefined));
+    if ((origin && origin !== "null" && config.gateway.corsOrigins.includes(origin)) || sandboxedPage) {
       res.setHeader("Access-Control-Allow-Origin", origin);
       res.setHeader("Vary", "Origin");
-      res.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type, X-QDD-Page, X-QDD-Page-Token, X-File-Name");
+      res.setHeader("Access-Control-Allow-Headers", sandboxedPage ? "Content-Type, X-QDD-Page, X-QDD-Page-Token" : "Authorization, Content-Type, X-QDD-Page, X-QDD-Page-Token, X-File-Name");
       res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
       res.setHeader("Access-Control-Expose-Headers", "Mcp-Session-Id");
     }
@@ -185,7 +190,7 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
     // ---------------------------------------------------------------- 页面运行时 + 前端共用
     const tool = /^\/api\/tools\/([^/]+)$/.exec(p);
     if (tool && m === "POST") {
-      const name = decodeURIComponent(tool[1]!);
+      const name = decodeSegment(tool[1]!);
       const target = sources.get(name);
       if (!target) throw new HttpError(404, `未知数据工具 ${name}`);
       if (!auth.isAdmin(req, url)) {
@@ -196,24 +201,28 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
       }
       // 写入类工具只能经由 agent + 店长授权执行，不开放直接调用。
       if (target.mutating) throw new HttpError(403, `${name} 是写入类工具，只能在许愿会话中经授权执行`);
-      return json(res, 200, { result: await target.call(((await readJson(req)) ?? {}) as JsonObject) });
+      const args = await readJson(req);
+      if (args !== undefined && (!args || typeof args !== "object" || Array.isArray(args))) throw new HttpError(400, "工具参数必须是 JSON 对象");
+      return json(res, 200, { result: await target.call((args ?? {}) as JsonObject) });
     }
 
     if (p === "/api/ask" && m === "POST") {
+      let askSources = sources;
       if (!auth.isAdmin(req, url)) {
         const slug = auth.pageOf(req);
         const page = slug ? (await readPages(paths)).find((x) => x.slug === slug) : undefined;
         if (!page) throw new HttpError(401, "缺少或错误的页面 token");
         if (!page.useAgent) throw new HttpError(403, `页面 ${slug} 未声明使用 agent`);
+        askSources = sources.restricted(page.tools);
       }
       const body = (await readJson(req)) as AskBody;
       if (typeof body?.question !== "string" || !body.question.trim()) throw new HttpError(400, "question 不能为空");
       const chat = options.chat(resolveModel(config.llm));
       const stream = openSse(req, res);
       const controller = new AbortController();
-      req.on("close", () => controller.abort());
+      res.on("close", () => controller.abort());
       try {
-        const text = await runAsk(sources, chat, body.question, body.context, (name) => stream({ type: "tool", name }), controller.signal);
+        const text = await runAsk(askSources, chat, body.question, body.context, (name) => stream({ type: "tool", name }), controller.signal);
         stream({ type: "answer", text });
       } catch (error) {
         stream({ type: "error", message: (error as Error).message });
@@ -234,7 +243,7 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
       }
       if (m === "PUT") {
         const text = await readBody(req);
-        if (text.length > MAX_STATE) throw new HttpError(413, "页面状态不能超过 64KB");
+        if (Buffer.byteLength(text, "utf8") > MAX_STATE) throw new HttpError(413, "页面状态不能超过 64KB");
         let state: unknown;
         try {
           state = JSON.parse(text);
@@ -250,8 +259,8 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
     // 记录数据集：页面只能读写自己声明的记录；结构定义仅前端或 agent（经店长授权）
     const recordRoute = /^\/api\/records(?:\/([^/]+)(?:\/([^/]+))?)?$/.exec(p);
     if (recordRoute) {
-      const name = recordRoute[1] ? decodeURIComponent(recordRoute[1]) : undefined;
-      const id = recordRoute[2] ? decodeURIComponent(recordRoute[2]) : undefined;
+      const name = recordRoute[1] ? decodeSegment(recordRoute[1]) : undefined;
+      const id = recordRoute[2] ? decodeSegment(recordRoute[2]) : undefined;
       let actor = "@admin";
       if (!auth.isAdmin(req, url)) {
         const slug = auth.pageOf(req);
@@ -295,7 +304,7 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
     if (p === "/api/events" && m === "GET") {
       openSse(req, res);
       globalClients.add(res);
-      req.on("close", () => globalClients.delete(res));
+      res.on("close", () => globalClients.delete(res));
       return;
     }
     if (p === "/api/tools" && m === "GET") {
@@ -320,7 +329,7 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
     }
     const pin = /^\/api\/pages\/([^/]+)\/pin$/.exec(p);
     if (pin && (m === "PUT" || m === "DELETE")) {
-      const slug = decodeURIComponent(pin[1]!);
+      const slug = decodeSegment(pin[1]!);
       if (m === "PUT" && !(await readPages(paths)).some((x) => x.slug === slug)) throw new HttpError(404, "页面不存在");
       const pins = await (m === "PUT" ? pinPage(paths, slug) : unpinPage(paths, slug));
       broadcast({ type: "pages_changed" });
@@ -393,7 +402,7 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
     }
     const skill = /^\/api\/skills\/([^/]+)$/.exec(p);
     if (skill) {
-      const id = decodeURIComponent(skill[1]!);
+      const id = decodeSegment(skill[1]!);
       if (m === "GET") return json(res, 200, await workbench.skills.get(id));
       if (m === "PUT") {
         const updated = await workbench.skills.update(id, parseSkillInput(await readJson(req)));
@@ -413,10 +422,15 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
       if (m === "GET") return json(res, 200, await scheduler.list());
       if (m === "POST") return json(res, 201, await scheduler.create(await readJson(req)));
     }
-    const schedule = /^\/api\/schedules\/([^/]+)(\/run)?$/.exec(p);
+    const schedule = /^\/api\/schedules\/([^/]+)(\/run|\/sessions)?$/.exec(p);
     if (schedule) {
-      const id = decodeURIComponent(schedule[1]!);
-      if (schedule[2]) {
+      const id = decodeSegment(schedule[1]!);
+      if (schedule[2] === "/sessions") {
+        if (m === "GET") {
+          await scheduler.get(id);
+          return json(res, 200, await hub.listScheduleSessions(id));
+        }
+      } else if (schedule[2] === "/run") {
         if (m === "POST") return json(res, 202, { sessionId: await scheduler.runNow(id) });
       } else {
         if (m === "GET") return json(res, 200, await scheduler.get(id));
@@ -433,7 +447,7 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
     if (browserRoute) {
       const browser = workbench.browser;
       if (!browser) throw new HttpError(404, "浏览器工具未启用");
-      const id = decodeURIComponent(browserRoute[1]!);
+      const id = decodeSegment(browserRoute[1]!);
       const sub = browserRoute[2];
       if (!sub && m === "GET") {
         const state = browser.state(id);
@@ -473,7 +487,7 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
           res.end();
           return;
         }
-        req.on("close", off);
+        res.on("close", off);
         return;
       }
       if (sub === "/input" && m === "POST") {
@@ -509,7 +523,7 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
     }
     const connector = /^\/api\/connectors\/([^/]+)(\/verify|\/test)?$/.exec(p);
     if (connector) {
-      const id = decodeURIComponent(connector[1]!);
+      const id = decodeSegment(connector[1]!);
       const action = connector[2];
       if (action === "/verify" && m === "POST") {
         const view = await workbench.connectors.verify(id);
@@ -542,8 +556,9 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
     if (p === "/api/metrics" && m === "GET") return json(res, 200, await sources.metrics());
     if (p === "/api/datasets" && m === "GET") return json(res, 200, await sources.datasets.list());
     if (p === "/api/datasets/refresh" && m === "POST") {
-      const body = (await readJson(req)) as { datasets?: string[] } | undefined;
-      return json(res, 200, await refreshDatasets(sources, body?.datasets));
+      const body = (await readJson(req)) as { datasets?: unknown } | undefined;
+      if (body?.datasets !== undefined && (!Array.isArray(body.datasets) || body.datasets.some((name) => typeof name !== "string"))) throw new HttpError(400, "datasets 必须是字符串数组");
+      return json(res, 200, await refreshDatasets(sources, body?.datasets as string[] | undefined));
     }
 
     const session = /^\/api\/sessions\/([^/]+)(\/.*)?$/.exec(p);
@@ -558,7 +573,7 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
         const since = Math.max(0, Number(url.searchParams.get("since")) || 0);
         for (const e of detail.events.slice(since)) stream(e);
         const off = hub.subscribe(id, stream);
-        req.on("close", off);
+        res.on("close", off);
         return;
       }
       if (sub === "/messages" && m === "POST") {
@@ -607,24 +622,44 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
   }
 
   async function servePage(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
-    const [, , slug = "", ...rest] = url.pathname.split("/");
-    if (!SLUG_RE.test(slug)) throw new HttpError(404, "Not Found");
+    const [, , pageSegment = "", ...rest] = url.pathname.split("/");
+    const [slug = "", pathToken, ...extra] = pageSegment.split("~");
+    if (!SLUG_RE.test(slug) || extra.length) throw new HttpError(404, "Not Found");
     const expected = auth.pageToken(slug);
+    if (pathToken !== undefined && pathToken !== expected) throw new HttpError(401, "页面 token 错误");
     const query = url.searchParams.get("page_token");
+    res.setHeader("Referrer-Policy", "no-referrer");
     if (query !== null) {
       if (query !== expected) throw new HttpError(401, "页面 token 错误");
-      // 首次带 token 进入：写入路径级 cookie 后跳转到干净地址，后续子资源凭 cookie 访问。
+      // Opaque sandboxes omit SameSite cookies for scripts/modules. A credential
+      // in the page directory keeps every relative resource authenticated while
+      // retaining the existing directory depth and ../../assets references.
       res.setHeader("Set-Cookie", `${auth.pageCookieName(slug)}=${expected}; Path=/pages/${slug}/; HttpOnly; SameSite=Lax`);
       url.searchParams.delete("page_token");
+      url.pathname = `/pages/${slug}~${expected}/${rest.join("/")}`;
       res.writeHead(302, { Location: url.pathname + url.search }).end();
       return;
     }
-    if (auth.pageCookie(req, slug) !== expected && !auth.isAdmin(req, url)) throw new HttpError(401, "需要页面 token");
+    if (pathToken !== expected) {
+      if (auth.pageCookie(req, slug) !== expected && !auth.isAdmin(req, url)) throw new HttpError(401, "需要页面 token");
+      url.pathname = `/pages/${slug}~${expected}/${rest.join("/")}`;
+      res.writeHead(302, { Location: url.pathname + url.search }).end();
+      return;
+    }
+    if (pathToken === expected && req.headers.origin === "null") {
+      res.setHeader("Access-Control-Allow-Origin", "null");
+      res.setHeader("Vary", "Origin");
+    }
 
     const rel = rest.join("/") || "index.html";
-    const file = await resolveFile(path.join(paths.pages, slug), rel);
+    const file = await resolveFile(path.join(paths.pages, slug), rel, paths.pages);
     if (!file) throw new HttpError(404, "Not Found");
     const ext = path.extname(file).toLowerCase();
+    const host = req.headers.host;
+    if (!host || /[\s/@\\?#]/.test(host)) throw new HttpError(400, "Host 不合法");
+    let origin: string;
+    try { origin = new URL(`http://${host}`).origin; } catch { throw new HttpError(400, "Host 不合法"); }
+    res.setHeader("Content-Security-Policy", pageCsp(config.cdnAllowlist, config.gateway.corsOrigins, { origin, slug: pageSegment }));
     if (ext !== ".html") return send(res, 200, MIME[ext] ?? "application/octet-stream", await readFile(file));
 
     const boot =
@@ -636,12 +671,11 @@ export async function startGateway(loaded: LoadedConfig, sources: DataSources, o
     const entry = (await readPages(paths)).find((x) => x.slug === slug);
     const banner = gapBanner(entry);
     if (banner) out = /<body[^>]*>/i.test(out) ? out.replace(/<body[^>]*>/i, (m) => m + banner) : out + banner;
-    res.setHeader("Content-Security-Policy", csp);
     send(res, 200, MIME[".html"]!, out);
   }
 
   async function serveFile(res: ServerResponse, root: string, rel: string): Promise<void> {
-    const file = await resolveFile(root, rel);
+    const file = await resolveFile(root, rel, paths.site);
     if (!file) throw new HttpError(404, "Not Found");
     send(res, 200, MIME[path.extname(file).toLowerCase()] ?? "application/octet-stream", await readFile(file));
   }
@@ -729,7 +763,7 @@ function gapBanner(page: { gaps: { kind: string; item: string; reason: string; s
 }
 
 /** 在 root 内解析相对路径，拒绝越界与隐藏文件。 */
-async function resolveFile(root: string, rel: string): Promise<string | undefined> {
+async function resolveFile(root: string, rel: string, trustedRoot: string): Promise<string | undefined> {
   let decoded: string;
   try {
     decoded = decodeURIComponent(rel);
@@ -741,10 +775,25 @@ async function resolveFile(root: string, rel: string): Promise<string | undefine
   if (path.relative(root, file).split(path.sep).some((s) => s.startsWith("."))) return undefined;
   try {
     if ((await stat(file)).isDirectory()) file = path.join(file, "index.html");
-    await stat(file);
-    return file;
+    const [realRoot, realFile, realTrustedRoot, info] = await Promise.all([realpath(root), realpath(file), realpath(trustedRoot), stat(file)]);
+    const expectedRoot = path.resolve(realTrustedRoot, path.relative(trustedRoot, root));
+    if (path.relative(expectedRoot, realRoot) !== "") return undefined;
+    const rootRelative = path.relative(realTrustedRoot, realRoot);
+    if (rootRelative === ".." || rootRelative.startsWith(`..${path.sep}`) || path.isAbsolute(rootRelative)) return undefined;
+    const relative = path.relative(realRoot, realFile);
+    if (!info.isFile() || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return undefined;
+    if (relative.split(path.sep).some((segment) => segment.startsWith("."))) return undefined;
+    return realFile;
   } catch {
     return undefined;
+  }
+}
+
+function decodeSegment(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    throw new HttpError(400, "URL 路径编码不合法");
   }
 }
 
@@ -756,20 +805,25 @@ function json(res: ServerResponse, status: number, body: unknown): void {
   send(res, status, "application/json; charset=utf-8", JSON.stringify(body));
 }
 
-function openSse(req: IncomingMessage, res: ServerResponse): (data: unknown) => void {
+function openSse(_req: IncomingMessage, res: ServerResponse): (data: unknown) => void {
   res.writeHead(200, { "Content-Type": "text/event-stream; charset=utf-8", Connection: "keep-alive" });
   res.write(": connected\n\n");
   const ping = setInterval(() => res.write(": ping\n\n"), 25_000);
-  req.on("close", () => clearInterval(ping));
-  return (data) => res.write(`data: ${JSON.stringify(data)}\n\n`);
+  res.on("close", () => clearInterval(ping));
+  return (data) => {
+    if (!res.writableEnded && !res.destroyed) res.write(`data: ${JSON.stringify(data)}\n\n`);
+  };
 }
 
 async function readBuffer(req: IncomingMessage, limit = MAX_BODY): Promise<Buffer> {
   const chunks: Buffer[] = [];
   let size = 0;
-  for await (const chunk of req) {
+  for await (const chunk of req.iterator({ destroyOnReturn: false })) {
     size += (chunk as Buffer).length;
-    if (size > limit) throw new HttpError(413, "请求体过大");
+    if (size > limit) {
+      req.resume();
+      throw new HttpError(413, "请求体过大");
+    }
     chunks.push(chunk as Buffer);
   }
   return Buffer.concat(chunks);

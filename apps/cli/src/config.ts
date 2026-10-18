@@ -14,7 +14,7 @@ export const DEFAULT_CONFIG: HarnessConfig = {
     model: "deepseek-chat",
     apiKeyEnv: "DEEPSEEK_API_KEY",
     maxSteps: 40,
-    maxTokens: 8192,
+    maxTokens: 393216,
     clarify: "required",
     thinking: "enabled",
   },
@@ -107,6 +107,11 @@ export async function loadConfig(root = process.cwd()): Promise<LoadedConfig> {
     }
   }
 
+  if (!user || typeof user !== "object" || Array.isArray(user)) throw new Error("配置必须是 JSON 对象。");
+  for (const key of ["llm", "gateway", "datasets", "browser", "mcpServers"] as const) {
+    const value = user[key];
+    if (value !== undefined && (!value || typeof value !== "object" || Array.isArray(value))) throw new Error(`${key} 必须是 JSON 对象。`);
+  }
   const config: HarnessConfig = {
     ...DEFAULT_CONFIG,
     ...user,
@@ -117,9 +122,11 @@ export async function loadConfig(root = process.cwd()): Promise<LoadedConfig> {
     browser: { ...DEFAULT_CONFIG.browser, ...user.browser },
   };
   for (const [name, server] of Object.entries(config.mcpServers)) {
-    if (typeof server.url !== "string" || !/^https?:\/\//.test(server.url)) {
+    if (!server || typeof server !== "object" || Array.isArray(server) || !isHttpUrl(server.url)) {
       throw new Error(`MCP 服务 ${name} 缺少 http(s) url（只支持 Streamable HTTP）`);
     }
+    if (server.allowTools !== undefined && (!Array.isArray(server.allowTools) || server.allowTools.some((tool) => typeof tool !== "string"))) throw new Error(`MCP 服务 ${name} 的 allowTools 必须是字符串数组。`);
+    if (server.allowWrite !== undefined && typeof server.allowWrite !== "boolean") throw new Error(`MCP 服务 ${name} 的 allowWrite 必须是布尔值。`);
   }
 
   const env = process.env;
@@ -127,9 +134,21 @@ export async function loadConfig(root = process.cwd()): Promise<LoadedConfig> {
   if (env.DEEPSEEK_MODEL) config.llm.model = env.DEEPSEEK_MODEL;
   if (env.HOST) config.gateway.host = env.HOST;
   if (env.PORT) config.gateway.port = Number(env.PORT);
+  if (typeof config.workspace !== "string" || !config.workspace.trim()) throw new Error("workspace 必须是非空路径。");
+  if (!isHttpUrl(config.llm.baseUrl)) throw new Error("llm.baseUrl 必须是有效的 http(s) URL。");
+  if (typeof config.llm.apiKeyEnv !== "string" || !config.llm.apiKeyEnv.trim()) throw new Error("llm.apiKeyEnv 必须是非空环境变量名。");
+  for (const key of ["maxTokens", "maxSteps"] as const) {
+    if (!Number.isSafeInteger(config.llm[key]) || config.llm[key] <= 0) throw new Error(`llm.${key} 必须是正整数。`);
+  }
+  if (!["enabled", "disabled"].includes(config.llm.thinking)) throw new Error("llm.thinking 只能是 enabled 或 disabled。");
+  if (typeof config.browser.enabled !== "boolean") throw new Error("browser.enabled 必须是布尔值。");
+  if (typeof config.gateway.host !== "string" || !config.gateway.host.trim()) throw new Error("gateway.host 必须是非空字符串。");
+  if (!Array.isArray(config.gateway.corsOrigins) || config.gateway.corsOrigins.some((origin) => !isHttpUrl(origin))) throw new Error("gateway.corsOrigins 必须是 http(s) 来源数组。");
+  if (!Number.isFinite(config.datasets.refreshIntervalSec) || config.datasets.refreshIntervalSec < 0) throw new Error("datasets.refreshIntervalSec 必须是大于或等于 0 的有限数字。");
+  if (!Array.isArray(config.cdnAllowlist) || config.cdnAllowlist.some((host) => typeof host !== "string" || !host.trim())) throw new Error("cdnAllowlist 必须是非空主机名数组。");
   chatOptions(config.llm);
   if (!["confirm", "auto"].includes(config.browser.permission)) throw new Error("browser.permission 只能是 confirm 或 auto。");
-  if (!(config.approvalTimeoutMin > 0)) throw new Error("approvalTimeoutMin 必须大于 0。");
+  if (!Number.isFinite(config.approvalTimeoutMin) || config.approvalTimeoutMin <= 0) throw new Error("approvalTimeoutMin 必须是大于 0 的有限数字。");
   if (!Number.isInteger(config.gateway.port) || config.gateway.port < 0 || config.gateway.port > 65535) {
     throw new Error("PORT 必须是 0-65535 之间的整数。");
   }
@@ -138,6 +157,10 @@ export async function loadConfig(root = process.cwd()): Promise<LoadedConfig> {
   for (const m of config.llm.models ?? []) {
     if (typeof m?.id !== "string" || !m.id.trim() || (m.model !== undefined && (typeof m.model !== "string" || !m.model.trim()))) throw new Error("llm.models 每项都需要 id，model 必须是非空字符串。");
     if (ids.has(m.id)) throw new Error(`llm.models 中 id ${m.id} 重复。`);
+    if (m.maxTokens !== undefined && (!Number.isSafeInteger(m.maxTokens) || m.maxTokens <= 0)) throw new Error(`模型 ${m.id} 的 maxTokens 必须是正整数。`);
+    if (m.baseUrl !== undefined && !isHttpUrl(m.baseUrl)) throw new Error(`模型 ${m.id} 的 baseUrl 必须是有效的 http(s) URL。`);
+    if (m.apiKeyEnv !== undefined && (typeof m.apiKeyEnv !== "string" || !m.apiKeyEnv.trim())) throw new Error(`模型 ${m.id} 的 apiKeyEnv 必须是非空环境变量名。`);
+    if (m.thinking !== undefined && !["enabled", "disabled"].includes(m.thinking)) throw new Error(`模型 ${m.id} 的 thinking 只能是 enabled 或 disabled。`);
     ids.add(m.id);
   }
 
@@ -165,4 +188,10 @@ export async function loadConfig(root = process.cwd()): Promise<LoadedConfig> {
       attachments: path.join(workspace, "attachments"),
     },
   };
+}
+
+function isHttpUrl(value: unknown): value is string {
+  if (typeof value !== "string" || !value.trim()) return false;
+  try { return ["http:", "https:"].includes(new URL(value).protocol); }
+  catch { return false; }
 }

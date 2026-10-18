@@ -134,6 +134,8 @@ function validate(schema: RecordSchema, input: RecordInput, partial: boolean): R
 function parseTime(v: unknown): string | undefined {
   if (v === undefined || v === null || v === "") return undefined;
   if (typeof v !== "string" || !TIME_RE.test(v)) throw new RecordError("time 格式应为 YYYY-MM-DD HH:mm");
+  const date = Date.parse(`${v.replace(" ", "T")}:00Z`);
+  if (!Number.isFinite(date) || new Date(date).toISOString().slice(0, 16).replace("T", " ") !== v) throw new RecordError("time 必须是有效日期和时间");
   return v;
 }
 
@@ -152,34 +154,36 @@ export async function addRecords(store: DatasetStore, name: string, inputs: Reco
   return rows;
 }
 
-async function findRecord(store: DatasetStore, m: DatasetManifest, id: string): Promise<Row> {
-  for await (const row of store.scan(m.name)) if (row.id === id) return row;
-  throw new RecordError(`记录 ${id} 不存在或已作废`, 404);
-}
-
 /** 按 id 修改部分字段（如处置结果回填），其余字段与登记时间保持不变。 */
 export async function updateRecord(store: DatasetStore, name: string, id: string, patch: RecordInput, page: string): Promise<Row> {
   const m = await requireRecord(store, name);
-  const prev = await findRecord(store, m, id);
-  // time 决定分区：改时间会让按日期范围读取时同一 id 出现在两个分区，因此不允许修改
-  if (patch.time !== undefined && patch.time !== prev.time) throw new RecordError("登记时间不能修改；如有误请作废后重新登记");
-  const fields = validate(m.record, patch, true);
-  const row: Row = { ...prev, ...fields, page };
-  await store.append(m.name, [row]);
+  const row = await store.updateRow(m.name, (current) => current.id === id, (prev) => {
+    const fields = validate(m.record, patch, true);
+    // time 决定分区：改时间会让按日期范围读取时同一 id 出现在两个分区，因此不允许修改
+    if (patch.time !== undefined && patch.time !== prev.time) throw new RecordError("登记时间不能修改；如有误请作废后重新登记");
+    return { ...prev, ...fields, page };
+  });
+  if (!row) throw new RecordError(`记录 ${id} 不存在或已作废`, 404);
   return row;
 }
 
 /** 作废记录：写入墓碑，之后读取与聚合都不再包含它（日志中保留原始行便于追溯）。 */
 export async function voidRecord(store: DatasetStore, name: string, id: string, page: string): Promise<void> {
   const m = await requireRecord(store, name);
-  const prev = await findRecord(store, m, id);
-  await store.append(m.name, [{ ...prev, page, [TOMBSTONE]: true }]);
+  const row = await store.updateRow(m.name, (current) => current.id === id, (prev) => ({ ...prev, page, [TOMBSTONE]: true }));
+  if (!row) throw new RecordError(`记录 ${id} 不存在或已作废`, 404);
 }
 
 /** 读取记录，按时间倒序。 */
 export async function queryRecords(store: DatasetStore, name: string, query: RecordQuery = {}): Promise<{ schema: RecordSchema; rows: Row[]; total: number }> {
   const m = await requireRecord(store, name);
-  for (const d of [query.from, query.to]) if (d !== undefined && !/^\d{4}-\d{2}-\d{2}$/.test(d)) throw new RecordError("from/to 格式应为 YYYY-MM-DD");
+  for (const d of [query.from, query.to]) {
+    if (d === undefined) continue;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) throw new RecordError("from/to 格式应为 YYYY-MM-DD");
+    parseTime(`${d} 00:00`);
+  }
+  if (query.from && query.to && query.from > query.to) throw new RecordError("from 不能晚于 to");
+  if (query.limit !== undefined && (!Number.isFinite(query.limit) || query.limit < 1 || !Number.isInteger(query.limit))) throw new RecordError("limit 必须是正整数");
   const rows = (await readAll(store, m.name, { from: query.from, to: query.to })).sort((a, b) =>
     String(b.time).localeCompare(String(a.time)),
   );

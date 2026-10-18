@@ -98,11 +98,11 @@ function mount(t) {
     loading: () => !!find(root, hasClass("preview-loading")),
     error: () => textContent(find(root, hasClass("preview-error")) ?? { children: [] }),
     load(node = frame()) { node.props.onLoad({ currentTarget: node, target: node }); },
-    respond(node = frame(), type = "page:ready", payload = null) {
+    respond(node = frame(), type = "page:ready", payload = null, origin = "null", source = node.contentWindow) {
       const initial = node.sent.at(-1)?.message;
       assert.ok(initial, "the host has initialized the frame");
       browserWindow.dispatchEvent(Object.assign(new Event("message"), {
-        data: { ...initial, type, payload }, origin: "https://gateway.example", source: node.contentWindow,
+        data: { ...initial, type, payload }, origin, source,
       }));
     },
     reload() { find(root, (node) => node.tag === "button" && textContent(node).includes("重新加载")).props.onClick(); },
@@ -141,7 +141,7 @@ test("load establishes the real bridge and readiness clears both deadlines", asy
   await f.tick(10000);
   f.load();
   assert.equal(f.frame().sent.length, 1);
-  assert.equal(f.frame().sent[0].origin, "https://gateway.example");
+  assert.equal(f.frame().sent[0].origin, "*");
   assert.equal(f.frame().sent[0].message.type, "host:init");
   f.respond();
   await nextTick();
@@ -214,4 +214,34 @@ test("unmount removes the message listener and pending deadlines", async (t) => 
   f.respond(frame);
   await f.tick(30000);
   assert.equal(f.messages.length, 0);
+});
+
+test("cross-origin task frames are opaque and reject claimed gateway origins and sibling sources", async (t) => {
+  const f = mount(t);
+  assert.equal(f.frame().props.sandbox, "allow-scripts allow-downloads");
+  f.load();
+  f.respond(f.frame(), "page:ready", null, "https://gateway.example");
+  f.respond(f.frame(), "page:ready", null, "null", {});
+  await nextTick();
+  assert.equal(f.loading(), true);
+  assert.equal(f.messages.length, 0);
+  f.respond();
+  await nextTick();
+  assert.equal(f.loading(), false);
+  assert.equal(f.messages.length, 1);
+});
+
+test("same-origin gateways use the same opaque bridge and remain supported without warnings", async (t) => {
+  const f = mount(t);
+  f.props.gatewayUrl = "https://frontend.example";
+  f.props.page.url = "https://frontend.example/pages/sales-report/?page_token=page-token";
+  await nextTick();
+  assert.equal(f.frame().props.sandbox, "allow-scripts allow-downloads");
+  f.load();
+  assert.equal(f.frame().sent[0].origin, "*");
+  f.respond();
+  await nextTick();
+  assert.equal(f.loading(), false);
+  assert.equal(f.error(), "");
+  assert.doesNotMatch(textContent(f.root), /实时取数可能受限/);
 });

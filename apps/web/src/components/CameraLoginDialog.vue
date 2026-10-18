@@ -1,6 +1,10 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
-import { ElAlert, ElButton, ElDialog, ElForm, ElFormItem, ElInput } from "element-plus";
+import { ElAlert } from "element-plus/es/components/alert/index";
+import { ElButton } from "element-plus/es/components/button/index";
+import { ElDialog } from "element-plus/es/components/dialog/index";
+import { ElForm, ElFormItem } from "element-plus/es/components/form/index";
+import { ElInput } from "element-plus/es/components/input/index";
 import * as api from "@/api/cameras";
 import type { CameraProvider } from "@/api/cameras";
 
@@ -34,18 +38,26 @@ let captcha: CaptchaInstance | undefined;
 let timer: ReturnType<typeof setInterval> | undefined;
 let captchaLoad: Promise<void> | undefined;
 let poll: ReturnType<typeof setInterval> | undefined;
+let nativeController: AbortController | undefined;
+let lifecycle = 0;
 const HAIK_CONSOLE = "http://127.0.0.1:8787/";
 const waitingNative = ref(false);
 
 /** 兜底：滑块在本页被域名白名单拦截时，去海康自带的本地网页登录，这里轮询登录状态。 */
 function openNativeConsole() {
+  if (!open.value || props.provider !== "haik") return;
   window.open(HAIK_CONSOLE, "_blank", "noopener");
   waitingNative.value = true;
   error.value = "";
   clearInterval(poll);
+  const version = lifecycle;
   poll = setInterval(async () => {
+    if (nativeController) return;
+    const request = new AbortController();
+    nativeController = request;
     try {
-      const list = await api.listCameraAccounts(props.gatewayUrl, props.token);
+      const list = await api.listCameraAccounts(props.gatewayUrl, props.token, request.signal);
+      if (!isCurrent(version, "haik") || request.signal.aborted) return;
       if (list.find((entry) => entry.provider === "haik")?.connected) {
         clearInterval(poll);
         emit("connected");
@@ -53,6 +65,8 @@ function openNativeConsole() {
       }
     } catch {
       // 网关暂不可用时继续等待
+    } finally {
+      if (nativeController === request) nativeController = undefined;
     }
   }, 3000);
 }
@@ -64,6 +78,12 @@ function signal(): AbortSignal {
   controller?.abort();
   controller = new AbortController();
   return controller.signal;
+}
+function isCurrent(version: number, provider: CameraProvider): boolean {
+  return version === lifecycle && open.value && props.provider === provider;
+}
+function requestIsCurrent(request: AbortSignal, version: number, provider: CameraProvider): boolean {
+  return !request.aborted && controller?.signal === request && isCurrent(version, provider);
 }
 function startCooldown(seconds: number) {
   cooldown.value = seconds;
@@ -95,31 +115,34 @@ function loadCaptcha(): Promise<void> {
 }
 /** 嵌入式滑块：点「获取验证码」触发，验证通过后直接发送短信。 */
 async function mountCaptcha() {
+  const version = lifecycle;
   captcha?.destroy?.();
   captcha = undefined;
   captchaReady.value = false;
   try {
     await loadCaptcha();
     await nextTick();
-    if (!open.value || props.provider !== "haik") return;
+    if (!isCurrent(version, "haik")) return;
     (window as CaptchaWindow).initAliyunCaptcha!({
       SceneId: CAPTCHA_SCENE,
       mode: "popup",
       element: "#camera-captcha",
       button: "#camera-captcha-trigger",
       getInstance: (instance: CaptchaInstance) => {
+        if (!isCurrent(version, "haik")) { instance.destroy?.(); return; }
         captcha = instance;
         captchaReady.value = true;
       },
-      success: (param: unknown) => void sendCode(typeof param === "string" ? param : ""),
-      fail: () => (error.value = "请完成人机验证后重试"),
-      onError: () => (error.value = "人机验证暂不可用，请重试"),
+      success: (param: unknown) => { if (isCurrent(version, "haik")) void sendCode(typeof param === "string" ? param : ""); },
+      fail: () => { if (isCurrent(version, "haik")) error.value = "请完成人机验证后重试"; },
+      onError: () => { if (isCurrent(version, "haik")) error.value = "人机验证暂不可用，请重试"; },
     });
   } catch (cause) {
-    error.value = message(cause);
+    if (isCurrent(version, "haik")) error.value = message(cause);
   }
 }
 async function sendCode(param: string) {
+  if (!open.value || props.provider !== "haik" || busy.value || cooldown.value) return;
   if (!param || !/^1\d{10}$/.test(phone.value.trim())) {
     error.value = param ? "请输入 11 位手机号后再获取验证码" : "人机验证未返回有效结果，请重试";
     void mountCaptcha();
@@ -127,82 +150,112 @@ async function sendCode(param: string) {
   }
   error.value = "";
   busy.value = true;
+  const version = lifecycle;
+  const request = signal();
   try {
-    await api.haikSendCode(props.gatewayUrl, props.token, phone.value.trim(), param, signal());
+    await api.haikSendCode(props.gatewayUrl, props.token, phone.value.trim(), param, request);
+    if (!requestIsCurrent(request, version, "haik")) return;
     startCooldown(60);
   } catch (cause) {
-    error.value = message(cause);
+    if (requestIsCurrent(request, version, "haik")) error.value = message(cause);
   } finally {
-    busy.value = false;
-    void mountCaptcha(); // 验证结果只能用一次，换一个新实例
+    if (requestIsCurrent(request, version, "haik")) {
+      busy.value = false;
+      void mountCaptcha(); // 验证结果只能用一次，换一个新实例
+    }
   }
 }
 async function haikLogin() {
+  if (!open.value || props.provider !== "haik" || busy.value) return;
+  if (!/^1\d{10}$/.test(phone.value.trim())) {
+    error.value = "请输入 11 位手机号";
+    return;
+  }
   if (!/^\d{4,8}$/.test(code.value.trim())) {
     error.value = "请输入短信验证码";
     return;
   }
   busy.value = true;
   error.value = "";
+  const version = lifecycle;
+  const request = signal();
   try {
-    await api.haikLogin(props.gatewayUrl, props.token, phone.value.trim(), code.value.trim(), signal());
+    await api.haikLogin(props.gatewayUrl, props.token, phone.value.trim(), code.value.trim(), request);
+    if (!requestIsCurrent(request, version, "haik")) return;
     emit("connected");
     open.value = false;
   } catch (cause) {
-    error.value = message(cause);
+    if (requestIsCurrent(request, version, "haik")) error.value = message(cause);
   } finally {
-    busy.value = false;
+    if (requestIsCurrent(request, version, "haik")) busy.value = false;
   }
 }
 async function tyslStart() {
+  if (!open.value || props.provider !== "tysl" || busy.value) return;
   busy.value = true;
   error.value = "";
+  const version = lifecycle;
+  const request = signal();
   try {
-    const result = await api.tyslLoginStart(props.gatewayUrl, props.token, signal());
+    const result = await api.tyslLoginStart(props.gatewayUrl, props.token, request);
+    if (!requestIsCurrent(request, version, "tysl")) return;
     tyslState.value = result.state;
     tyslUrl.value = result.url;
     window.open(result.url, "_blank", "noopener");
   } catch (cause) {
-    error.value = message(cause);
+    if (requestIsCurrent(request, version, "tysl")) error.value = message(cause);
   } finally {
-    busy.value = false;
+    if (requestIsCurrent(request, version, "tysl")) busy.value = false;
   }
 }
 async function tyslComplete() {
-  if (!callbackUrl.value.trim().startsWith("https://active1-e.ctseelink.cn")) {
+  if (!open.value || props.provider !== "tysl" || busy.value) return;
+  let callback: URL | undefined;
+  try { callback = new URL(callbackUrl.value.trim()); } catch { /* Show validation below. */ }
+  if (callback?.origin !== "https://active1-e.ctseelink.cn" || callback.username || callback.password) {
     error.value = "请粘贴官方登录完成后浏览器地址栏中的完整地址（以 https://active1-e.ctseelink.cn 开头）";
     return;
   }
   busy.value = true;
   error.value = "";
+  const version = lifecycle;
+  const request = signal();
   try {
-    await api.tyslLoginComplete(props.gatewayUrl, props.token, tyslState.value, callbackUrl.value.trim(), signal());
+    await api.tyslLoginComplete(props.gatewayUrl, props.token, tyslState.value, callbackUrl.value.trim(), request);
+    if (!requestIsCurrent(request, version, "tysl")) return;
     emit("connected");
     open.value = false;
   } catch (cause) {
-    error.value = message(cause);
+    if (requestIsCurrent(request, version, "tysl")) error.value = message(cause);
   } finally {
-    busy.value = false;
+    if (requestIsCurrent(request, version, "tysl")) busy.value = false;
   }
 }
 function reset() {
+  lifecycle++;
   controller?.abort();
+  controller = undefined;
+  nativeController?.abort();
+  nativeController = undefined;
   captcha?.destroy?.();
   captcha = undefined;
   captchaReady.value = false;
   busy.value = false;
   error.value = "";
   code.value = "";
+  phone.value = "";
+  cooldown.value = 0;
   tyslState.value = "";
   tyslUrl.value = "";
   callbackUrl.value = "";
   waitingNative.value = false;
   clearInterval(poll);
+  clearInterval(timer);
 }
-watch(open, (value) => {
+watch(() => [open.value, props.provider, props.gatewayUrl, props.token], () => {
   reset();
-  if (value && props.provider === "haik") void mountCaptcha();
-});
+  if (open.value && props.provider === "haik") void mountCaptcha();
+}, { immediate: true, flush: "sync" });
 onBeforeUnmount(() => {
   reset();
   clearInterval(poll);

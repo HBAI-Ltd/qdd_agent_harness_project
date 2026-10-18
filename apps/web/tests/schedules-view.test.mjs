@@ -20,6 +20,7 @@ const apiUrl = moduleUrl(`
   export const listSkills = () => Promise.resolve([]);
   export const listConnectors = () => Promise.resolve({ connectors: [], catalog: [] });
   export const listSchedules = () => Promise.resolve([]);
+  export const listScheduleSessions = () => Promise.resolve([]);
   export const gatewayJson = () => Promise.resolve([]);
   export const createSchedule = (...args) => handlers.create(...args);
   export const updateSchedule = (...args) => handlers.update(...args);

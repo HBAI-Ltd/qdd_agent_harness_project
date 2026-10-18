@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { ElButton } from "element-plus/es/components/button/index";
 import { ElTag } from "element-plus/es/components/tag/index";
 import type { JsonValue as PageBridgePayload, PageView } from "@qdd/shared";
@@ -26,7 +26,7 @@ const bridge = createTaskPageBridge({
   getWindow: () => frame.value?.contentWindow ?? null,
   getOrigin: () => documentUrl.value ? new URL(documentUrl.value).origin : "",
   getSlug: () => props.page.slug,
-  isOpaque: () => sameOrigin.value,
+  isOpaque: () => true,
   getContext: () => props.context ?? { theme: "light", locale: "zh-CN" },
   onMessage(message) {
     if (message.type === "page:ready") {
@@ -41,16 +41,6 @@ const bridge = createTaskPageBridge({
     emit("message", message);
   },
 });
-const sameOrigin = computed(() => {
-  if (!documentUrl.value) return false;
-  return new URL(documentUrl.value).origin === window.location.origin;
-});
-// Cross-origin pages keep their gateway origin so the injected SDK and cookie work.
-// A same-origin page must stay opaque to prevent its scripts accessing the shell.
-const sandbox = computed(() => sameOrigin.value
-  ? "allow-scripts"
-  : "allow-scripts allow-same-origin");
-
 function reload() {
   clearTimeout(readyTimer);
   bridge.reset();
@@ -66,7 +56,7 @@ function reload() {
       || !pageUrl.pathname.startsWith(`/pages/${encodeURIComponent(props.page.slug)}/`)) {
       throw new Error("Invalid page URL");
     }
-    // Use the gateway URL unchanged: its page token establishes the page cookie.
+    // The gateway redirects this entry URL to its authenticated static-resource path.
     documentUrl.value = pageUrl.href;
     // A pending navigation may never emit load/error, so bound this phase too.
     readyTimer = setTimeout(() => {
@@ -141,9 +131,6 @@ watch(
     <p v-if="page.stale" class="preview-notice" role="status">
       待复核：{{ page.stale }}
     </p>
-    <p v-if="sameOrigin" class="preview-notice" role="status">
-      当前网关与前端同源，页面已隔离；实时取数可能受限。请将网关配置到独立端口，并允许此前端源嵌入。
-    </p>
     <p v-if="renderError" class="preview-error" role="alert">
       {{ renderError }}
     </p>
@@ -154,7 +141,7 @@ watch(
         :key="renderVersion"
         :src="documentUrl"
         :title="`${page.title} — 任务页面`"
-        :sandbox="sandbox"
+        sandbox="allow-scripts allow-downloads"
         referrerpolicy="no-referrer"
         @load="frameLoaded"
         @error="loadFailed"

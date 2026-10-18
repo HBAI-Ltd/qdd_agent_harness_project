@@ -1,7 +1,6 @@
-import type { JsonObject } from "@qdd/shared";
 import type { DataSources } from "../datasource/registry.js";
 import { formatDate } from "../datasource/store.js";
-import type { ChatFn, ChatMessage, LlmTool } from "./llm.js";
+import { assertCompleteResponse, parseToolArguments, type ChatFn, type ChatMessage, type LlmTool } from "./llm.js";
 
 const MAX_STEPS = 10;
 const RESULT_LIMIT = 12_000;
@@ -15,6 +14,7 @@ export async function runAsk(
   onTool: (text: string) => void,
   signal?: AbortSignal,
 ): Promise<string> {
+  signal?.throwIfAborted();
   const readOnly = sources.tools.filter((t) => !t.mutating);
   const tools: LlmTool[] = readOnly.map((t) => ({
     type: "function",
@@ -32,18 +32,28 @@ export async function runAsk(
   ];
 
   for (let step = 0; step < MAX_STEPS; step++) {
+    signal?.throwIfAborted();
     const reply = await chat(messages, tools, signal);
+    signal?.throwIfAborted();
     messages.push(reply);
-    if (!reply.tool_calls?.length) return reply.content?.trim() ?? "";
+    if (!reply.tool_calls?.length) {
+      assertCompleteResponse(reply);
+      return reply.content?.trim() ?? "";
+    }
     for (const call of reply.tool_calls) {
+      signal?.throwIfAborted();
       let output: string;
       try {
         const tool = readOnly.find((t) => t.name === call.function.name);
         if (!tool) throw new Error(`不可用的工具 ${call.function.name}`);
         onTool(call.function.name);
-        const args = call.function.arguments ? (JSON.parse(call.function.arguments) as JsonObject) : {};
-        output = JSON.stringify(await tool.call(args)).slice(0, RESULT_LIMIT);
+        const args = parseToolArguments(call, reply);
+        signal?.throwIfAborted();
+        const result = await tool.call(args);
+        signal?.throwIfAborted();
+        output = JSON.stringify(result).slice(0, RESULT_LIMIT);
       } catch (error) {
+        signal?.throwIfAborted();
         output = `错误：${(error as Error).message}`;
       }
       messages.push({ role: "tool", tool_call_id: call.id, content: output });

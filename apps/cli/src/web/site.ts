@@ -1,5 +1,7 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import type { PageEntry } from "@qdd/shared";
 import type { HarnessPaths } from "../config.js";
 import { ensureStoreData } from "../datasource/store.js";
@@ -14,11 +16,34 @@ async function writeIfMissing(file: string, content: string): Promise<void> {
   }
 }
 
+const atomicWrites = new Map<string, Promise<void>>();
+
 export async function writeAtomic(file: string, content: string): Promise<void> {
-  await mkdir(path.dirname(file), { recursive: true });
-  const tmp = `${file}.${process.pid}.tmp`;
-  await writeFile(tmp, content, "utf8");
-  await rename(tmp, file);
+  const key = path.resolve(file);
+  const next = (atomicWrites.get(key) ?? Promise.resolve()).catch(() => undefined).then(async () => {
+    await mkdir(path.dirname(file), { recursive: true });
+    const tmp = `${file}.${process.pid}.${randomUUID()}.tmp`;
+    try {
+      await writeFile(tmp, content, { encoding: "utf8", flag: "wx" });
+      // Windows readers and antivirus can briefly hold the destination open.
+      // Keep the previous file intact and retry only sharing/permission errors.
+      for (let attempt = 0; ; attempt++) {
+        try { await rename(tmp, file); break; }
+        catch (error) {
+          if (attempt >= 5 || !["EPERM", "EACCES", "EBUSY"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
+          await delay(10 * 2 ** attempt);
+        }
+      }
+    } finally {
+      await rm(tmp, { force: true });
+    }
+  });
+  atomicWrites.set(key, next);
+  try {
+    await next;
+  } finally {
+    if (atomicWrites.get(key) === next) atomicWrites.delete(key);
+  }
 }
 
 /** 初始化工作区；用户可改的文件只在缺失时生成。 */
@@ -63,16 +88,30 @@ export async function readPages(paths: HarnessPaths): Promise<PageEntry[]> {
   return raw.map((p) => ({ tools: [], useAgent: false, metrics: [], datasets: {}, version: 1, stale: null, gaps: [], sessionId: "", ...p }) as PageEntry);
 }
 
-export const writePages = (paths: HarnessPaths, pages: PageEntry[]) => writeManifest(paths, pages);
+const manifestWrites = new Map<string, Promise<void>>();
+
+/** 清单的读改写整体串行，避免不同会话发布时覆盖彼此的页面。 */
+export async function updatePages(paths: HarnessPaths, change: (pages: PageEntry[]) => PageEntry[]): Promise<void> {
+  const key = path.resolve(paths.site);
+  const next = (manifestWrites.get(key) ?? Promise.resolve()).catch(() => undefined).then(async () => {
+    await writeManifest(paths, change(await readPages(paths)));
+  });
+  manifestWrites.set(key, next);
+  try {
+    await next;
+  } finally {
+    if (manifestWrites.get(key) === next) manifestWrites.delete(key);
+  }
+}
+
+export const writePages = (paths: HarnessPaths, pages: PageEntry[]) => updatePages(paths, () => pages);
 
 async function writeManifest(paths: HarnessPaths, pages: PageEntry[]): Promise<void> {
   await writeAtomic(path.join(paths.site, "pages.json"), `${JSON.stringify(pages, null, 2)}\n`);
 }
 
 export async function upsertPage(paths: HarnessPaths, entry: PageEntry): Promise<void> {
-  const pages = (await readPages(paths)).filter((p) => p.slug !== entry.slug);
-  pages.push(entry);
-  await writeManifest(paths, pages);
+  await updatePages(paths, (pages) => [...pages.filter((page) => page.slug !== entry.slug), entry]);
 }
 
 export interface PagePin {

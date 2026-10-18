@@ -43,17 +43,15 @@ const isMobile = ref(mediaQuery.matches);
 const pendingSkillId = ref<string | null>(null);
 const composer = useComposer(workspace);
 const { draft, attachments, convertingAttachments, addAttachments, submitMessage, beginSelection, startNewDraft, clear: clearDrafts } = useConversationDrafts(
-  gatewayUrl, activeSessionId, async (text) => {
-    const attachments = composer.ready.value;
+  gatewayUrl, activeSessionId, async (text) => composer.sendWithAttachments(async (attachments) => {
     const model = composer.currentModel.value?.id;
     const sent = await workspace.sendMessage(text, {
       ...(pendingSkillId.value ? { skillId: pendingSkillId.value } : {}),
       ...(attachments.length ? { attachments } : {}),
       ...(model ? { model } : {}),
     });
-    if (sent) composer.clearAttachments(attachments);
     return sent;
-  },
+  }),
 );
 const overview = useGatewayResource("overview", getOverview, workspace);
 const pending = useGatewayResource("pending", listPending, workspace);
@@ -110,7 +108,10 @@ async function openRecords(name: string): Promise<void> {
 }
 async function editPage(slug: string): Promise<boolean> {
   const version = ++navigationVersion;
-  if (activeSessionId.value !== null || !workspace.sending.value) beginSelection();
+  if (activeSessionId.value !== null || !workspace.sending.value) {
+    beginSelection();
+    composer.beginSelection();
+  }
   if (!await workspace.revisePage(slug)) return false;
   if (version !== navigationVersion) return false;
   sidebarOpen.value = false;
@@ -122,6 +123,7 @@ async function editPage(slug: string): Promise<boolean> {
 async function newConversation() {
   pendingSkillId.value = null;
   startNewDraft();
+  composer.startNewDraft();
   workspace.startNewConversation();
   await openView("chat");
 }
@@ -135,6 +137,7 @@ async function runSkill(skill: Skill) {
 }
 async function selectConversation(id: string) {
   beginSelection();
+  composer.beginSelection();
   const selecting = workspace.selectSession(id);
   await openView("chat");
   await selecting;

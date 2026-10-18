@@ -13,14 +13,14 @@ import { ElSkeleton } from "element-plus/es/components/skeleton/index";
 import { ElSwitch } from "element-plus/es/components/switch/index";
 import { ElTag } from "element-plus/es/components/tag/index";
 import { ElTimePicker } from "element-plus/es/components/time-picker/index";
-import type { Schedule, ScheduleInput } from "@qdd/shared";
+import type { Schedule, ScheduleInput, SessionMeta } from "@qdd/shared";
 import AgentIcon from "@/components/AgentIcon.vue";
 import StringSelectOption from "@/components/StringSelectOption";
 import { useWorkspaceContext } from "@/composables/workspaceContext";
 import { useGatewayResource } from "@/composables/useGatewayResource";
 import { listConnectors } from "@/api/connectors";
 import { listSkills } from "@/api/skills";
-import { canNotify, createSchedule, deleteSchedule, listSchedules, runSchedule, scheduleCron, scheduleInput, updateSchedule, type ScheduleFrequency } from "@/api/schedules";
+import { canNotify, createSchedule, deleteSchedule, listSchedules, listScheduleSessions, runSchedule, scheduleCron, scheduleInput, updateSchedule, type ScheduleFrequency } from "@/api/schedules";
 
 const { workspace, navigation, notify } = useWorkspaceContext();
 const { connected, gatewayUrl, token, pages } = workspace;
@@ -50,6 +50,15 @@ const formError = ref("");
 const actionError = ref("");
 const rowBusy = ref<Record<string, string>>({});
 const launchedSessions = ref<Record<string, string>>({});
+const historySchedule = ref<Schedule>();
+const historyOpen = ref(false);
+const historySessions = ref<SessionMeta[]>([]);
+const historyLoading = ref(false);
+const historyError = ref("");
+let historyController: AbortController | undefined;
+const sessionStatus = {
+  idle: "执行结束", running: "正在执行", waiting: "等待确认", error: "执行失败或中断",
+} satisfies Record<SessionMeta["status"], string>;
 const controllers = new Set<AbortController>();
 let saveController: AbortController | undefined;
 let version = 0;
@@ -122,6 +131,7 @@ function connectionFeedback(): string {
   return connected.value ? "连接已恢复，编辑内容已保留，请重新保存。" : "工作空间未连接，暂时无法保存。编辑内容已保留，请恢复连接后重试。";
 }
 function resetOperations() {
+  closeHistory();
   version++;
   for (const controller of controllers) controller.abort();
   controllers.clear();
@@ -217,6 +227,41 @@ async function remove(schedule: Schedule) {
 function runSessionId(schedule: Schedule): string | undefined {
   return currentRun(schedule)?.sessionId ?? launchedSessions.value[schedule.id] ?? schedule.lastRun?.sessionId ?? undefined;
 }
+function closeHistory() {
+  historyController?.abort();
+  historyController = undefined;
+  historyOpen.value = false;
+  historyLoading.value = false;
+  historySessions.value = [];
+  historyError.value = "";
+  historySchedule.value = undefined;
+}
+async function openHistory(schedule: Schedule) {
+  closeHistory();
+  historySchedule.value = schedule;
+  historyOpen.value = true;
+  await refreshHistory();
+}
+async function refreshHistory() {
+  if (!historySchedule.value || !connected.value) return;
+  historyController?.abort();
+  const controller = new AbortController();
+  historyController = controller;
+  historyLoading.value = true;
+  historyError.value = "";
+  try {
+    const result = await listScheduleSessions(gatewayUrl.value, token.value, historySchedule.value.id, controller.signal);
+    if (!controller.signal.aborted) historySessions.value = result;
+  } catch (cause) {
+    if (!controller.signal.aborted) historyError.value = errorText(cause);
+  } finally {
+    if (historyController === controller) historyLoading.value = false;
+  }
+}
+function openHistorySession(id: string) {
+  closeHistory();
+  navigation.openSession(id);
+}
 </script>
 
 <template>
@@ -238,7 +283,7 @@ function runSessionId(schedule: Schedule): string | undefined {
             <p v-if="schedule.notify" class="job-channel">推送到：{{ connectors.find((connector) => connector.id === schedule.notify?.connectorId)?.name || "原消息接收方" }}</p>
             <div v-if="schedule.lastRun" class="last-run"><div><ElTag :type="schedule.lastRun.status === 'ok' ? 'success' : 'danger'" size="small" effect="plain">{{ schedule.lastRun.status === "ok" ? "最近执行成功" : "最近执行失败" }}</ElTag><time :datetime="schedule.lastRun.at">{{ formatTime(schedule.lastRun.at) }}</time></div><p>{{ schedule.lastRun.message }}</p><p v-if="schedule.lastRun.notified" :class="{ 'notification-error': !schedule.lastRun.notified.ok }">{{ schedule.lastRun.notified.ok ? "结果已推送" : `结果推送失败：${schedule.lastRun.notified.error || '请检查通知渠道'}` }}</p></div>
             <p v-else class="no-run">尚无完成的执行记录</p>
-            <div class="job-actions"><ElButton :loading="rowBusy[schedule.id] === 'run'" :disabled="!connected || !!rowBusy[schedule.id] || !!currentRun(schedule)" @click="run(schedule)">立即运行</ElButton><ElButton :disabled="!connected || !!rowBusy[schedule.id]" @click="openEditor(schedule)">编辑</ElButton><ElButton type="danger" link :loading="rowBusy[schedule.id] === 'delete'" :disabled="!connected || !!rowBusy[schedule.id]" @click="remove(schedule)">删除</ElButton><ElButton v-if="runSessionId(schedule)" link type="primary" @click="navigation.openSession(runSessionId(schedule)!)">查看执行对话</ElButton><ElButton v-if="schedule.slug" link type="primary" @click="navigation.openPage(schedule.slug)">打开关联页面</ElButton></div>
+            <div class="job-actions"><ElButton :loading="rowBusy[schedule.id] === 'run'" :disabled="!connected || !!rowBusy[schedule.id] || !!currentRun(schedule)" @click="run(schedule)">立即运行</ElButton><ElButton :disabled="!connected || !!rowBusy[schedule.id]" @click="openEditor(schedule)">编辑</ElButton><ElButton type="danger" link :loading="rowBusy[schedule.id] === 'delete'" :disabled="!connected || !!rowBusy[schedule.id]" @click="remove(schedule)">删除</ElButton><ElButton v-if="runSessionId(schedule)" link type="primary" @click="navigation.openSession(runSessionId(schedule)!)">查看执行对话</ElButton><ElButton link type="primary" :disabled="!connected" @click="openHistory(schedule)">历史执行对话</ElButton><ElButton v-if="schedule.slug" link type="primary" @click="navigation.openPage(schedule.slug)">打开关联页面</ElButton></div>
           </ElCard>
         </div>
         <section class="schedule-examples"><div class="section-heading"><h2>常用模板</h2><ElTag type="info" size="small" effect="plain">示例</ElTag></div><div class="template-grid"><ElCard v-for="template in templates" :key="template.name" shadow="never"><h3>{{ template.name }}</h3><span>{{ template.when }} · 网关时区</span><p>{{ template.prompt }}</p><ElButton link type="primary" :disabled="!connected" @click="openEditor(undefined, template)">使用模板<AgentIcon name="chevron" :size="14" /></ElButton></ElCard></div></section>
@@ -248,6 +293,21 @@ function runSessionId(schedule: Schedule): string | undefined {
         <div class="notification-sample"><span class="sample-label">通知示例</span><div><span class="notification-mark">钱</span><div><strong>经营日报已完成</strong><p>查看本次经营分析与需要关注的事项。</p></div></div><small>示例内容，不代表实际发送结果。</small></div>
       </aside>
     </div>
+
+    <ElDialog v-model="historyOpen" :title="`${historySchedule?.name ?? '定时任务'} · 历史执行对话`" width="min(720px, calc(100vw - 32px))" destroy-on-close @close="closeHistory">
+      <div class="section-heading"><span>仅展示该定时任务的执行对话，不影响普通对话记录。</span><ElButton :loading="historyLoading" :disabled="!connected" @click="refreshHistory">刷新历史</ElButton></div>
+      <ElAlert v-if="historyError" :title="historyError" type="error" show-icon :closable="false" />
+      <ElSkeleton v-if="historyLoading && !historySessions.length" :rows="4" animated />
+      <ElEmpty v-else-if="!historyError && !historySessions.length" description="该任务暂无执行对话" :image-size="65" />
+      <div v-else class="history-list" aria-label="历史执行对话">
+        <article v-for="session in historySessions" :key="session.id" class="history-entry">
+          <div class="section-heading"><time :datetime="session.createdAt">{{ formatTime(session.createdAt) }}</time><ElTag :type="session.status === 'error' ? 'danger' : session.status === 'waiting' ? 'warning' : 'info'" size="small" effect="plain">{{ sessionStatus[session.status] }}</ElTag></div>
+          <h3>{{ session.title }}</h3><p>{{ session.summary || "暂无结论，可打开对话查看执行过程。" }}</p>
+          <ElButton link type="primary" :disabled="!connected" @click="openHistorySession(session.id)">查看对话记录</ElButton>
+        </article>
+      </div>
+      <template #footer><ElButton @click="closeHistory">关闭</ElButton></template>
+    </ElDialog>
 
     <ElDialog v-model="editorOpen" :title="editingId ? '编辑定时任务' : '新建定时任务'" width="min(720px, calc(100vw - 32px))" destroy-on-close :close-on-click-modal="!saving" @close="closeEditor">
       <ElForm :model="form" label-position="top" :disabled="saving" @submit.prevent="save">
@@ -312,6 +372,11 @@ function runSessionId(schedule: Schedule): string | undefined {
 .section-heading h2 { display:flex; align-items:center; flex-wrap:wrap; gap:9px; margin:0; font-size:17px; }
 .timezone-note { color:var(--qdd-muted); font-size:12px; line-height:1.8; margin:0 0 18px; }
 .schedule-list { display:grid; gap:16px; }
+.history-list { display:grid; gap:12px; max-height:55vh; overflow-y:auto; }
+.history-entry { padding:16px; border:1px solid var(--qdd-border); border-radius:8px; }
+.history-entry h3 { margin:0; font-size:14px; overflow-wrap:anywhere; }
+.history-entry p { color:var(--qdd-muted); font-size:12px; line-height:1.8; white-space:pre-wrap; overflow-wrap:anywhere; }
+.history-entry time { color:var(--qdd-muted); font-size:12px; }
 .schedule-job :deep(.el-card__body) { padding:22px; }
 .job-heading { display:flex; align-items:flex-start; justify-content:space-between; flex-wrap:wrap; gap:14px; }
 .job-heading > div { min-width:0; flex:1; }

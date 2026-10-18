@@ -36,15 +36,18 @@ function hostAllowed(host: string, allowlist: string[]): boolean {
 /** 校验相对页面目录的路径，返回规范化后的路径。 */
 export function checkPath(rel: string): { path: string; violations: string[] } {
   const violations: string[] = [];
-  if (!rel || path.isAbsolute(rel) || rel.includes("\\") || rel.includes("\0")) {
+  if (!rel || path.isAbsolute(rel) || /[\\:\x00-\x1f]/.test(rel)) {
     return { path: rel, violations: ["路径必须是页面目录内的相对路径"] };
   }
   const normalized = path.posix.normalize(rel);
   if (normalized.startsWith("..") || normalized.split("/").some((seg) => seg.startsWith("."))) {
     violations.push("禁止写出页面目录或写入隐藏文件");
   }
-  if (normalized === DATA_DIR || normalized.startsWith(`${DATA_DIR}/`)) {
+  if (normalized.toLowerCase() === DATA_DIR || normalized.toLowerCase().startsWith(`${DATA_DIR}/`)) {
     violations.push("data/ 由 harness 根据数据源快照生成，请使用 snapshot_data，不得手写或篡改数据");
+  }
+  if (normalized.split("/").some((seg) => /[. ]$/.test(seg) || /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(seg))) {
+    violations.push("禁止 Windows 保留文件名或以空格、点结尾的路径");
   }
   if (!ALLOWED_EXT.has(path.posix.extname(normalized).toLowerCase())) {
     violations.push(`只允许静态文件 ${[...ALLOWED_EXT].join(" ")}（零后端）`);
@@ -72,17 +75,21 @@ export function checkFile(rel: string, content: string, cdnAllowlist: string[]):
 }
 
 /** 浏览器侧兜底：即使守卫被绕过，CSP 也会阻止页面联网与提交。 */
-export function pageCsp(cdnAllowlist: string[], frameAncestors: string[] = []): string {
+export function pageCsp(cdnAllowlist: string[], frameAncestors: string[], scope: { origin: string; slug: string }): string {
   const cdn = cdnAllowlist.map((h) => `https://${h}`).join(" ");
+  const page = `${scope.origin}/pages/${scope.slug}/`;
+  const assets = `${scope.origin}/assets/`;
   return [
-    "default-src 'self'",
-    `script-src 'self' 'unsafe-inline' ${cdn}`,
-    `style-src 'self' 'unsafe-inline' ${cdn}`,
-    `font-src 'self' data: ${cdn}`,
-    "img-src 'self' data: blob:",
-    "connect-src 'self'",
+    "default-src 'none'",
+    `script-src ${page} ${assets} ${scope.origin}/sdk/ 'unsafe-inline' ${cdn}`,
+    `style-src ${page} ${assets} 'unsafe-inline' ${cdn}`,
+    `font-src ${page} ${assets} data: ${cdn}`,
+    `img-src ${page} ${assets} data: blob:`,
+    `connect-src ${scope.origin}/api/`,
     "form-action 'none'",
-    "frame-src 'self'",
+    "frame-src 'none'",
+    "worker-src 'none'",
+    "sandbox allow-scripts allow-downloads allow-modals",
     `frame-ancestors 'self' ${frameAncestors.join(" ")}`.trim(),
     "object-src 'none'",
     "base-uri 'none'",

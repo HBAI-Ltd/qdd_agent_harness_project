@@ -41,6 +41,77 @@ export function useComposer(workspace: ReturnType<typeof useWorkspace>) {
   let contextVersion = 0;
   let modelVersion = 0;
   let disposed = false;
+  const attachmentDrafts = new Map<string, ComposerAttachment[]>();
+  const attachmentRevisions = new Map<string, number>();
+  let attachmentGeneration = 0;
+  let attachmentIntent = 0;
+  let attachmentEpoch = 0;
+  const attachmentKey = (id: string | null) => JSON.stringify(id === null ? ["draft", attachmentGeneration] : ["session", id]);
+  let currentAttachmentKey = attachmentKey(activeSessionId.value);
+  type UploadJob = { key: string; draftKey: string; epoch: number; base: string; token: string; file: File };
+  const uploadJobs = new Set<UploadJob>();
+  const fileCollections = new Set<{ draftKey: string; epoch: number; base: string; token: string }>();
+  const pendingCollections = ref(new Map<string, number>());
+  const attachmentSends = new Set<{ key: string; intent: number; epoch: number; sessionId: string | null }>();
+
+  function draftItems(key: string): ComposerAttachment[] {
+    return key === currentAttachmentKey ? attachments.value : attachmentDrafts.get(key) ?? [];
+  }
+  function setDraftItems(key: string, items: ComposerAttachment[]): void {
+    attachmentDrafts.set(key, items);
+    if (key === currentAttachmentKey) attachments.value = items;
+  }
+  function changedAttachments(key = currentAttachmentKey): void {
+    attachmentRevisions.set(key, (attachmentRevisions.get(key) ?? 0) + 1);
+  }
+  function abortUploads(message?: string): void {
+    for (const controller of controllers.values()) controller.abort();
+    controllers.clear();
+    if (message) for (const job of uploadJobs) update(job, { status: "error", error: message });
+    uploadJobs.clear();
+    fileCollections.clear();
+    pendingCollections.value.clear();
+  }
+  function resetAttachments(): void {
+    attachmentEpoch++;
+    attachmentIntent++;
+    abortUploads();
+    attachmentDrafts.clear();
+    attachmentRevisions.clear();
+    attachmentSends.clear();
+    currentAttachmentKey = attachmentKey(activeSessionId.value);
+    attachments.value = [];
+  }
+
+  watch([gatewayUrl, token], resetAttachments, { flush: "sync" });
+  watch(connected, (online) => { if (!online) abortUploads("连接已断开，请移除附件后重新上传。"); }, { flush: "sync" });
+  watch(activeSessionId, (id, previousId) => {
+    const nextKey = attachmentKey(id);
+    if (nextKey === currentAttachmentKey) return;
+    const previousKey = currentAttachmentKey;
+    attachmentDrafts.set(previousKey, attachments.value);
+    const creation = id !== null && previousId === null
+      ? [...attachmentSends].find((send) => send.key === previousKey && send.sessionId === null
+        && send.intent === attachmentIntent && send.epoch === attachmentEpoch)
+      : undefined;
+    currentAttachmentKey = nextKey;
+    if (creation) {
+      creation.key = nextKey;
+      creation.sessionId = id;
+      for (const job of uploadJobs) if (job.draftKey === previousKey) job.draftKey = nextKey;
+      for (const collection of fileCollections) if (collection.draftKey === previousKey) collection.draftKey = nextKey;
+      const pending = pendingCollections.value.get(previousKey);
+      if (pending) {
+        pendingCollections.value.set(nextKey, pending);
+        pendingCollections.value.delete(previousKey);
+      }
+      attachmentRevisions.set(nextKey, attachmentRevisions.get(previousKey) ?? 0);
+      attachmentRevisions.delete(previousKey);
+      attachmentDrafts.set(nextKey, attachmentDrafts.get(previousKey) ?? []);
+      attachmentDrafts.delete(previousKey);
+    }
+    attachments.value = attachmentDrafts.get(nextKey) ?? [];
+  }, { flush: "sync" });
 
   async function refreshModels(): Promise<void> {
     catalogController?.abort();
@@ -83,6 +154,7 @@ export function useComposer(workspace: ReturnType<typeof useWorkspace>) {
   onScopeDispose(() => {
     disposed = true;
     resetModelRequests();
+    resetAttachments();
   });
 
   const sessionModel = computed(() => {
@@ -149,65 +221,140 @@ export function useComposer(workspace: ReturnType<typeof useWorkspace>) {
     if (modelRequests.get(sessionId) === request) modelRequests.delete(sessionId);
   }
 
-  const uploading = computed(() => attachments.value.some((a) => a.status === "uploading"));
+  const uploading = computed(() => attachments.value.some((a) => a.status === "uploading")
+    || (pendingCollections.value.get(currentAttachmentKey) ?? 0) > 0);
   const ready = computed(() => attachments.value.filter((a) => a.status === "done" && a.ref).map((a) => a.ref!));
 
-  function addFiles(picked: PickedFile[]): void {
-    const room = MAX_COUNT - attachments.value.length;
+  function addFiles(picked: PickedFile[], target = {
+    draftKey: currentAttachmentKey, epoch: attachmentEpoch, base: gatewayUrl.value, token: token.value,
+  }): void {
+    if (disposed || !connected.value || target.epoch !== attachmentEpoch) return;
+    const items = [...draftItems(target.draftKey)];
+    const room = MAX_COUNT - items.length;
     if (picked.length > room) error.value = `一条消息最多 ${MAX_COUNT} 个附件，已忽略多出的 ${picked.length - Math.max(room, 0)} 个。`;
-    const queue: { item: ComposerAttachment; file: File }[] = [];
+    const queue: UploadJob[] = [];
     for (const { file, path } of picked.slice(0, Math.max(room, 0))) {
       const item: ComposerAttachment = { key: `a${++sequence}`, path, size: file.size, status: "uploading" };
       if (file.size > MAX_BYTES) Object.assign(item, { status: "error", error: "超过 50 MB" });
-      attachments.value.push(item);
-      if (item.status === "uploading") queue.push({ item, file });
+      items.push(item);
+      if (item.status === "uploading") {
+        const job: UploadJob = { key: item.key, ...target, file };
+        uploadJobs.add(job);
+        queue.push(job);
+      }
     }
+    setDraftItems(target.draftKey, items);
+    if (picked.length) changedAttachments(target.draftKey);
     const worker = async () => {
-      for (let next = queue.shift(); next; next = queue.shift()) await upload(next.item.key, next.file);
+      for (let next = queue.shift(); next; next = queue.shift()) await upload(next);
     };
     for (let i = 0; i < UPLOAD_CONCURRENCY; i++) void worker();
   }
 
-  async function upload(key: string, file: File): Promise<void> {
-    const item = attachments.value.find((a) => a.key === key);
-    if (!item) return;
-    const controller = new AbortController();
-    controllers.set(key, controller);
+  async function addFilesFrom(load: () => Promise<PickedFile[]>): Promise<void> {
+    if (disposed || !connected.value) return;
+    const target = { draftKey: currentAttachmentKey, epoch: attachmentEpoch, base: gatewayUrl.value, token: token.value };
+    fileCollections.add(target);
+    pendingCollections.value.set(target.draftKey, (pendingCollections.value.get(target.draftKey) ?? 0) + 1);
     try {
-      const ref = await api.uploadAttachment(gatewayUrl.value, token.value, file, item.path, controller.signal);
-      update(key, { status: "done", ref });
+      const files = await load();
+      if (fileCollections.has(target)) addFiles(files, target);
     } catch (cause) {
-      if (!controller.signal.aborted) update(key, { status: "error", error: cause instanceof Error ? cause.message : "上传失败" });
+      if (!disposed && target.epoch === attachmentEpoch && target.draftKey === currentAttachmentKey) {
+        error.value = cause instanceof Error ? cause.message : "读取拖放文件失败，请重新选择文件。";
+      }
     } finally {
-      controllers.delete(key);
+      if (fileCollections.delete(target)) {
+        const remaining = (pendingCollections.value.get(target.draftKey) ?? 1) - 1;
+        if (remaining > 0) pendingCollections.value.set(target.draftKey, remaining);
+        else pendingCollections.value.delete(target.draftKey);
+      }
     }
   }
 
-  function update(key: string, patch: Partial<ComposerAttachment>) {
-    const index = attachments.value.findIndex((a) => a.key === key);
-    if (index !== -1) attachments.value[index] = { ...attachments.value[index]!, ...patch };
+  async function upload(job: UploadJob): Promise<void> {
+    if (disposed || !connected.value || !uploadJobs.has(job) || job.epoch !== attachmentEpoch) return;
+    const item = draftItems(job.draftKey).find((a) => a.key === job.key);
+    if (!item) { uploadJobs.delete(job); return; }
+    const controller = new AbortController();
+    controllers.set(job.key, controller);
+    try {
+      const ref = await api.uploadAttachment(job.base, job.token, job.file, item.path, controller.signal);
+      if (!controller.signal.aborted) update(job, { status: "done", ref });
+    } catch (cause) {
+      if (!controller.signal.aborted) update(job, { status: "error", error: cause instanceof Error ? cause.message : "上传失败" });
+    } finally {
+      if (controllers.get(job.key) === controller) controllers.delete(job.key);
+      uploadJobs.delete(job);
+    }
+  }
+
+  function update(job: UploadJob, patch: Partial<ComposerAttachment>) {
+    if (disposed || job.epoch !== attachmentEpoch) return;
+    const items = draftItems(job.draftKey);
+    const index = items.findIndex((a) => a.key === job.key);
+    if (index !== -1) setDraftItems(job.draftKey, items.map((item, i) => i === index ? { ...item, ...patch } : item));
   }
 
   function removeAttachment(key: string): void {
     controllers.get(key)?.abort();
     attachments.value = attachments.value.filter((a) => a.key !== key);
+    changedAttachments();
   }
 
   /** 移除某个文件夹下的全部附件 */
   function removeFolder(folder: string): void {
     for (const a of attachments.value) if (a.path.startsWith(`${folder}/`)) controllers.get(a.key)?.abort();
     attachments.value = attachments.value.filter((a) => !a.path.startsWith(`${folder}/`));
+    changedAttachments();
   }
 
   function clearAttachments(sent?: readonly api.AttachmentRef[]): void {
     const ids = sent ? new Set(sent.map((r) => r.id)) : undefined;
     for (const a of attachments.value) if (!ids) controllers.get(a.key)?.abort();
     attachments.value = ids ? attachments.value.filter((a) => !a.ref || !ids.has(a.ref.id)) : [];
+    changedAttachments();
+  }
+
+  function beginSelection(): void { attachmentIntent++; }
+  function startNewDraft(): void {
+    attachmentDrafts.set(currentAttachmentKey, attachments.value);
+    attachmentIntent++;
+    attachmentGeneration++;
+    currentAttachmentKey = attachmentKey(null);
+    attachments.value = [];
+  }
+
+  /** Snapshot the files with the message; later edits and selections own their own draft. */
+  async function sendWithAttachments(send: (items: api.AttachmentRef[]) => Promise<boolean>): Promise<boolean> {
+    if (disposed || !connected.value || uploading.value) return false;
+    const submission = { key: currentAttachmentKey, intent: attachmentIntent, epoch: attachmentEpoch, sessionId: activeSessionId.value };
+    if ([...attachmentSends].some((entry) => entry.key === submission.key && entry.epoch === submission.epoch)) return false;
+    const sent = attachments.value.filter((item) => item.status === "done" && item.ref);
+    const keys = new Set(sent.map((item) => item.key));
+    const revision = attachmentRevisions.get(submission.key) ?? 0;
+    setDraftItems(submission.key, attachments.value.filter((item) => !keys.has(item.key)));
+    attachmentSends.add(submission);
+    function restore(): void {
+      if (disposed || submission.epoch !== attachmentEpoch || (attachmentRevisions.get(submission.key) ?? 0) !== revision) return;
+      setDraftItems(submission.key, [...sent, ...draftItems(submission.key)]);
+    }
+    try {
+      const success = await send(sent.map((item) => item.ref!));
+      if (!success) restore();
+      return success;
+    } catch (cause) {
+      restore();
+      throw cause;
+    } finally {
+      attachmentSends.delete(submission);
+    }
   }
 
   return {
     catalog, currentModel, draftModel, selectModel, modelLoading, modelError, modelChanging, refreshModels,
-    attachments, uploading, ready, addFiles, removeAttachment, removeFolder, clearAttachments,
+    attachments, uploading, ready, addFiles, addFilesFrom, removeAttachment, removeFolder, clearAttachments,
+    beginSelection, startNewDraft, sendWithAttachments,
   };
 }
 
@@ -216,7 +363,9 @@ export async function filesFromDrop(data: DataTransfer): Promise<PickedFile[]> {
   const entries = [...data.items].map((item) => item.webkitGetAsEntry?.()).filter((e): e is FileSystemEntry => !!e);
   if (!entries.length) return [...data.files].map((file) => ({ file, path: file.name }));
   const out: PickedFile[] = [];
-  const walk = async (entry: FileSystemEntry, prefix: string): Promise<void> => {
+  const walk = async (entry: FileSystemEntry, prefix: string, depth = 0): Promise<void> => {
+    if (out.length > MAX_COUNT) return;
+    if (depth > 100) throw new Error("文件夹层级过深，请选择较浅的文件夹。");
     const path = prefix ? `${prefix}/${entry.name}` : entry.name;
     if (entry.isFile) {
       const file = await new Promise<File>((resolve, reject) => (entry as FileSystemFileEntry).file(resolve, reject));
@@ -227,7 +376,10 @@ export async function filesFromDrop(data: DataTransfer): Promise<PickedFile[]> {
       for (;;) {
         const batch = await new Promise<FileSystemEntry[]>((resolve, reject) => reader.readEntries(resolve, reject));
         if (!batch.length) break;
-        for (const child of batch) await walk(child, path);
+        for (const child of batch) {
+          await walk(child, path, depth + 1);
+          if (out.length > MAX_COUNT) return;
+        }
       }
     }
   };

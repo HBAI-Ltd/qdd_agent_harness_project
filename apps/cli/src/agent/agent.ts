@@ -1,7 +1,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { cp, mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
-import type { AgentToolCall, AttachmentRef, BrowserSessionState, CapabilityGap, ClarifyAnswers, ClarifyQuestion, GapKind, JsonObject, MetricCatalog, PageEntry } from "@qdd/shared";
+import type { AgentToolCall, AttachmentRef, BrowserSessionState, CapabilityGap, ClarifyAnswers, ClarifyQuestion, JsonObject, MetricCatalog, PageEntry } from "@qdd/shared";
 import { attachmentPrompt, type AttachmentStore } from "../attachments.js";
 import type { LoadedConfig } from "../config.js";
 import type { Authorizer, DataSources, DataTool } from "../datasource/registry.js";
@@ -13,7 +13,7 @@ import { readPages, readStyle, readTheme, toScriptJson, upsertPage } from "../we
 import { BROWSER_TOOL_PARAMETERS } from "../browser/index.js";
 import type { Workbench } from "../workbench/index.js";
 import { parseSkillInput, skillInstructions } from "../workbench/skills.js";
-import { replyParts, type ChatFn, type ChatMessage, type LlmTool } from "./llm.js";
+import { assertCompleteResponse, parseToolArguments, replyParts, type ChatFn, type ChatMessage, type LlmTool } from "./llm.js";
 import { listSessionMetas, readArtifact, readSessionDigest, recall } from "./memory.js";
 import { findUnverified, NumberLedger, scopeOfArgs, summarizeResult, type Scope } from "./verify.js";
 
@@ -94,10 +94,10 @@ export interface WishResult {
   messages: ChatMessage[];
   /** 本轮结论（发布摘要或回复内容），作为会话摘要供跨会话检索。 */
   summary: string;
+  /** 由 harness 校验生成，不接受模型声明的缺口。 */
   gaps: CapabilityGap[];
 }
 
-const GAP_KINDS: GapKind[] = ["missing_data", "estimate", "unsupported", "permission"];
 const MAX_CLARIFY_ROUNDS = 3;
 
 /** 校验并规范化澄清问题。 */
@@ -122,36 +122,6 @@ function parseQuestions(raw: unknown): ClarifyQuestion[] | string {
       multiSelect: q.multiSelect === true,
       allowOther: q.allowOther !== false,
     });
-  }
-  return out;
-}
-
-const gapsSchema = {
-  type: "array",
-  description:
-    "能力缺口声明，必填（确实没有则传 []）。凡是缺数据、靠假设估测、能力不支持、未获授权的部分都必须列出，不得用编造的数字填补。",
-  items: {
-    type: "object",
-    properties: {
-      kind: { type: "string", enum: GAP_KINDS },
-      item: { type: "string", description: "涉及的需求或指标" },
-      reason: { type: "string", description: "为什么做不到 / 估测依据的假设" },
-      suggestion: { type: "string", description: "补齐需要什么：接入哪个数据源、授权等" },
-    },
-    required: ["kind", "item", "reason"],
-  },
-};
-
-/** 校验 gaps；返回错误信息或规范化后的列表。 */
-function parseGaps(raw: unknown): CapabilityGap[] | string {
-  if (!Array.isArray(raw)) return "缺少 gaps：请列出能力缺口（缺数据 / 估测 / 不支持 / 未授权），确实没有则传 []。";
-  const out: CapabilityGap[] = [];
-  for (const g of raw as Record<string, unknown>[]) {
-    const kind = g?.kind as GapKind;
-    if (!GAP_KINDS.includes(kind) || typeof g.item !== "string" || typeof g.reason !== "string" || !g.reason.trim()) {
-      return `gaps 格式错误：每项需要 kind(${GAP_KINDS.join("/")})、item、reason`;
-    }
-    out.push({ kind, item: g.item.slice(0, 200), reason: g.reason.slice(0, 500), ...(typeof g.suggestion === "string" ? { suggestion: g.suggestion.slice(0, 300) } : {}) });
   }
   return out;
 }
@@ -208,7 +178,7 @@ const HARNESS_TOOLS: LlmTool[] = [
     type: "function",
     function: {
       name: "write_file",
-      description: "写入当前页面目录下的静态文件（会经过零后端守卫审查）。",
+      description: "写入当前页面目录下的完整静态文件（会经过零后端守卫审查）。大页面拆成较小的 HTML、JS、CSS 文件，分多轮调用，避免输出达到 token 上限；同一路径会覆盖，不是追加。",
       parameters: object({ path: { type: "string", description: "相对页面目录，如 index.html" }, content: { type: "string" } }, ["path", "content"]),
     },
   },
@@ -229,7 +199,7 @@ const HARNESS_TOOLS: LlmTool[] = [
     function: {
       name: "reply",
       description: "不修改页面、只回答店长的问题，或需求无法实现时使用，结束本轮。",
-      parameters: object({ text: { type: "string" }, gaps: gapsSchema }, ["text", "gaps"]),
+      parameters: object({ text: { type: "string" } }, ["text"]),
     },
   },
   {
@@ -244,9 +214,8 @@ const HARNESS_TOOLS: LlmTool[] = [
           tools: { type: "array", items: { type: "string" }, description: "页面运行时通过 qdd.tool() 直接调用的只读数据工具" },
           useAgent: { type: "boolean", description: "页面运行时是否需要通过 qdd.ask() 调用 agent" },
           metrics: { type: "array", items: { type: "string" }, description: "页面展示的指标（口径变更时据此提示复核）" },
-          gaps: gapsSchema,
         },
-        ["title", "summary", "tools", "useAgent", "gaps"],
+        ["title", "summary", "tools", "useAgent"],
       ),
     },
   },
@@ -629,7 +598,7 @@ export async function runWish(
     if (text.length > 2000) return "错误：推送内容不超过 2000 字";
     let id = typeof args.connectorId === "string" ? args.connectorId : "";
     if (!id) {
-      if (notifiers.length !== 1) return notifiers.length ? `错误：有多个可推送的连接器，请指定 connectorId：${notifiers.map((c) => `${c.id}（${c.name}）`).join("、")}` : "错误：还没有接入可推送的消息连接器（如飞书），请在 gaps 里以 unsupported 声明并建议店长到连接器页接入。";
+      if (notifiers.length !== 1) return notifiers.length ? `错误：有多个可推送的连接器，请指定 connectorId：${notifiers.map((c) => `${c.id}（${c.name}）`).join("、")}` : "错误：还没有接入可推送的消息连接器（如飞书），请向店长说明，并建议到连接器页接入。";
       id = notifiers[0]!.id;
     }
     const target = await workbench!.connectors.describe(id).catch(() => undefined);
@@ -749,7 +718,7 @@ export async function runWish(
     if (raw === undefined || raw === null || raw === "" || raw === false) return undefined;
     if (raw === "auto" || raw === true) {
       if (notifiers.length === 1) return notifiers[0]!.id;
-      return notifiers.length ? `错误：有多个可推送的连接器，请指定 notify：${notifiers.map((c) => `${c.id}（${c.name}）`).join("、")}` : "错误：还没有接入可推送的消息连接器，不能设置推送；请在 gaps 里以 unsupported 声明并建议店长到连接器页接入飞书。";
+      return notifiers.length ? `错误：有多个可推送的连接器，请指定 notify：${notifiers.map((c) => `${c.id}（${c.name}）`).join("、")}` : "错误：还没有接入可推送的消息连接器，不能设置推送；请向店长说明，并建议到连接器页接入飞书。";
     }
     const id = String(raw);
     return notifiers.some((c) => c.id === id) ? id : `错误：连接器 ${id} 不存在或不能推送`;
@@ -791,8 +760,7 @@ export async function runWish(
   async function finish(args: JsonObject): Promise<WishResult | string> {
     const files = [...new Set([...existing, ...staged.keys()])];
     if (!files.includes("index.html")) return "错误：缺少入口 index.html";
-    const gaps = parseGaps(args.gaps);
-    if (typeof gaps === "string") return gaps;
+    const gaps: CapabilityGap[] = [];
     const problems: string[] = [];
     const declared = Array.isArray(args.tools) ? [...new Set(args.tools.map(String))] : [];
     const used = await referencedTools(files);
@@ -892,8 +860,7 @@ export async function runWish(
       case "finish":
         return finish(args);
       case "reply": {
-        const gaps = parseGaps(args.gaps);
-        if (typeof gaps === "string") return gaps;
+        const gaps: CapabilityGap[] = [];
         const text = String(args.text ?? "");
         const unverified = verifyText(text, gaps);
         if (unverified) return unverified;
@@ -903,11 +870,11 @@ export async function runWish(
       case "clarify": {
         const questions = parseQuestions(args.questions);
         if (typeof questions === "string") return `错误：${questions}`;
-        if (!hooks.clarify || config.llm.clarify === "off") return "当前为无人值守模式，无法提问：请按推荐项继续，并在页面口径说明与 gaps 中写明所做的假设。";
+        if (!hooks.clarify || config.llm.clarify === "off") return "当前为无人值守模式，无法提问：请按推荐项继续，并在页面口径说明或回复中写明所做的假设。";
         if (++clarifyRounds > MAX_CLARIFY_ROUNDS) return `已提问 ${MAX_CLARIFY_ROUNDS} 轮，请按已知信息与推荐项继续，并写明假设。`;
         const answers = await hooks.clarify(questions);
         if (answers) ledger.addText(Object.values(answers).flat().join(" "));
-        if (!answers) return "店长未回答：请按推荐项继续，并在页面口径说明与 gaps 中写明所做的假设。";
+        if (!answers) return "店长未回答：请按推荐项继续，并在页面口径说明或回复中写明所做的假设。";
         return questions
           .map((q) => `【${q.header}】${q.question}\n→ ${(answers[q.id] ?? []).join("、") || "（未选择，按推荐项）"}`)
           .join("\n");
@@ -1000,7 +967,7 @@ export async function runWish(
         sameResults.set(target, { digest, count: repeats });
         if (repeats >= SAME_RESULT_LIMIT) {
           hooks.onEvent({ kind: "warn", text: `${name} 连续 ${repeats} 次换参数结果不变，已拦截` });
-          return `重复调用：你已连续 ${repeats} 次修改参数调用 ${name}${typeof args.dataset === "string" ? `（${args.dataset}）` : ""}，结果完全相同，继续调参不会改变结果。请停止在这个方向上调参：检查指标/字段是否适用于该数据集（store__list_datasets、store__list_metrics），换用其它数据或工具；确实没有数据就在 gaps 里声明，然后推进（clarify / snapshot_data / write_file / finish）。`;
+          return `重复调用：你已连续 ${repeats} 次修改参数调用 ${name}${typeof args.dataset === "string" ? `（${args.dataset}）` : ""}，结果完全相同，继续调参不会改变结果。请停止在这个方向上调参：检查指标/字段是否适用于该数据集（store__list_datasets、store__list_metrics），换用其它数据或工具；确实没有数据就在页面或回复中说明，然后推进（clarify / snapshot_data / write_file / finish）。`;
         }
         return summarizeResult(result, EXPLORE_LIMIT);
       }
@@ -1047,7 +1014,7 @@ export async function runWish(
       else {
         const tool: AgentToolCall = { id: part.id, name: part.function.name, status: "running" };
         try {
-          if (part.function.arguments) tool.args = JSON.parse(part.function.arguments) as JsonObject;
+          tool.args = parseToolArguments(part, reply);
         } catch {
           // 参数不是合法 JSON，执行时会报错
         }
@@ -1057,6 +1024,7 @@ export async function runWish(
     });
 
     if (!reply.tool_calls?.length) {
+      assertCompleteResponse(reply);
       if (++idle > 2) throw new WishError("agent 未调用 finish 就停止了", conversation());
       messages.push({ role: "user", content: "请继续使用工具完成页面，完成后必须调用 finish。" });
       continue;
@@ -1072,7 +1040,7 @@ export async function runWish(
       activeTool = block;
       let failed = false;
       try {
-        const args = call.function.arguments ? (JSON.parse(call.function.arguments) as JsonObject) : {};
+        const args = parseToolArguments(call, reply);
         const result = await dispatch(call.function.name, args);
         hooks.signal?.throwIfAborted();
         if (typeof result === "string") output = result;

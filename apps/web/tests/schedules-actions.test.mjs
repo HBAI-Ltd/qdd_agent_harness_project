@@ -21,6 +21,7 @@ const apiUrl = moduleUrl(`
   export const listSkills = () => Promise.resolve([]);
   export const listConnectors = () => Promise.resolve([]);
   export const listSchedules = () => Promise.resolve([]);
+  export const listScheduleSessions = (...args) => handlers.history(...args);
   export const createSchedule = (...args) => handlers.create(...args);
   export const updateSchedule = (...args) => handlers.update(...args);
   export const deleteSchedule = (...args) => handlers.remove(...args);
@@ -122,7 +123,7 @@ const renderer = createRenderer({
 });
 async function mount({ schedules = [schedule()], sessions = [] } = {}) {
   const root = { children: [] };
-  const calls = { create: [], update: [], remove: [], run: [], sessions: [], pages: [], notices: [], refresh: 0 };
+  const calls = { create: [], update: [], remove: [], run: [], history: [], sessions: [], pages: [], notices: [], refresh: 0 };
   const resources = {
     schedules: { data: ref(schedules), loading: ref(false), error: ref(""), async refresh() { calls.refresh++; } },
     skills: { data: ref([]), loading: ref(false), error: ref(""), async refresh() {} },
@@ -134,6 +135,7 @@ async function mount({ schedules = [schedule()], sessions = [] } = {}) {
   };
   const navigation = { openSession(id) { calls.sessions.push(id); }, openPage(slug) { calls.pages.push(slug); }, openView() {} };
   const api = {
+    async history(base, token, id, signal) { calls.history.push({ base, token, id, signal }); return []; },
     async create(base, token, input, signal) { calls.create.push({ base, token, input, signal }); return schedule(input); },
     async update(base, token, id, input, signal) { calls.update.push({ base, token, id, input, signal }); return schedule(input); },
     async remove(base, token, id, signal) { calls.remove.push({ base, token, id, signal }); },
@@ -163,6 +165,73 @@ async function click(root, label) {
 async function input(node, value) { node.props.onInput({ target: { value } }); await nextTick(); }
 async function select(node, value) { node.props.onChange({ target: { value } }); await nextTick(); }
 afterEach(() => { for (const app of mounted.splice(0)) app.unmount(); });
+
+test("history opens earlier execution conversations without adding them to normal history", async () => {
+  const { root, api, calls, workspace } = await mount();
+  api.history = async (base, token, id, signal) => {
+    calls.history.push({ base, token, id, signal });
+    return [
+      { id: "new-run", title: "今天日报", summary: "等待批准", status: "waiting", createdAt: at },
+      { id: "old-run", title: "昨日日报", summary: "昨日执行失败", status: "error", createdAt: "2026-10-16T03:00:00Z" },
+    ];
+  };
+  await click(root, "历史执行对话");
+  assert.equal(calls.history[0].id, "daily");
+  assert.equal(calls.history[0].token, "fixture-token");
+  assert.ok(calls.history[0].signal instanceof AbortSignal);
+  assert.match(textContent(root), /等待确认/);
+  assert.match(textContent(root), /昨日执行失败/);
+  const links = findAll(root, (node) => node.tag === "button" && textContent(node) === "查看对话记录");
+  await links[1].props.onClick();
+  await nextTick();
+  assert.deepEqual(calls.sessions, ["old-run"]);
+  assert.deepEqual(workspace.sessions.value, []);
+  assert.equal(button(root, "刷新历史"), undefined);
+});
+
+test("history supports empty state, error and retry", async () => {
+  const { root, api } = await mount();
+  await click(root, "历史执行对话");
+  assert.match(textContent(root), /该任务暂无执行对话/);
+  api.history = async () => { throw new Error("读取历史失败"); };
+  await click(root, "刷新历史");
+  assert.match(textContent(root), /读取历史失败/);
+  assert.doesNotMatch(textContent(root), /该任务暂无执行对话/);
+  api.history = async () => [];
+  await click(root, "刷新历史");
+  assert.doesNotMatch(textContent(root), /读取历史失败/);
+  assert.match(textContent(root), /该任务暂无执行对话/);
+});
+
+test("switching tasks and connection changes abort history and ignore late responses", async () => {
+  const { root, api, workspace, resources, calls } = await mount();
+  let resolve;
+  let signal;
+  api.history = (...args) => { signal = args[3]; return new Promise((done) => { resolve = done; }); };
+  const pending = button(root, "历史执行对话").props.onClick();
+  await nextTick();
+  await click(root, "关闭");
+  assert.equal(signal.aborted, true);
+  resources.schedules.data.value = [schedule({ id: "other", name: "另一个任务" })];
+  await nextTick();
+  api.history = async (_base, _token, id) => { calls.history.push(id); return []; };
+  await click(root, "历史执行对话");
+  resolve([{ id: "stale", title: "过期响应", status: "idle", createdAt: at }]);
+  await pending;
+  await nextTick();
+  assert.deepEqual(calls.history, ["other"]);
+  assert.doesNotMatch(textContent(root), /过期响应/);
+  const pendingAgain = button(root, "刷新历史");
+  api.history = (...args) => { signal = args[3]; return new Promise((done) => { resolve = done; }); };
+  const refreshing = pendingAgain.props.onClick();
+  await nextTick();
+  workspace.token.value = "different-token";
+  await nextTick();
+  assert.equal(signal.aborted, true);
+  resolve([]);
+  await refreshing;
+  assert.equal(button(root, "刷新历史"), undefined);
+});
 
 test("pause and enable submit partial updates, then refresh and show the actual outcome", async () => {
   const { root, resources, calls } = await mount();

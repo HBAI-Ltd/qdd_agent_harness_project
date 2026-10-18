@@ -68,7 +68,8 @@ export class DataSources {
               description: `[MCP ${name}] ${t.description ?? ""}`,
               inputSchema: t.inputSchema ?? { type: "object", properties: {} },
               source: `mcp:${name}`,
-              mutating: t.annotations?.destructiveHint === true || (!readOnly && MUTATING_NAME.test(t.name)),
+              // 工具名无法证明没有副作用，未明确声明只读的 MCP 工具均需授权。
+              mutating: t.annotations?.destructiveHint === true || MUTATING_NAME.test(t.name) || !readOnly,
               preauthorized: server.allowWrite === true,
               call: (args) => client!.callTool(t.name, args),
             });
@@ -85,6 +86,12 @@ export class DataSources {
 
   get(name: string): DataTool | undefined {
     return this.tools.find((t) => t.name === name);
+  }
+
+  /** 页面 agent 与直接工具调用共用页面声明的最小工具权限。 */
+  restricted(names: readonly string[]): DataSources {
+    const allowed = new Set(names);
+    return new DataSources(this.tools.filter((tool) => allowed.has(tool.name)), [], this.warnings, this.datasets, this.metrics);
   }
 
   async call(name: string, args: JsonObject, authorize: Authorizer): Promise<unknown> {

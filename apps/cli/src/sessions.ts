@@ -79,6 +79,15 @@ export class SessionHub {
     return metas.filter((m): m is SessionMeta => !!m && m.origin?.kind !== "schedule").sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   }
 
+  async listScheduleSessions(scheduleId: string): Promise<SessionMeta[]> {
+    const directories = [this.loaded.paths.sessions, this.loaded.paths.scheduleSessions];
+    const names = await Promise.all(directories.map((directory) => readdir(directory)));
+    const ids = new Set(names.flat().filter((name) => name.endsWith(".meta.json")).map((name) => name.slice(0, -".meta.json".length)));
+    const metas = await Promise.all([...ids].map((id) => this.meta(id)));
+    return metas.filter((meta) => meta.origin?.kind === "schedule" && meta.origin.scheduleId === scheduleId)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id));
+  }
+
   async meta(id: string): Promise<SessionMeta> {
     try {
       if (!ID_RE.test(id)) throw new NotFound("会话不存在");
@@ -253,25 +262,51 @@ export class SessionHub {
   }
 
   private async start(meta: SessionMeta, text: string, attachments: AttachmentRef[], skillId?: string, input: Partial<ChatSelection> = {}): Promise<void> {
+    if (this.running.has(meta.id)) throw new Conflict("会话正在运行，请等待完成");
     const selection = resolveChatSelection(this.loaded.config.llm, input, meta);
     const chat = this.chat({ ...resolveModel(this.loaded.config.llm, selection.model), reasoningEffort: selection.reasoningEffort }); // 缺少 API key 时在这里同步报错
+    let interrupted: SessionMeta | undefined;
     if (meta.slug) {
       const holder = this.editing.get(meta.slug);
-      if (holder && holder !== meta.id) throw new Conflict(`页面 ${meta.slug} 正在被会话 ${holder} 修改`);
+      if (holder && holder !== meta.id) {
+        const active = this.activeMetas.get(holder);
+        if (!this.unattended.has(meta.id) && this.unattended.has(holder) && active?.origin?.kind === "schedule") interrupted = active;
+        else throw new Conflict(`页面 ${meta.slug} 正在被会话 ${holder} 修改`);
+      }
+      // 先预留给手动修改；旧任务退出时只能释放自己仍持有的锁。
       this.editing.set(meta.slug, meta.id);
     }
     const controller = new AbortController();
     this.running.set(meta.id, controller);
     this.activeMetas.set(meta.id, meta);
     Object.assign(meta, selection);
-    await this.emit(meta.id, { type: "user", text, ...(attachments.length ? { attachments } : {}) });
-    await this.setStatus(meta, "running");
-    void this.run(meta, text, attachments, chat, controller, skillId);
+    try {
+      await this.emit(meta.id, { type: "user", text, ...(attachments.length ? { attachments } : {}) });
+      await this.setStatus(meta, "running");
+    } catch (error) {
+      this.running.delete(meta.id);
+      this.activeMetas.delete(meta.id);
+      if (meta.slug && this.editing.get(meta.slug) === meta.id) {
+        if (interrupted && this.running.has(interrupted.id)) this.editing.set(meta.slug, interrupted.id);
+        else this.editing.delete(meta.slug);
+      }
+      throw error;
+    }
+    void this.run(meta, text, attachments, chat, controller, skillId, interrupted);
   }
 
-  private async run(meta: SessionMeta, text: string, attachments: AttachmentRef[], chat: ChatFn, controller: AbortController, skillId?: string): Promise<void> {
+  private async run(meta: SessionMeta, text: string, attachments: AttachmentRef[], chat: ChatFn, controller: AbortController, skillId?: string, interrupted?: SessionMeta): Promise<void> {
     const id = meta.id;
     try {
+      if (interrupted) {
+        this.cancel(interrupted.id);
+        try {
+          await this.emit(id, { type: "say", text: `正在停止定时任务「${interrupted.origin?.scheduleName ?? interrupted.title}」的本次执行，退出后继续修改页面；后续仍按原计划运行。` });
+        } finally {
+          await this.wait(interrupted.id);
+        }
+      }
+      controller.signal.throwIfAborted();
       let history: ChatMessage[] = [];
       try {
         history = JSON.parse(await readFile(this.file(id, "messages.json"), "utf8")) as ChatMessage[];

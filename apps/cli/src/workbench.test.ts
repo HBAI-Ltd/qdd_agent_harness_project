@@ -280,6 +280,11 @@ describe("workbench gateway", () => {
     await until(async () => (feishu.messages.at(-1)!.text === "【临期预警】补跑完成" ? true : undefined));
     const after = (await (await api(`/api/schedules/${schedule.id}`)).json()) as Schedule;
     assert.ok(new Date(after.nextRunAt!) > new Date());
+    const history = (await (await api(`/api/schedules/${schedule.id}/sessions`)).json()) as SessionMeta[];
+    assert.equal(history.length, 2);
+    assert.equal(history[0]!.id, after.lastRun!.sessionId);
+    assert.equal(history[1]!.id, sessionId);
+    assert.ok(history.every((entry) => entry.origin?.scheduleId === schedule.id));
 
     const off = (await (await post(`/api/schedules/${schedule.id}`, { enabled: false }, "PUT")).json()) as Schedule;
     assert.equal(off.nextRunAt, null);
@@ -287,7 +292,7 @@ describe("workbench gateway", () => {
     assert.equal(overview.schedules.total, 1);
     assert.equal(overview.schedules.enabled, 0);
     assert.equal(overview.skills.total, 1);
-    assert.equal(overview.connectors.connected, 2);
+    assert.equal(overview.connectors.connected, 1); // The app connector was explicitly deleted above.
     assert.equal((await api(`/api/schedules/${schedule.id}`, { method: "DELETE" })).status, 200);
   });
 

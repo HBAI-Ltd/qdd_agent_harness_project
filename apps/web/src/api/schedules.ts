@@ -1,4 +1,4 @@
-import type { ConnectorView, Schedule, ScheduleInput } from "@qdd/shared";
+import type { ConnectorView, Schedule, ScheduleInput, SessionMeta } from "@qdd/shared";
 import { gatewayJson } from "./workspace";
 
 export function listSchedules(base: string, token: string, signal?: AbortSignal): Promise<Schedule[]> {
@@ -6,6 +6,9 @@ export function listSchedules(base: string, token: string, signal?: AbortSignal)
 }
 export function getSchedule(base: string, token: string, id: string, signal?: AbortSignal): Promise<Schedule> {
   return gatewayJson(base, token, `/api/schedules/${encodeURIComponent(id)}`, { signal: signal ?? null });
+}
+export function listScheduleSessions(base: string, token: string, id: string, signal?: AbortSignal): Promise<SessionMeta[]> {
+  return gatewayJson(base, token, `/api/schedules/${encodeURIComponent(id)}/sessions`, { signal: signal ?? null });
 }
 export function createSchedule(base: string, token: string, input: ScheduleInput, signal?: AbortSignal): Promise<Schedule> {
   return gatewayJson(base, token, "/api/schedules", { method: "POST", body: JSON.stringify(input), signal: signal ?? null });

@@ -38,11 +38,13 @@ const activeQuery = computed({
 const sourceFilter = ref<"all" | Skill["source"]>("all");
 const sourceFilters = [
   { value: "all", label: "全部" },
+  { value: "builtin", label: "内置技能" },
   { value: "user", label: "我创建的" },
   { value: "agent", label: "对话提炼" },
 ] as const;
 const sourceCounts = computed(() => ({
   all: skills.value.length,
+  builtin: skills.value.filter((skill) => skill.source === "builtin").length,
   user: skills.value.filter((skill) => skill.source === "user").length,
   agent: skills.value.filter((skill) => skill.source === "agent").length,
 }));
@@ -356,7 +358,7 @@ async function run(skill: Skill) {
               </span>
               <span class="skill-card-description">{{ skill.description || "打开查看具体做事步骤" }}</span>
               <span class="skill-card-meta">
-                <span>{{ skill.source === "agent" ? "对话提炼" : "我创建的" }}</span>
+                <span>{{ skill.source === "builtin" ? "内置 · 默认已加载" : skill.source === "agent" ? "对话提炼" : "我创建的" }}</span>
                 <span>{{ skill.steps.length }} 个步骤</span>
               </span>
             </button>
@@ -369,11 +371,11 @@ async function run(skill: Skill) {
         <article v-if="selectedSkill" id="skill-detail" class="skill-detail" aria-labelledby="skill-detail-title">
           <div class="skill-detail-heading">
             <div class="detail-title">
-              <span class="detail-eyebrow"><AgentIcon name="spark" :size="14" />{{ selectedSkill.source === "agent" ? "来自助手对话" : "我的技能" }}</span>
+              <span class="detail-eyebrow"><AgentIcon name="spark" :size="14" />{{ selectedSkill.source === "builtin" ? "内置技能 · 默认已加载" : selectedSkill.source === "agent" ? "来自助手对话" : "我的技能" }}</span>
               <h2 id="skill-detail-title">{{ selectedSkill.name }}</h2>
             </div>
             <div class="detail-actions">
-              <ElButton :disabled="!connected || !!busyId || !!runningId" @click="openEditor(selectedSkill)"><AgentIcon name="edit" :size="15" />编辑</ElButton>
+              <ElButton v-if="selectedSkill.source !== 'builtin'" :disabled="!connected || !!busyId || !!runningId" @click="openEditor(selectedSkill)"><AgentIcon name="edit" :size="15" />编辑</ElButton>
               <ElButton type="primary" :loading="runningId === selectedSkill.id" :disabled="!connected || !!runningId || !!busyId" @click="run(selectedSkill)">
                 <AgentIcon name="arrow" :size="15" />运行技能
               </ElButton>
@@ -399,10 +401,14 @@ async function run(skill: Skill) {
             <div class="detail-section-heading"><h3 id="skill-tools-title">使用的工具</h3></div>
             <div class="skill-tool-tags"><ElTag v-for="name in selectedSkill.tools" :key="name" type="info" effect="plain" :title="name">{{ toolLabel(name) }}</ElTag></div>
           </section>
+          <section v-if="selectedSkill.instructions" class="detail-section">
+            <details><summary>查看完整操作说明</summary><pre class="skill-full-instructions">{{ selectedSkill.instructions }}</pre></details>
+          </section>
+          <div v-if="selectedSkill.source === 'builtin'" class="skill-run-note"><AgentIcon name="spark" :size="17" /><p>完整说明已默认加载到对话中。提出 Android 或小红书任务即可使用；设备连接与实际可用工具以当前工作空间为准。</p></div>
           <div class="skill-run-note"><AgentIcon name="chat" :size="17" /><p>运行后会打开新对话，你可以继续补充要求、查看执行进度和结果。</p></div>
           <footer class="skill-detail-footer">
             <ElButton v-if="selectedSkill.sessionId" link type="primary" @click="navigation.openSession(selectedSkill.sessionId)"><AgentIcon name="chat" :size="14" />查看来源对话</ElButton>
-            <ElButton class="delete-skill" link type="danger" :loading="busyId === selectedSkill.id" :disabled="!connected || !!busyId || !!runningId" @click="remove(selectedSkill)"><AgentIcon name="trash" :size="14" />删除技能</ElButton>
+            <ElButton v-if="selectedSkill.source !== 'builtin'" class="delete-skill" link type="danger" :loading="busyId === selectedSkill.id" :disabled="!connected || !!busyId || !!runningId" @click="remove(selectedSkill)"><AgentIcon name="trash" :size="14" />删除技能</ElButton>
           </footer>
         </article>
       </div>
@@ -556,6 +562,7 @@ async function run(skill: Skill) {
 .detail-section-heading h3 { margin:0; color:var(--qdd-text); font-size:14px; font-weight:600; }
 .detail-section-heading > span { color:var(--qdd-muted); font-size:11px; }
 .skill-instructions { list-style:none; margin:0; padding:0; }
+.skill-full-instructions { white-space:pre-wrap; overflow-wrap:anywhere; font:inherit; line-height:1.8; }
 .skill-instructions li { display:flex; align-items:flex-start; gap:14px; position:relative; padding-bottom:22px; }
 .skill-instructions li:last-child { padding-bottom:0; }
 .skill-instructions li:not(:last-child)::after { content:""; position:absolute; left:15px; top:38px; bottom:6px; width:1px; background:var(--qdd-border); }

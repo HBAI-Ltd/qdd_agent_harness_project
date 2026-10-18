@@ -223,8 +223,9 @@ describe("workbench gateway", () => {
     await idle(session.id);
     assert.deepEqual(await (await api("/api/pending")).json(), []);
     const skills = (await (await api("/api/skills")).json()) as Skill[];
-    assert.equal(skills.length, 1);
-    assert.equal(skills[0]!.source, "agent");
+    assert.equal(skills.length, 3);
+    assert.equal(skills.find((s) => s.name === "临期预警")!.source, "agent");
+    assert.deepEqual(skills.filter((s) => s.source === "builtin").map((s) => s.name).sort(), ["android-operator", "xiaohongshu-hid-control"]);
     const detail = (await (await api(`/api/sessions/${session.id}`)).json()) as { events: { type: string; action?: string }[] };
     assert.ok(detail.events.some((e) => e.type === "skill" && e.action === "saved"));
 
@@ -296,7 +297,7 @@ describe("workbench gateway", () => {
     const overview = (await (await api("/api/overview")).json()) as Overview;
     assert.equal(overview.schedules.total, 1);
     assert.equal(overview.schedules.enabled, 0);
-    assert.equal(overview.skills.total, 1);
+    assert.equal(overview.skills.total, 3);
     assert.equal(overview.connectors.connected, 1); // The app connector was explicitly deleted above.
     assert.equal((await api(`/api/schedules/${schedule.id}`, { method: "DELETE" })).status, 200);
   });

@@ -203,6 +203,20 @@ test("loading, initial failure and disconnect each have actionable states instea
   assert.equal(button(root, "使用模板").props.disabled, true);
 });
 
+test("builtin skills show their full instructions and loaded state without edit or delete actions", async () => {
+  const builtin = skill("builtin", "android-operator", { source: "builtin", instructions: "完整规程：先定位，再截图确认与校准。" });
+  const { root, calls } = await mount({ skills: [builtin, ...fixtures] });
+  await click(root, "查看技能：android-operator");
+  assert.match(textContent(root), /内置技能 · 默认已加载/);
+  assert.match(textContent(root), /完整规程：先定位，再截图确认与校准/);
+  assert.equal(findAll(root, (node) => node.tag === "button" && textContent(node) === "编辑").length, 0);
+  assert.equal(findAll(root, (node) => node.tag === "button" && textContent(node) === "删除技能").length, 0);
+  await click(root, "内置技能1");
+  assert.equal(findAll(root, hasClass("skill-select")).length, 1);
+  await click(root, "运行技能");
+  assert.equal(calls.run[0].id, "builtin");
+});
+
 test("template customization sends reordered steps and selects the saved skill", async () => {
   const { root, calls } = await mount({ skills: [] });
   await click(root, "挑选技能模板");

@@ -63,51 +63,101 @@ static void test_list(void) {
 
 static void test_short_press_menu_navigation(void) {
     qdd_setup_model_t model = {0}; qdd_setup_menu(&model);
-    assert(model.page == QDD_SETUP_MENU && model.selection == 0);
-    assert(qdd_setup_key(&model, QDD_SETUP_UP, 0, false) == QDD_SETUP_NONE && model.selection == 5);
+    assert(model.page == QDD_SETUP_MENU && model.selection == QDD_SETUP_MENU_DOWNLOAD);
+    assert(qdd_setup_key(&model, QDD_SETUP_UP, 0, false) == QDD_SETUP_NONE && model.selection == QDD_SETUP_MENU_EXIT);
     assert(key(&model, QDD_SETUP_OK) == QDD_SETUP_EXIT && model.page == QDD_SETUP_HOME);
     qdd_setup_menu(&model);
+    assert(key(&model, QDD_SETUP_OK) == QDD_SETUP_NONE && model.page == QDD_SETUP_DOWNLOAD);
+    key(&model, QDD_SETUP_OK); assert(model.page == QDD_SETUP_MENU && model.selection == QDD_SETUP_MENU_DOWNLOAD);
+    key(&model, QDD_SETUP_DOWN); assert(model.selection == QDD_SETUP_MENU_WIFI);
     assert(key(&model, QDD_SETUP_OK) == QDD_SETUP_SCAN && model.page == QDD_SETUP_LIST);
     for (unsigned i = 0; i < 4; i++) key(&model, QDD_SETUP_DOWN);
     assert(key(&model, QDD_SETUP_OK) == QDD_SETUP_NONE && model.page == QDD_SETUP_MENU);
-    key(&model, QDD_SETUP_DOWN);
+    assert(model.selection == QDD_SETUP_MENU_DOWNLOAD);
+    for (unsigned i = 0; i < QDD_SETUP_MENU_PAIR; i++) key(&model, QDD_SETUP_DOWN);
     assert(key(&model, QDD_SETUP_OK) == QDD_SETUP_PAIR_PHONE && model.page == QDD_SETUP_PAIR);
     assert(key(&model, QDD_SETUP_OK) == QDD_SETUP_PAIR_PHONE);
     key(&model, QDD_SETUP_DOWN); key(&model, QDD_SETUP_OK);
-    assert(model.page == QDD_SETUP_MENU && model.selection == 1);
+    assert(model.page == QDD_SETUP_MENU && model.selection == QDD_SETUP_MENU_PAIR);
     key(&model, QDD_SETUP_DOWN); key(&model, QDD_SETUP_OK);
     assert(model.page == QDD_SETUP_HELP);
-    key(&model, QDD_SETUP_OK); assert(model.page == QDD_SETUP_MENU && model.selection == 2);
-    key(&model, QDD_SETUP_DOWN); key(&model, QDD_SETUP_DOWN); key(&model, QDD_SETUP_DOWN);
+    key(&model, QDD_SETUP_OK); assert(model.page == QDD_SETUP_MENU && model.selection == QDD_SETUP_MENU_HELP);
+    key(&model, QDD_SETUP_DOWN); key(&model, QDD_SETUP_DOWN);
     assert(key(&model, QDD_SETUP_OK) == QDD_SETUP_EXIT);
     select_network(&model, false); qdd_setup_error(&model, "连接失败，请重试");
     key(&model, QDD_SETUP_DOWN); key(&model, QDD_SETUP_OK);
     assert(model.page == QDD_SETUP_LIST); password_is_clear(&model);
 }
 
-static void test_settings_download_is_display_only(void) {
+static void test_settings_paging_and_all_return_routes(void) {
     qdd_setup_model_t model = {0}; qdd_setup_menu(&model);
-    for (unsigned i = 0; i < 4; i++) assert(key(&model, QDD_SETUP_DOWN) == QDD_SETUP_NONE);
-    assert(model.selection == 4);
+    for (unsigned i = 0; i < QDD_SETUP_MENU_ITEMS; i++) {
+        assert(model.page == QDD_SETUP_MENU && model.selection == i);
+        assert(key(&model, QDD_SETUP_DOWN) == QDD_SETUP_NONE);
+    }
+    assert(model.selection == QDD_SETUP_MENU_DOWNLOAD);
+    for (unsigned i = QDD_SETUP_MENU_ITEMS; i > 0; i--) {
+        assert(key(&model, QDD_SETUP_UP) == QDD_SETUP_NONE);
+        assert(model.page == QDD_SETUP_MENU && model.selection == i - 1);
+    }
+    // Crossing the four-row boundary only moves focus; it cannot reset data.
+    model.selection = QDD_SETUP_MENU_PAIR;
     strcpy(model.credentials.ssid, "Staged network");
     assert(qdd_setup_append(&model, "staged password"));
-    const qdd_wifi_credentials_t credentials = model.credentials;
-    // This settings item must only show the download page, never exit, scan,
-    // pair, save credentials or reset the controller.
-    assert(key(&model, QDD_SETUP_OK) == QDD_SETUP_NONE);
-    assert(model.page == QDD_SETUP_DOWNLOAD && model.selection == 0);
-    for (unsigned i = 0; i < 8; i++) {
-        assert(key(&model, i % 2 ? QDD_SETUP_UP : QDD_SETUP_DOWN) == QDD_SETUP_NONE);
-        assert(model.page == QDD_SETUP_DOWNLOAD && model.selection == 0);
+    const qdd_wifi_credentials_t boundary_credentials = model.credentials;
+    assert(key(&model, QDD_SETUP_DOWN) == QDD_SETUP_NONE && model.selection == QDD_SETUP_MENU_HELP);
+    assert(key(&model, QDD_SETUP_UP) == QDD_SETUP_NONE && model.selection == QDD_SETUP_MENU_PAIR);
+    assert(model.page == QDD_SETUP_MENU);
+    assert(memcmp(&boundary_credentials, &model.credentials, sizeof(boundary_credentials)) == 0);
+    const unsigned items[] = {QDD_SETUP_MENU_DOWNLOAD, QDD_SETUP_MENU_PAIR,
+        QDD_SETUP_MENU_HELP, QDD_SETUP_MENU_RESET};
+    const qdd_setup_page_t pages[] = {QDD_SETUP_DOWNLOAD, QDD_SETUP_PAIR,
+        QDD_SETUP_HELP, QDD_SETUP_RESET};
+    for (unsigned i = 0; i < sizeof(items) / sizeof(items[0]); i++) {
+        for (unsigned hold = 0; hold < 2; hold++) {
+            qdd_setup_menu(&model); model.selection = items[i];
+            const qdd_setup_action_t entered = key(&model, QDD_SETUP_OK);
+            assert(entered == (items[i] == QDD_SETUP_MENU_PAIR ? QDD_SETUP_PAIR_PHONE : QDD_SETUP_NONE));
+            assert(model.page == pages[i] && model.selection == 0);
+            if (!hold && items[i] == QDD_SETUP_MENU_PAIR) assert(key(&model, QDD_SETUP_DOWN) == QDD_SETUP_NONE);
+            assert(key(&model, hold ? QDD_SETUP_LONG_OK : QDD_SETUP_OK) == QDD_SETUP_NONE);
+            assert(model.page == QDD_SETUP_MENU && model.selection == items[i]);
+        }
     }
-    assert(memcmp(&credentials, &model.credentials, sizeof(credentials)) == 0);
-    assert(key(&model, QDD_SETUP_OK) == QDD_SETUP_NONE);
-    assert(model.page == QDD_SETUP_MENU && model.selection == 4);
-    assert(memcmp(&credentials, &model.credentials, sizeof(credentials)) == 0);
+    qdd_setup_menu(&model);
     assert(key(&model, QDD_SETUP_OK) == QDD_SETUP_NONE && model.page == QDD_SETUP_DOWNLOAD);
+    assert(key(&model, QDD_SETUP_LONG_OK) == QDD_SETUP_NONE && model.selection == QDD_SETUP_MENU_DOWNLOAD);
+    for (unsigned i = 0; i < QDD_SETUP_MENU_WIFI; i++) assert(key(&model, QDD_SETUP_DOWN) == QDD_SETUP_NONE);
+    assert(key(&model, QDD_SETUP_OK) == QDD_SETUP_SCAN);
     assert(key(&model, QDD_SETUP_LONG_OK) == QDD_SETUP_NONE);
-    assert(model.page == QDD_SETUP_MENU && model.selection == 4);
-    assert(key(&model, QDD_SETUP_DOWN) == QDD_SETUP_NONE && model.selection == 5);
+    assert(model.page == QDD_SETUP_MENU && model.selection == QDD_SETUP_MENU_DOWNLOAD);
+}
+
+static void test_settings_download_is_display_only(void) {
+    qdd_setup_model_t model = {0}; qdd_setup_menu(&model);
+    assert(QDD_SETUP_MENU_USB_DOWNLOAD >= QDD_SETUP_MENU_ITEMS);
+    strcpy(model.credentials.ssid, "Staged network");
+    assert(qdd_setup_append(&model, "staged password"));
+    model.credentials.password[63] = '!';
+    const qdd_wifi_credentials_t credentials = model.credentials;
+    for (unsigned n = 0; n < 2; n++) {
+        assert(model.selection == QDD_SETUP_MENU_DOWNLOAD);
+        assert(key(&model, QDD_SETUP_OK) == QDD_SETUP_NONE && model.page == QDD_SETUP_DOWNLOAD);
+        for (unsigned i = 0; i < 8; i++) {
+            assert(qdd_setup_key(&model, i % 2 ? QDD_SETUP_UP : QDD_SETUP_DOWN, 255, i % 2) == QDD_SETUP_NONE);
+            assert(model.page == QDD_SETUP_DOWNLOAD && model.selection == 0);
+            assert(memcmp(&credentials, &model.credentials, sizeof(credentials)) == 0);
+        }
+        assert(key(&model, n ? QDD_SETUP_LONG_OK : QDD_SETUP_OK) == QDD_SETUP_NONE);
+        assert(model.page == QDD_SETUP_MENU && model.selection == QDD_SETUP_MENU_DOWNLOAD);
+    }
+    // Legacy page can still close, but no visible selection reaches USB.
+    model.page = QDD_SETUP_USB_DOWNLOAD;
+    assert(key(&model, QDD_SETUP_OK) == QDD_SETUP_NONE && model.selection == QDD_SETUP_MENU_DOWNLOAD);
+    for (unsigned i = 0; i < QDD_SETUP_MENU_EXIT; i++) {
+        assert(model.selection != QDD_SETUP_MENU_USB_DOWNLOAD);
+        assert(key(&model, QDD_SETUP_DOWN) == QDD_SETUP_NONE);
+    }
     assert(key(&model, QDD_SETUP_OK) == QDD_SETUP_EXIT && model.page == QDD_SETUP_HOME);
     password_is_clear(&model);
 }
@@ -126,7 +176,7 @@ static void test_first_connection_intro(void) {
     assert(!model.intro_to_onboarding && !model.credentials.ssid[0]);
     qdd_setup_help(&model);
     assert(!model.intro_to_onboarding && model.page == QDD_SETUP_HELP);
-    assert(key(&model, QDD_SETUP_OK) == QDD_SETUP_NONE && model.page == QDD_SETUP_MENU && model.selection == 2);
+    assert(key(&model, QDD_SETUP_OK) == QDD_SETUP_NONE && model.page == QDD_SETUP_MENU && model.selection == QDD_SETUP_MENU_HELP);
     qdd_setup_intro(&model);
     qdd_setup_menu(&model);
     assert(!model.intro_to_onboarding); // A new settings context never inherits intro routing.
@@ -395,16 +445,16 @@ static void test_reset_requires_explicit_local_confirmation(void) {
     qdd_setup_model_t model = {0};
     select_network(&model, false); assert(qdd_setup_append(&model, "staged secret"));
     qdd_setup_menu(&model); password_is_clear(&model);
-    for (unsigned i = 0; i < 3; i++) assert(key(&model, QDD_SETUP_DOWN) == QDD_SETUP_NONE);
-    assert(model.selection == 3);
+    for (unsigned i = 0; i < QDD_SETUP_MENU_RESET; i++) assert(key(&model, QDD_SETUP_DOWN) == QDD_SETUP_NONE);
+    assert(model.selection == QDD_SETUP_MENU_RESET);
     assert(key(&model, QDD_SETUP_OK) == QDD_SETUP_NONE);
     assert(model.page == QDD_SETUP_RESET && model.selection == 0);
     assert(key(&model, QDD_SETUP_OK) == QDD_SETUP_NONE);
-    assert(model.page == QDD_SETUP_MENU && model.selection == 3);
+    assert(model.page == QDD_SETUP_MENU && model.selection == QDD_SETUP_MENU_RESET);
     assert(key(&model, QDD_SETUP_OK) == QDD_SETUP_NONE);
     assert(key(&model, QDD_SETUP_DOWN) == QDD_SETUP_NONE && model.selection == 1);
     assert(key(&model, QDD_SETUP_LONG_OK) == QDD_SETUP_NONE); // A hold never clears data.
-    assert(model.page == QDD_SETUP_MENU && model.selection == 3);
+    assert(model.page == QDD_SETUP_MENU && model.selection == QDD_SETUP_MENU_RESET);
     assert(key(&model, QDD_SETUP_OK) == QDD_SETUP_NONE);
     assert(key(&model, QDD_SETUP_UP) == QDD_SETUP_NONE && model.selection == 1);
     assert(key(&model, QDD_SETUP_DOWN) == QDD_SETUP_NONE && model.selection == 0);
@@ -459,6 +509,7 @@ static void test_clear_entire_password_returns_to_keyboard(void) {
 
 int main(void) {
     test_settings_download_is_display_only();
+    test_settings_paging_and_all_return_routes();
     test_list();
     test_all_sixty_four_networks_and_actions_are_reachable();
     test_short_press_menu_navigation();

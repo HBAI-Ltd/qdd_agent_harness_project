@@ -50,6 +50,7 @@ static uint64_t s_client_activity_ms;
 static atomic_uint s_diag_connects, s_diag_disconnects, s_diag_beacons;
 static atomic_uint s_diag_reason, s_diag_disconnect_ms, s_diag_beacon_ms;
 static atomic_uint s_diag_alloc_failures, s_diag_alloc_size, s_diag_alloc_caps;
+static atomic_uint s_diag_first_state, s_diag_first_function, s_diag_first_size, s_diag_first_caps;
 static atomic_uint s_diag_tx_ok, s_diag_tx_fail, s_diag_tx_ms;
 static atomic_int s_diag_tx_hook_error = ESP_ERR_INVALID_STATE;
 static atomic_int s_diag_heap_hook_error = ESP_ERR_INVALID_STATE;
@@ -77,11 +78,28 @@ static int diagnostic_age(uint32_t now, uint32_t then, bool seen) {
     return seen && age <= INT_MAX ? (int)age : -1;
 }
 
+static unsigned diagnostic_function(const char *name) {
+    if (!name) return 255u;
+    static const char *const names[] = {"heap_caps_malloc", "heap_caps_calloc", "heap_caps_realloc",
+        "heap_caps_malloc_prefer", "heap_caps_calloc_prefer", "heap_caps_realloc_prefer",
+        "heap_caps_aligned_alloc", "heap_caps_aligned_calloc", "heap_caps_malloc_default", "heap_caps_realloc_default"};
+    for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        if (strcmp(name, names[i]) == 0) return i + 1u;
+    }
+    return 255u;
+}
+
 static void diagnostic_alloc_failed(size_t size, uint32_t caps, const char *function_name) {
-    (void)function_name;
 #if SIZE_MAX > UINT32_MAX
     if (size > UINT32_MAX) size = UINT32_MAX;
 #endif
+    unsigned unclaimed = 0;
+    if (atomic_compare_exchange_strong(&s_diag_first_state, &unclaimed, 1u)) {
+        atomic_store(&s_diag_first_function, diagnostic_function(function_name));
+        atomic_store(&s_diag_first_size, (uint32_t)size);
+        atomic_store(&s_diag_first_caps, caps);
+        atomic_store(&s_diag_first_state, 2u); // Publish the complete first record.
+    }
     atomic_store(&s_diag_alloc_size, (uint32_t)size);
     atomic_store(&s_diag_alloc_caps, caps);
     atomic_fetch_add(&s_diag_alloc_failures, 1);
@@ -122,10 +140,11 @@ size_t qdd_wifi_diagnostics(char *out, size_t capacity) {
     const unsigned tx_ok = atomic_load(&s_diag_tx_ok), tx_fail = atomic_load(&s_diag_tx_fail);
     const uint32_t caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
     const size_t limit = capacity < QDD_WIFI_DIAGNOSTICS_MAX + 1u ? capacity : QDD_WIFI_DIAGNOSTICS_MAX + 1u;
+    const bool first_ready = atomic_load(&s_diag_first_state) == 2u;
     const int length = snprintf(out, limit,
         "{\"ap\":%d,\"rssi\":[%d,%d],\"ch\":[%d,%u],\"ps\":[%d,%d],\"up\":%u,\"ipErr\":%d,"
         "\"ev\":[%u,%u,%u,%u,%d,%d],\"heap\":[%u,%u,%u],\"oom\":[%u,%u,%u],"
-        "\"tx\":[%d,%u,%u,%d],\"memHook\":%d,"
+        "\"oomFirst\":[%u,%u,%u],\"tx\":[%d,%u,%u,%d],\"memHook\":%d,"
         "\"tcp\":[%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%d,%d,%d,%u]}",
         ap_error, rssi_error, rssi, channel_error, (unsigned)channel,
         power_error, power_error == ESP_OK ? (int)power : -1, (unsigned)up, ip_error,
@@ -135,6 +154,9 @@ size_t qdd_wifi_diagnostics(char *out, size_t capacity) {
         (unsigned)heap_caps_get_free_size(caps), (unsigned)heap_caps_get_minimum_free_size(caps),
         (unsigned)heap_caps_get_largest_free_block(caps), atomic_load(&s_diag_alloc_failures),
         atomic_load(&s_diag_alloc_size), atomic_load(&s_diag_alloc_caps),
+        first_ready ? atomic_load(&s_diag_first_function) : 0u,
+        first_ready ? atomic_load(&s_diag_first_size) : 0u,
+        first_ready ? atomic_load(&s_diag_first_caps) : 0u,
         atomic_load(&s_diag_tx_hook_error), tx_ok, tx_fail,
         diagnostic_age(now, atomic_load(&s_diag_tx_ms), tx_ok != 0 || tx_fail != 0),
         atomic_load(&s_diag_heap_hook_error), s_tcp_epoch,

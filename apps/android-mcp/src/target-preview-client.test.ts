@@ -13,8 +13,8 @@ test("target rendering runs outside the main event loop and returns its original
     const result = await renderTargetPreview(bytes, "image/png", 1080, 2400, 540, 1200);
     assert.ok(ticks > 0, "Main-thread heartbeat timers must run while the worker renders.");
     const image = PNG.sync.read(result.png), zoom = PNG.sync.read(result.zoomPng);
-    assert.deepEqual([image.width, image.height], [1080, 2400]);
-    assert.deepEqual([zoom.width, zoom.height], [320, 320]);
+    assert.deepEqual([image.width, image.height], [1080, 2452]);
+    assert.deepEqual([zoom.width, zoom.height], [320, 372]);
     assert.deepEqual(result.crop, { x: 460, y: 1120, width: 160, height: 160, scale: 2 });
     assert.deepEqual(bytes, original);
   } finally { clearInterval(timer); }

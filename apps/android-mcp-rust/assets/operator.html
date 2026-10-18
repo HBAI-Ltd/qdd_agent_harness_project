@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>设备操作台</title>
+  <link rel="stylesheet" href="/operator.css">
+  <script src="/screen-channel.js" defer></script>
+  <script src="/remote-channel.js" defer></script>
+  <script src="/operator.js" defer></script>
+</head>
+<body>
+  <main class="workspace">
+    <header class="page-header">
+      <div><p class="eyebrow">局域网设备遥控</p><h1>设备操作台</h1><p class="subtitle">通过内网查看画面，用设备控制器点击、滑动和输入。</p><p class="access-line">访问地址：<a id="access-url" href="/">正在读取内网地址…</a></p></div>
+      <div id="connection-badge" class="connection-badge">尚未连接</div>
+    </header>
+    <section class="status-strip" aria-label="设备状态">
+      <span id="status-connected" class="status-pill">手机还没连接设备控制器</span>
+      <span id="status-encrypted" class="status-pill">等待手机配对</span>
+      <span id="status-ready" class="status-pill">暂时不能操作</span>
+    </section>
+    <div id="error-box" class="error-box" role="alert" hidden><strong id="error-message"></strong><details><summary>查看详情</summary><p id="error-detail"></p></details></div>
+    <div class="layout">
+      <section class="screen-card" aria-label="手机实时画面">
+        <div class="screen-heading"><div class="screen-heading-main"><div class="screen-title-row"><h2>实时画面</h2><label class="profile-label" for="screen-profile">画质<select id="screen-profile" aria-describedby="screen-profile-state" disabled><option value="turbo">极速（灰度）</option><option value="fast">快速</option><option value="standard" selected>标准</option><option value="original">原画</option></select></label></div><p id="frame-info">打开手机上的设备投屏，点“开始投屏”</p><span id="capture-state" class="capture-state" role="status">等待手机画面</span><span id="screen-profile-state" class="profile-state" role="status">标准画质 · AI 截图保留原画</span></div><button id="capture-button" class="button button-small" disabled>重新连接画面</button></div>
+        <div id="screen-stage" class="screen-stage">
+          <div id="screen-empty" class="screen-empty"><span class="phone-outline" aria-hidden="true"></span><strong>等待手机画面</strong><p>手机和电脑连同一个 Wi-Fi。在手机上打开设备投屏，点“开始投屏”。</p></div>
+          <img id="phone-screen" alt="手机实时画面；点击画面操作，Esc 退出" role="button" aria-label="操作手机实时画面：点击、回车或空格进入，Esc 退出" aria-keyshortcuts="Enter Space" draggable="false" tabindex="0" hidden>
+          <span id="screen-state" class="screen-state" hidden>等待手机画面</span>
+        </div>
+        <div class="screen-footer"><span id="coordinate-info">点击画面操作，Esc 退出</span></div>
+      </section>
+      <aside class="controls">
+        <section class="control-card">
+          <div class="card-heading"><h2>连接手机</h2><a class="text-button" href="/desktop/settings">连接设置</a></div>
+          <button id="connect-button" class="button button-primary button-full">连接</button>
+          <p class="hint">画面会自动连上。设备控制器连 Wi-Fi：用上下键选择设置，再按确认键进入 Wi-Fi 并输入密码。</p>
+          <div class="connection-meta"><span id="device-name">尚未读取设备</span><button id="disconnect-button" class="text-button" disabled>断开连接</button></div>
+        </section>
+        <section class="control-card">
+          <div class="card-heading"><h2>快捷操作</h2></div>
+          <div class="navigation-grid"><button id="home-button" class="button" disabled>⌂ <span>主页</span></button><button id="back-button" class="button" disabled>← <span>返回</span></button><button id="scroll-up-button" class="button" disabled>↑ <span>向上滚动</span></button><button id="scroll-down-button" class="button" disabled>↓ <span>向下滚动</span></button></div>
+        </section>
+        <details class="control-card">
+          <summary>AI 点击位置不准？在这里调整</summary>
+          <div class="card-heading"><h2>AI 点击位置调整</h2><span id="calibration-state" class="small-badge">尚未设置</span></div>
+          <p class="hint">仅影响 AI 按坐标点击。电脑鼠标遥控无需校准，也不会自动回到屏幕角落。</p>
+          <div class="calibration-grid"><label for="scale-x">横向比例<input id="scale-x" type="number" min="0.001" step="0.01" value="1"></label><label for="scale-y">纵向比例<input id="scale-y" type="number" min="0.001" step="0.01" value="1"></label></div>
+          <button id="calibrate-button" class="button button-full" disabled>保存点击位置设置</button>
+        </details>
+        <section class="control-card">
+          <div class="card-heading"><h2>键盘输入</h2></div>
+          <label for="typing-input">先点选手机上的输入框</label>
+          <textarea id="typing-input" rows="3" placeholder="输入英文、数字或符号" spellcheck="false"></textarea>
+          <div class="button-row"><button id="type-button" class="button button-primary" disabled>发送文字</button><button id="enter-button" class="button" disabled>回车 ↵</button></div>
+          <p class="hint">手机实体键盘请选择英文 / US 布局。</p>
+        </section>
+        <p id="activity" class="sr-only" role="status" aria-live="polite">等待连接。</p>
+      </aside>
+    </div>
+  </main>
+</body>
+</html>

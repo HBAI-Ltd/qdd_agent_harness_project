@@ -7,6 +7,10 @@
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
   <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+  <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+  <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+  <uses-feature android:name="android.hardware.bluetooth" android:required="false" />
+  <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
   <application android:name=".ScreenApplication" android:label="@string/app_name"
       android:icon="@drawable/ic_screen" android:theme="@android:style/Theme.Material.Light.NoActionBar"
       android:allowBackup="false" android:supportsRtl="true" android:usesCleartextTraffic="false">
@@ -22,6 +26,12 @@
         <data android:scheme="qddscreen" android:host="setup" />
       </intent-filter>
     </activity>
+    <activity android:name=".PointerCalibrationActivity" android:exported="false" />
+    <service android:name=".QddInputMethodService" android:label="@string/qdd_ime_name"
+        android:exported="true" android:permission="android.permission.BIND_INPUT_METHOD">
+      <intent-filter><action android:name="android.view.InputMethod" /></intent-filter>
+      <meta-data android:name="android.view.im" android:resource="@xml/qdd_input_method" />
+    </service>
     <service android:name=".ScreenService" android:exported="false" android:foregroundServiceType="mediaProjection" />
   </application>
 </manifest>

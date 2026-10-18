@@ -291,8 +291,14 @@ try {
   assert.deepEqual(target.value.target, { x: 1, y: 1, coordinateSpace: "pixels" });
   const targetImages = target.parsed.content.filter(({ type }) => type === "image");
   assert.equal(targetImages.length, 2);
-  assert.deepEqual(readPngDimensions(Buffer.from(targetImages[0].data, "base64")), { width: 2, height: 3 });
-  assert.deepEqual(readPngDimensions(Buffer.from(targetImages[1].data, "base64")), { width: 4, height: 6 });
+  assert.equal(target.value.annotation.coordinateSpace, "originalPhonePixels");
+  assert.equal(target.value.annotation.label, "PHONE PX: X=1 Y=1");
+  for (const [index, block] of targetImages.entries()) {
+    const annotation = index === 0 ? target.value.annotation.original : target.value.annotation.zoom;
+    assert.deepEqual(readPngDimensions(Buffer.from(block.data, "base64")), { width: annotation.width, height: annotation.height });
+    assert.deepEqual(annotation.sourceRect, { x: 0, y: 0, width: index === 0 ? 2 : 4, height: index === 0 ? 3 : 6 });
+    assert.deepEqual(annotation.legend, { x: 0, y: annotation.sourceRect.height, width: annotation.width, height: 52 });
+  }
   assert.equal(target.value.sourceSha256, createHash("sha256").update(JPEG_FIXTURE).digest("hex"));
   assert.equal(inputOperations(), targetInputReports, "Packaged worker rendering must not send any hardware input.");
   assert.equal(armed, true);

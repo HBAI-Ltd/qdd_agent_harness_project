@@ -35,6 +35,7 @@ const MAX_REPORTS_PER_MOVE = 8192;
 const MAX_COORDINATE_REPORTS = 300;
 const POINTER_HOME_SETTLE_MS = 550;
 const POINTER_REPORT_GAP_MS = 100;
+const POINTER_PRESS_SETTLE_MS = 350;
 
 export function asciiKey(character: string): KeyReport {
   if (/^[a-z]$/.test(character)) return [0, character.charCodeAt(0) - 97 + 4];
@@ -100,6 +101,7 @@ export class InputController {
   private armed = false;
   private pendingArms = 0;
   private buttons = 0;
+  private lastMotionAckAt = -Infinity;
   private tail: Promise<void> = Promise.resolve();
   private active: AbortController | undefined;
   private generation = 0;
@@ -290,6 +292,7 @@ export class InputController {
         this.remoteAcknowledged = sequence;
         this.buttons = report.buttons;
       }
+      if (report.kind === "mouse" && (report.dx !== 0 || report.dy !== 0)) this.lastMotionAckAt = performance.now();
       return this.state;
     }).catch(async (error: unknown) => {
       if (epoch === this.controlEpoch) {
@@ -554,8 +557,19 @@ export class InputController {
   }
 
   private async mouseReport(dx: number, dy: number, wheel: number, buttons: number, signal: AbortSignal): Promise<void> {
+    if ((buttons & ~this.buttons) !== 0) {
+      // A movement ACK confirms the board sent its report, not that Android
+      // finished applying it. Separate new presses from recent motion so a
+      // click cannot merge with that motion into a short drag. Already elapsed
+      // screenshot/processing time counts; pause still aborts the wait.
+      let remaining: number;
+      while ((remaining = POINTER_PRESS_SETTLE_MS - (performance.now() - this.lastMotionAckAt)) > 0) {
+        await delay(Math.ceil(remaining), undefined, { signal });
+      }
+    }
     await this.send("MOVE", [dx, dy, wheel, buttons], signal);
     this.buttons = buttons;
+    if (dx !== 0 || dy !== 0) this.lastMotionAckAt = performance.now();
   }
 
   private async send(op: HidOperation, args: readonly number[], signal: AbortSignal): Promise<HidStatus> {

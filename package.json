@@ -34,7 +34,10 @@
     "test": "tsc -b && node --test \"apps/cli/dist/**/*.test.js\"",
     "clean": "tsc -b --clean",
     "start": "node --env-file-if-exists=.env --enable-source-maps apps/cli/dist/index.js serve",
-    "mock:erp": "node --env-file-if-exists=.env scripts/mock-erp-mcp.mjs"
+    "mock:erp": "node --env-file-if-exists=.env scripts/mock-erp-mcp.mjs",
+    "build:android:rust": "npm run build --workspace @qdd/android-mcp-rust",
+    "check:android:rust": "npm run typecheck --workspace @qdd/android-mcp-rust",
+    "test:android:rust": "npm run test --workspace @qdd/android-mcp-rust"
   },
   "devDependencies": {
     "@types/node": "24.19.2",

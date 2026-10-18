@@ -184,6 +184,14 @@ npm run qdd -- reply <会话id> "按周汇总"
 
 DeepSeek 官方 API 的 `deepseek-flash` 当前对应 V4.1 Flash（2026-10-17）。如需使用最大输出预算，在 `harness.config.json` 的对应 `llm.models` 条目中设置 `"maxTokens": 393216`（384 × 1024），不要把该值设为所有模型的通用默认值。[官方参数文档](https://api-docs.deepseek.com/api/create-chat-completion/)规定 `max_tokens` 上限为 393216；实际输出仍受输入与输出合计上下文长度限制，长输出可能增加耗时和费用。修改配置后需重启后端。
 
+## 默认技能
+
+工作台侧栏的「技能」（`/skills`）默认提供 `android-operator` 和 `xiaohongshu-hid-control`，标记为「内置 · 默认已加载」。新会话会自动获得完整操作说明，无需先手动导入或调用 `load_skill`；原有自建技能仍按需加载。技能页可以查看完整说明，也可以运行技能打开新对话。
+
+原始文档及小红书配套 `agent.py` 保存在根目录 `skills/`，内置技能随项目更新，不写入或覆盖运行时用户技能，也不能在工作台编辑、删除。操作设备前仍需接入相应 MCP，并使用支持视觉及工具调用的模型；默认加载不代表已连接设备或自动执行任何操作。
+
+默认技能与已有用户技能的存储、完整上下文加载回归位于 `apps/cli/src/builtin-skills.test.ts`，通过 `npm test` 执行。技能页回归可用 `node --test apps/web/tests/skills-view.test.mjs` 执行。
+
 ## 目录结构
 
 ```text
@@ -193,6 +201,7 @@ apps/esp/            FoloToy AI Passport ESP32-C3 固件（ESP-IDF 5.5.3，独�
 apps/android-screen/ 安卓内网投屏 App（MediaProjection）
 apps/android-mcp/    手机内网画面与 ESP32 BLE 键鼠 MCP（电脑运行）
 packages/shared/     共享类型（含前端 API 契约）
+skills/              默认 Android / 小红书技能、完整参考文档及配套脚本
 docs/api.md          前端对接文档
 workspace/           运行时生成（已 gitignore）：style.md、metrics.json、datasets/、store.json 门店数据（初始为空，不自动填充示例）、site/、sessions/、schedule-sessions/、state/、.gateway-token
 ```

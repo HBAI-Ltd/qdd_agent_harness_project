@@ -1,7 +1,7 @@
 import { performance } from "node:perf_hooks";
 import type { AdbDevice } from "./adb.js";
 import { ScreenClient, ScreenError, MAX_SCREEN_FRAME_AGE_MS } from "./screen.js";
-import type { PreviewProfile, PreviewProfileState, ScreenCapture } from "./screen.js";
+import type { PointerCalibrationState, PreviewProfile, PreviewProfileState, ScreenCapture } from "./screen.js";
 
 type FrameListener = (frame: ScreenCapture) => void;
 type ErrorListener = (error: Error) => void;
@@ -22,6 +22,10 @@ export class LiveScreenSource {
   listDevices(): Promise<AdbDevice[]> { return this.phone.listDevices(); }
   getPreviewProfile(): Promise<PreviewProfileState> { return this.phone.getPreviewProfile(); }
   setPreviewProfile(profile: PreviewProfile): Promise<PreviewProfileState> { return this.phone.setPreviewProfile(profile); }
+  getPointerCalibration(serial?: string, signal?: AbortSignal): Promise<PointerCalibrationState> {
+    if (this.closed) return Promise.reject(new Error("手机画面连接已关闭。"));
+    return this.phone.getPointerCalibration(serial, signal);
+  }
 
   subscribe(frame: FrameListener, error: ErrorListener = () => {}): () => void {
     if (this.closed) throw new Error("手机画面连接已关闭。");

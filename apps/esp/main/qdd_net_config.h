@@ -5,7 +5,7 @@
 
 typedef struct { char ssid[33]; char password[65]; } qdd_wifi_credentials_t;
 typedef enum { QDD_NET_STATUS, QDD_NET_SSID, QDD_NET_PASSWORD, QDD_NET_SAVE,
-               QDD_NET_CLEAR, QDD_NET_RETRY, QDD_NET_DIAGNOSTICS } qdd_net_operation_t;
+               QDD_NET_CLEAR, QDD_NET_RETRY, QDD_NET_DIAGNOSTICS, QDD_NET_DOWNLOAD_DIAGNOSTICS, QDD_NET_OOM_TRACE } qdd_net_operation_t;
 typedef struct {
     uint32_t id;
     qdd_net_operation_t operation;

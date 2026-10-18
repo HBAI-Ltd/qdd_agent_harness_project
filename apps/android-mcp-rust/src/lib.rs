@@ -1,0 +1,18 @@
+pub type Result<T> = anyhow::Result<T>;
+pub type Cancel = tokio_util::sync::CancellationToken;
+pub const BUILD_ID: &str = env!("QDD_RUST_BUILD_ID");
+pub mod assets;
+pub mod backend;
+pub mod bridge;
+pub mod config;
+pub mod desktop;
+pub mod http;
+pub mod input;
+pub mod lan;
+pub mod live;
+pub mod mcp;
+pub mod net;
+pub mod protocol;
+pub mod screen;
+pub mod target_preview;
+pub mod text;

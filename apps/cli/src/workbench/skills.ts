@@ -4,6 +4,7 @@ import path from "node:path";
 import type { Skill, SkillInput } from "@qdd/shared";
 import type { HarnessPaths } from "../config.js";
 import { writeAtomic } from "../web/site.js";
+import { builtinSkills } from "./builtin-skills.js";
 
 const ID_RE = /^[0-9a-f-]{36}$/;
 const MAX_STEPS = 12;
@@ -38,17 +39,21 @@ export class SkillStore {
   }
 
   async list(): Promise<Skill[]> {
+    const builtins = await builtinSkills();
     let names: string[];
     try {
       names = (await readdir(this.paths.skills)).filter((n) => n.endsWith(".json"));
     } catch {
-      return [];
+      return builtins;
     }
     const skills = await Promise.all(names.map((n) => this.get(n.slice(0, -5)).catch(() => undefined)));
-    return skills.filter((s): s is Skill => !!s).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    return [...builtins, ...skills.filter((s): s is Skill => !!s && !builtins.some((b) => b.id === s.id))]
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   }
 
   async get(id: string): Promise<Skill> {
+    const builtin = (await builtinSkills()).find((s) => s.id === id);
+    if (builtin) return builtin;
     try {
       return JSON.parse(await readFile(this.file(id), "utf8")) as Skill;
     } catch (error) {
@@ -74,6 +79,7 @@ export class SkillStore {
 
   async update(id: string, input: SkillInput): Promise<Skill> {
     const current = await this.get(id);
+    if (current.source === "builtin") throw new InvalidInput("内置技能随项目更新，不能在工作台编辑");
     if ((await this.list()).some((s) => s.name === input.name && s.id !== id)) throw new InvalidInput(`已存在同名技能「${input.name}」`);
     const skill: Skill = { ...current, ...input, tools: input.tools ?? [], updatedAt: new Date().toISOString() };
     await writeAtomic(this.file(id), JSON.stringify(skill, null, 2));
@@ -81,12 +87,13 @@ export class SkillStore {
   }
 
   async remove(id: string): Promise<void> {
-    await this.get(id);
+    const current = await this.get(id);
+    if (current.source === "builtin") throw new InvalidInput("内置技能默认加载，不能在工作台删除");
     await rm(this.file(id), { force: true });
   }
 }
 
 /** 技能展开为 agent 可执行的说明。 */
 export function skillInstructions(skill: Skill): string {
-  return `技能「${skill.name}」：${skill.description}\n步骤：\n${skill.steps.map((s, i) => `${i + 1}. ${s}`).join("\n")}${skill.tools.length ? `\n会用到的工具：${skill.tools.join("、")}` : ""}`;
+  return `技能「${skill.name}」：${skill.description}\n步骤：\n${skill.steps.map((s, i) => `${i + 1}. ${s}`).join("\n")}${skill.tools.length ? `\n会用到的工具：${skill.tools.join("、")}` : ""}${skill.instructions ? `\n\n完整说明：\n${skill.instructions}` : ""}`;
 }

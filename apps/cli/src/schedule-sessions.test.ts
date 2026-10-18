@@ -327,7 +327,7 @@ test("定时任务立即运行、到期执行及重启后续聊自动授权，�
   assert.equal((await f.post(`/api/sessions/${sessionId}/messages`, { text: "继续执行" })).status, 202);
   assert.equal((await f.gateway.hub.wait(sessionId)).status, "idle");
   assert.equal(writes, 3);
-  assert.equal((await f.gateway.workbench.skills.list()).length, 3);
+  assert.equal((await f.gateway.workbench.skills.list()).filter((skill) => skill.source !== "builtin").length, 3);
   for (const id of [sessionId, dueId]) {
     const detail = await f.gateway.hub.detail(id);
     assert.equal(detail.status, "idle");
@@ -361,7 +361,7 @@ test("普通会话即使无人值守也仍需授权，支持拒绝与取消", { 
       assert.equal((await f.post(`/api/sessions/${session.id}/approvals/${pending.requestId}`, { approved: false })).status, 200);
       assert.equal((await f.gateway.hub.wait(session.id)).status, "idle");
     }
-    assert.deepEqual(await f.gateway.workbench.skills.list(), []);
+    assert.deepEqual((await f.gateway.workbench.skills.list()).filter((skill) => skill.source !== "builtin"), []);
     assert.deepEqual(await f.gateway.hub.pending(), []);
   }
 });

@@ -12,6 +12,977 @@ Their original logs remain for traceability. That stop request applies to the ea
 The later new-controller LAN report authorizes the bounded transfer verification recorded in v26:
 its APK download and hash pass, with no APK source changes. This is not proof of phone installation.
 
+## v55 Direct LAN installation and PIN-free pairing
+
+2026-10-18: The ESP, computer and controlled phone connect to the same wireless
+network. The user's OPPO hotspot is the test network, not a product-specific UI
+instruction. The ordinary flow now opens the ESP root HTML page and downloads
+the package directly, without a local HTML receiver or USB port selection.
+
+- UI: three manual web steps (wireless network, download, install/open), native
+  Windows ZIP and Android APK links, previous/next, no automatic download or
+  installation claim. `/usb-receiver` redirects to the same-origin `/` with 307;
+  query parameters cannot choose the destination. The ESP guide supports six
+  manual pages; connection events do not steal the selected page. Settings order
+  is driver download, wireless network, phone Bluetooth, button guide, reset.
+  Legacy USB endpoints/protocol remain compatible but are absent from ordinary
+  navigation. Following the user's final layout, the footer has three separate
+  vertical rows: previous, the current page action, next. The middle action is
+  emphasized; the physical button behavior is unchanged.
+- Storage: this COM5 board has no `assets` partition. The v54 hotspot baseline
+  reproduced ZIP HTTP 503 while root and APK returned 200. The new app embeds
+  the verified 943,153-byte v50 ZIP when the partition is absent. An existing
+  corrupt partition still fails explicitly. SHA/read operations reuse 2 KiB;
+  no repartitioning or whole-ZIP RAM allocation is used.
+- Bluetooth: explicit pairing uses Just Works with encryption, bonding and an
+  actual 16-byte link key, without a numeric PIN. Existing bonds survive; raw
+  `authenticated` remains the real MITM flag. Full device name is in the primary
+  30-byte advertisement. Android accepts encrypted/bonded/ready connections
+  with `authenticated=false`. ARM/owner/stop and input deadlines are preserved.
+  The new APK is 66,090 B, SHA
+  `9ed39d723773852bd070b034aa29bb6b794b07244c58aaa9c2a5d1bd7ac5683a`.
+- Adversarial review: fixed the two-state navigation race and delayed exit until
+  the main screen refresh completes; rapid double confirmation stays neutral.
+  Real key-size gates cover custom HID/text notifications, not just GATT
+  permissions. Production-function tests reject 7/15-byte keys and accept 16.
+  The incompatible default instruction to host Wi-Fi on the controlled phone
+  was removed; no tethering support is claimed for the APK.
+- Host evidence: root TypeScript typecheck/build, Android host/build/signature,
+  BLE 9/9, text integration 4/4, HTTP C mocks, JS 20/20, receiver 18/18,
+  embedded ZIP preparation 4/4 and asset format 11/11 pass. The Edge 153 LAN-page
+  report covers 1040/390 widths, native single GETs, manual navigation, no-JS
+  content and the old-path redirect using isolated fixtures only:
+  `apps/esp/build/ui-browser-v55/landing-lan-report.json`.
+- Build/device: final firmware gate and app-only COM5 verification in progress;
+  final identities and measured transfer results will be recorded below.
+- Unverified: first-time PIN-free pairing on a new phone, physical key/display
+  acceptance, real projection/input feedback and long-run RF behavior remain
+  separate checks. This work does not relabel the previous high-rate LAN failure
+  or fixture performance as a passed full-device acceptance.
+
+## v54 Local page delivery and USB package reception — Wi-Fi-first guide
+
+2026-10-18: The latest requested order is button guide, Wi-Fi, then computer USB installation.
+The computer and ESP use the same LAN and the existing port 3334 to obtain a standalone HTML
+file, opened locally in desktop Chrome/Edge to receive the stored ZIP over USB. No Internet is
+required. Plain device-IP HTTP only renders instructions and serves the attachment; it does not
+gain Web Serial access. No insecure-origin exception or browser security setting was changed.
+
+- Page/source: `/usb-receiver` renders inline and `/qdd-usb-receiver.html` downloads the same HTML.
+  The final manifest-named HTML under `apps/android-mcp-rust/build/usb-browser/v54/` is **16,674 B**,
+  SHA `de88e84316ea479d2cc6149bd7532ba3bdcc31746ab812b071939404dc8bed3c`;
+  deterministic gzip is **7,452 B**, SHA `26fae9381627760dfb41127070a5a864a5183b55af860bc67811e5a13b1f41e4`.
+  All five source identities match. JS/CSS is inline without CDN dependencies. The native helper
+  endpoint remains compatible, while the Windows page now recommends the browser receiver.
+- Host: receiver **16/16 PASS**. Removing either CRC or SHA guards produces a genuine red test.
+  Independent review reproduced a reader-lock leak when obtaining a writer failed after acquiring
+  the reader; a red test preceded the fix. Read-only retries have attempt and total-time limits,
+  with session/offset/CRC/whole-file SHA checks. Failed/cancelled transfers cannot save incomplete
+  ZIPs; streams and ports are released. No HID, serial signal change or EXE launch is performed.
+  Production ESP HTTP mocks and both receiver/legacy-helper preparation suites pass.
+- UI/browser Host: the Wi-Fi-first model went from genuine red exit 3 to green; 17 compiled
+  button contracts pass. Fonts cover 238 non-ASCII glyphs with three passing checks. Eight actual
+  LVGL render entrypoints pass, with zero redraws for 100 unchanged refreshes and 17,064 B peak
+  in the 24 KiB host pool. The longest IP/port/path fits completely across two lines. Final
+  `de88...` has no horizontal overflow at 1040/390 widths in Edge 153; the file context exposes
+  native Web Serial. The documentation-IP HTTP fixture denies serial and shows the correct save
+  link, without actual network or serial operations. Evidence: `ui-wifi-first-v54/ui-wifi-first-v54-report.json`
+  and `browser-final-host.json` in the receiver output directory.
+- Browser/Device specialty: actual Edge 153 used native `navigator.serial` from a local file,
+  without a shim or fixture. Computer Use could not establish the browser URL and stopped automated
+  port selection; the pending request subsequently received actual authorization and transferred
+  the file. The tested page was pre-copy-update `b8b9df13...`, with COM6 still on v53 firmware.
+  The saved ZIP is **943,153 B**, SHA `100f4ce0924f1310e878aaa62c9887745ddc14d7fb0283617f5e08a6ca4d7494`.
+  ZIP CRC, the single entry and contained **1,924,096 B** EXE SHA
+  `12a80feda10d24043afdb2c8bcbef9644bba3b04b731fe605258a44ed3dc17f6` all match; the EXE was not run.
+  The page displayed **180.6 KB/s**. The 150,509ms wall time includes permission selection and is
+  not transfer duration. No page errors or external HTTP requests occurred; the test browser closed.
+  Final `de88...` changes only two workflow/hint strings. The earlier run is not relabeled as an
+  entire physical acceptance of the newer page. Evidence: `apps/esp/build/browser-usb-v54-device.json`,
+  `browser-usb-v54-zip-verify.json`, and retained old gzip under `build/history/usb-browser-v54/b8b9df.../`.
+  `html-copy-delta.json` records the two copy changes totaling 33 B. CSS is byte-identical;
+  normalizing the one JS hint string and parsing both with the same minifier produces identical
+  bytes, so protocol and cleanup logic are unchanged.
+- Build: complete `tools/idf.ps1 --validate` **PASS**, session 63265 exit 0,
+  `browser-usb-v54-full-gate.log`. Existing platform skips are **4+5+12**, not zero. Root TypeScript
+  typecheck/build pass. Independent archive verification passes. Full SHA/archive directory:
+  `d873ac803143742aa21289335f06784feab27eadac0626d0369d8dc63d0c9d98`; APP **1,731,040 B**,
+  SHA `509efd668e7294a36cc69ac52656668532260755439daf366ac614d171ff3a20`, matching ELF
+  `8bbe7f4695c1b21e6bcab3093fef0b81162da0c0497ebb43df4e03937787cda4`.
+- Flash Device: **PASS**. Fresh COM6 inspection confirms MAC `4c:11:ae:31:32:6c`, ESP32-C3 and 8MB.
+  Actual table SHA `bd386c960f8b827e812dd238af37d469c319d7e9ecc2d7501d00296c46804a4f` and MD5 match.
+  Only OTA0 at `0x20000` was written, erase range `[0x20000,0x1c7000)`, session 87454 exit 0,
+  `Hash of data verified`. NVS, bootloader, table, otadata, PHY, assets and OTA1 were not written.
+  Evidence: `com6-v54-{layout-read.log,partition-table.bin,flash-plan.json,flash.log}`.
+- COM5 flash handoff: the user explicitly requested COM5, freshly enumerated as
+  VID/PID `303A:1001`, MAC `4c:11:ae:2f:a1:b8`, ESP32-C3 rev1.1 with 8MB Flash.
+  Its actual table is different: SHA `b4a705f5dcd64100c5c40e0de65b2a2acae70a2827ae56044317575331f4620d`,
+  valid MD5, NVS `0x9000/0x6000`, PHY `0xf000/0x1000`, and sole factory app
+  `0x10000/0x7f0000`; there is **no assets partition**. The same independently verified v54
+  application was written only at `0x10000`, erase interval `[0x10000,0x1b7000)`, session 69526
+  exit 0 with `Hash of data verified`. Bootloader, table, NVS and PHY were not written; no
+  repartitioning or merged image was used. The 30.032-second read-only observation received
+  **9/9 replies**, with no observed fault or allocation failure and normal port cleanup. Existing
+  BLE bonding recovered as `QDD-Passport-A1BA`, encrypted/bonded/ready at all three samples,
+  armed/locked false. Wi-Fi remains configured but disconnected with empty IP; page access was
+  not tested. Startup/protocol specialty passes, while Wi-Fi/UI/full workflow remain unverified.
+  The absent assets partition means this board cannot supply the stored Windows ZIP through USB;
+  this app-only request did not authorize or perform a storage-layout migration. No APK, EXE or
+  source change was made. Evidence: `com5-v54-{layout-read.log,partition-table.bin,flash-plan.json,flash.log,startup.json}`.
+- Initial firmware Device state: the 30-second read-only observation received **9/9 replies**, no
+  fault/OOM, and closed the port. However, **WiFi configured=false / connected=false** and BLE is
+  disconnected/not ready, so the overall startup report is `pass=false`. HTTP at the existing
+  `192.168.101.75:3334` did not pass. The v53 startup
+  report confirmed configured/ready at 06:01 UTC, but there was no configuration observation
+  immediately before this flash. App-only write ranges cannot prove retained configuration, nor
+  does the current state establish either a firmware regression or a user reset. No speculative
+  storage/bond repair was made; the user was asked to follow the new Wi-Fi step. A separate neutral
+  INFO/CANCEL on the new firmware passes at 187ms/47ms, confirming the stored **943,153 B** ZIP
+  SHA **100f4ce0...7494** is unchanged, with normal session/port cleanup. Evidence:
+  `com6-v54-startup.json`, `browser-usb-v54-http.initial-unconfigured.json`, `browser-usb-v54-info.json`.
+- Wi-Fi follow-up Device: after the user reported completing Wi-Fi setup, a single read-only
+  `WIFI_STATUS` at **06:42:37 UTC** returned configured/connected true, IP `192.168.101.75`,
+  control port 3333 in 47ms. COM6 was closed without reset or control input. The PC has
+  `192.168.100.160/23`; Windows selects the directly connected WLAN route, so these addresses
+  are in the same subnet. Subsequent diagnostics report RSSI -61dBm, channel 11, network up,
+  no disconnect/beacon-loss events and zero allocation failures. However, HTTP receiver requests
+  still hit the 10-second deadline; TCP3334 timed out while one TCP3333 handshake succeeded
+  in 359ms. A single UDP3335 discovery and two ICMP probes also timed out. These observations
+  do not identify a unique HTTP, ESP, PC or access-point cause; no speculative firmware/network
+  change or reflash was made. **Wi-Fi connection passes; physical HTTP endpoint acceptance
+  remains failed.** The original startup failure remains historical evidence, not current Wi-Fi state.
+  Evidence: `com6-v54-wifi-connected.json`, `com6-v54-connected-diag.json`,
+  `com6-v54-connected-tcp.json`, `com6-v54-connected-udp.json`, and
+  `browser-usb-v54-http.connected-timeout.json` / `browser-usb-v54-http.json`.
+  A subsequent eight-second, non-promiscuous Npcap observation on the verified WLAN adapter
+  recorded headers only: three client SYNs, the first server SYN/ACK at 3,084ms, repeated request
+  segments, and the first server payload at 6,541ms, after the probe's absolute five-second
+  deadline. Thus the HTTP port does respond, but no status/body was accepted within that probe;
+  this does not establish a missing listener or an HTML-handler defect. No packet payload or pcap
+  was saved; capture handle and request socket closed normally. Evidence:
+  `capture-v54-http-headers.json` and `capture-v54-http-headers-summary.json`.
+  The user also confirmed that a phone on the same Wi-Fi cannot open the page, so the observed
+  failure is not limited to this PC test. One additional diagnostic-only request, intended to read
+  the late HTTP status, connected at 8,563ms but still received no headers within 12 seconds.
+  `com6-v54-late-http-status.json` records that failure; its legacy error message says five seconds,
+  while `timeoutSeconds=12` and `durationMs=12000` are the actual diagnostic budget. No product
+  ACK/watchdog/HTTP deadlines were changed. Further identical retries were stopped; the radio/AP
+  path and ESP runtime remain unresolved. The local standalone HTML is still available for USB
+  reception independently of this failed page-acquisition step.
+- Unverified: the complete physical sequence of buttons, Wi-Fi setup, page saving, port permission
+  and program installation still needs acceptance. This does not validate a mounted drive,
+  automatic installation, all browsers/OSes, complete real projection/HID, or the old high-rate LAN
+  latency issue. Running console PID 111040, its v47 path and health 200 were verified without
+  stopping/replacing it. APK and stored v50 ZIP are unchanged. No reset, network clearing or bond
+  clearing was requested; no commit or publication is made.
+
+## v53 USB-first device guide/settings — Build/Host/USB Device PASS, physical UI unverified
+
+2026-10-18: The device UI now presents **computer USB installation before WiFi setup**. The first
+guide page and the settings USB page both show four explicit steps: connect the USB data cable,
+run the existing **设备USB下载器**, save/extract ZIP, then start the console. Offline text states that
+installation preparation needs no WiFi; if the small helper is not already available, its separate
+acquisition requirement is stated. Connecting USB is not presented as mounting a disk or automatically
+running/installing software. Only the user's **“已安装，下一步”** action advances to WiFi, and scanning
+then requires explicit confirmation; transfer status itself never advances onboarding or enables HID.
+
+- Presentation / snapshot: a locked **16B**, read-only worker snapshot exposes idle/checking/
+  transferring/sent/cancelled/error and bounded byte progress, with no new tasks or allocations.
+  SENT means the ESP completed frame transmission, not that the PC saved/verified/installed it.
+  UI explicitly says **“传输完成不等于已安装”** and asks the user to confirm saving/extraction on the PC.
+  CONTROL_BUSY says **“退出电脑控制后重试”**, since opening settings/pausing need not release an existing owner.
+  Settings order is **computer USB / phone App / WiFi / phone BLE / key guide / reset**, with a fixed
+  return action and down/up page arrows. USB return is display-only; the phone App page retains the
+  root configuration/download QR entry and its reentry/IP/offline behavior.
+- Focused Host: **PASS**. The prior model fails the new offline-USB-first assertion, then passes;
+  worker snapshot transition tests likewise record **red exit 3 → green exit 0**. Setup model,
+  snapshot/cleanup/safety contracts and unchanged HID state checks pass. Evidence:
+  `apps/esp/build/ui-v53-model-{red,green}.log`, `usb-driver-ui-v53-focused.json`,
+  `setup-usb-v53-focused.json`. The USB protocol and 1200ms ACK / 1500ms safety watchdog remain unchanged.
+- Fonts: **PASS**, true old-subset **red exit 1 → 3/3 green**. Existing cached **lv_font_conv 1.5.3**
+  regenerates Source Han Sans SC **14/20px, 4bpp, uncompressed** subsets fully offline:
+  **219 → 230 non-ASCII** characters plus **95** printable ASCII at both sizes. Inventory, licensed
+  source metadata, generated hashes and actual font selection match. Evidence:
+  `apps/esp/build/usb-ui-v53-font-{red,generate,green}.log` and `usb-ui-v53-font-host-report.json`.
+- Independent LVGL Host / visual: **PASS**, complete suite and **7** focused entrypoints
+  (`usb/intro/menu/download/guide/pair/scan`). The first USB implementation fails the **100 unchanged
+  refreshes** cache assertion; production cache repair restores **0 flushes / stable allocations**,
+  with the red log/EXE preserved. Existing **120** page-replacement checks remain green. The **24KiB
+  host pool** reports peak **17,192B**; this is not an on-device RAM peak.
+  Actual 240×320 host captures show legible Chinese without placeholders/clipping, four offline USB
+  steps, truthful SENT/error text, both menu-arrow directions and the final-page return. Evidence:
+  `apps/esp/build/ui-v53-fonts/render-*/render.log`, `usb-ui-v53-host-cache-red.log`,
+  `ui-v53-fonts/usb-ui-v53-contact.png` and the independent report above.
+- Build: **PASS**, full gate **72872 exit 0**, `apps/esp/build/ui-usb-v53-full-gate.log`, with the
+  existing **21** platform skips (**4+5+12**) retained. Firmware layout/artifact/debug archive verification passes.
+  Archive/full SHA-256 `16addce3d6e7cad10b58c160e0470f6257f3df35c169b87d11157fc27283247e`;
+  App **1,720,192B**, SHA-256 `ced5667867c641bbd83be3f9ec13a3aa980b2a3a894c2ed2929543b853494e39`;
+  matching ELF `973c89538f3f978c399c82344ada35cefc0792cf35886e07fc8ac56648ab0ebc`.
+- Flash: **PASS**, write **60770 exit 0**. Fresh COM6 / MAC **4c:11:ae:31:32:6c** and table SHA-256
+  `bd386c960f8b827e812dd238af37d469c319d7e9ecc2d7501d00296c46804a4f` match the App-only plan,
+  `apps/esp/build/com6-v53-flash-plan.json`: **@0x20000**, erase **[0x20000,0x1c4000)**,
+  preserving bootloader/table/otadata/NVS/bonds/PHY/assets/OTA1. The exact **1,720,192B** App writes in
+  **6.9s** and reports `Hash of data verified`, `apps/esp/build/com6-v53-flash.log`.
+- Startup Device: **PASS**, observer **64400 exit 0**, `apps/esp/build/com6-v53-startup.json`:
+  **30s / 9** read-only samples, WiFi/IP **192.168.101.75** already connected at **1.063s**, and
+  BLE encrypted/bonded/ready at **15.063s / 25.063s**. No faults/errors, SDK/wrapped OOM or trace
+  failures are observed; COM6 closes. These are observation-relative times, not exact boot durations.
+- Native USB Device: **PASS**, `apps/esp/build/usb-driver-v53-native-device.json`, actual unchanged
+  v52 helper **exit 0**, **922 READs / 5,641ms** (**5,734ms** including wrapper), complete
+  **943,153B** ZIP SHA-256 `100f4ce0924f1310e878aaa62c9887745ddc14d7fb0283617f5e08a6ca4d7494`.
+  Strict CRC/raw-DEFLATE/PE validation checks the **1,924,096B** EXE SHA-256
+  `12a80feda10d24043afdb2c8bcbef9644bba3b04b731fe605258a44ed3dc17f6`; no residual partial file,
+  main-service launch, HID input or ADB use.
+- USB protocol / neutral Device: **PASS**, **17574 exit 0**,
+  `apps/esp/build/usb-driver-v53-device-acceptance.{json,log}`. Stale-session/two bad-range cases reject;
+  **1,024B** first-block / **1B** tail CRC, two fresh INFO sessions and CANCEL/old-session rejection pass.
+  The separate **25.016s** neutral run receives **552/552 ACKs**, max **32ms**, with the unchanged
+  **1200ms** deadline. Configuration is **20ms / max 4**, but actual max outstanding is **1** and rate
+  is about **22.1 requests/s**; sustained 50Hz is not established. PAUSE acknowledges and the owner
+  expires after the **2s** wait. Before/after BLE stays encrypted/bonded/ready, unarmed/unlocked,
+  with zero OOM/trace failures. No nonzero HID, screens, ADB or credential capture is involved.
+- Remaining Device / deployment boundary: **physical LCD pages and button navigation have not been
+  observed**; Host rendering does not establish on-device UI acceptance. Current board deployment
+  is **v53 App + preserved v50 assets**. Final read-only health is **200 / status:ok**, unknown route
+  **404**; dynamically checked PID **111040** matches
+  `apps/android-mcp-rust/build/windows/v47/设备操作台.exe`, with no stop/start of the main service.
+  This increment changes
+  no PC EXE, APK, assets payload or USB helper: ZIP remains v50 and helper remains v52. Existing v52 USB
+  results/source archive are retained separately from the new v53 startup/USB/protocol checks. LAN helper
+  bootstrap, full product/physical input/UI and Unicode APK/IME limits remain unverified/not passed.
+  No commit/push/publication.
+
+## v52 Offline USB package downloader — Build/Host/USB Device PASS, LAN bootstrap incomplete
+
+2026-10-18: The user requests a fully offline path with USB transfer preferred. A separate small
+native Windows helper enumerates only exact **USB VID303A/PID1001** COM devices; multiple boards
+require explicit selection. It supports a save dialog and `--port COM6 --output <new.zip>`.
+It reads the existing assets ZIP through **QDDDRV/1**, checks request ID/session/offset/length/CRC32
+and final Windows BCrypt SHA-256, then atomically publishes a new file without replacing an existing
+output. It does not extract/run the main EXE, stop a service, send phone input, use ADB or erase Flash.
+DTR/RTS are disabled in the implementation. The real run requests no reset; this is not an exact
+physical proof that opening a port never resets the board. A user with the local helper can download
+the package entirely offline over USB without WiFi, Node, Python or an ADB connection.
+
+- Helper Build / Host: **PASS**. `apps/android-mcp-rust/build/usb-driver/v52/manifest.json` binds
+  **13** source inputs, compiler/flags and PE audit. `设备USB下载器.exe` is **17,920B**, SHA-256
+  `66e0013d6791c464ebeee5f8901eb24379e0ced8e7b03766c508cfd54af6aebf`.
+  Production-parser hostile-frame checks, **24** transfer/recovery scenarios and **26** exact
+  hardware-ID cases pass. The real native empty-PATH self-test checks BCrypt allocation/double
+  cleanup and atomic/no-overwrite file handling; imports are only **7 Windows system DLLs**.
+  Build tools are Node plus x64 MinGW-w64 GCC (`QDD_USB_CC` or PATH); neither is a runtime requirement.
+  Logs: `build/usb-driver/v52/{build,test-protocol,test-transfer,test-hardware}.log`.
+- The Node-built gzip is **9,243B**, SHA-256
+  `d098c0df5bad9d07583dd35b523734b9b3fa35499f439d73b8ac2a80f62e25be`.
+  The ESP Python-prepared gzip is **8,958B**, SHA-256
+  `bcfb0e5f3e96eb87f177acc69874d4e35a9350b6241c726d46aa7cc3822a9fb8`;
+  these are different compressed streams that decode to the same exact helper EXE. Evidence:
+  `apps/esp/build/usb-installer-v52-identity.json`. Their compressed hashes must not be interchanged.
+- Read-only transfer bounds: up to **1,024B** per READ, three attempts with new IDs at the same
+  unconfirmed offset, four-second request / three-minute total limits. One fresh INFO on stale/IO
+  failure may resume only if ZIP type/size/SHA remain identical; cancellation/version changes abort.
+  Old/log/malformed frames cannot append bytes. A unique CREATE_NEW temporary file is deleted on
+  failure/cancel, and COM/BCrypt handles are released. These preparation retries never replay HID.
+- ESP focused Host: production worker/parser/main safety contracts, serialized TX, TTL, HTTP/USB
+  asset exclusion and neutral diagnostics pass. Late-CANCEL preemption reproduces **red exit 3**
+  on prior production code, then passes with atomic terminal handoff; independent review finds no
+  further concrete blocker. Slow hashing/read/TX run in the worker rather than blocking the safety
+  loop. Added fixed buffers total **5,376B** plus a **4,096B** worker stack; these are allocation
+  budgets, not measured runtime peaks. Windows page/helper route `/qdd-usb-installer.exe` handler
+  red/green and **4** preparation/audit cases pass, including source drift and PE x64 checks.
+  Repository checks pass over **455** text files. Evidence: `apps/esp/build/usb-driver-v52-*`,
+  `usb-installer-v52-{onboarding-red,onboarding-green,prepare-green,repo}.log`.
+  Full firmware gate **40894** exits **1**: `usb-driver-v52-full-gate-red.log` records a Windows
+  default-GBK `UnicodeDecodeError` in the font test. Explicit UTF-8 reading fixes that test assumption;
+  focused fonts **3/3 PASS**, `usb-driver-v52-fonts-green.log`. Full retry **47290** exits **0**,
+  `usb-driver-v52-full-gate.log`, retaining the existing platform skips. Firmware layout/debug archive
+  verification passes: archive/full SHA-256
+  `313f9af0aad80397c507b5a48a1fea694a74e52c142231bf3ed37a7a69ceb8eb`,
+  App **1,713,808B**, SHA-256 `65aa5a24c85c0c18233683b60ff5f0348f485e378a98061d022b255df6e06b42`,
+  matching ELF `c9469c75c4099d0d42a55647749f55b3eb66130fcde722cd98c49632bd915989`.
+- Flash: **PASS** for the exact App-only scope. Fresh COM6 / MAC **4c:11:ae:31:32:6c** and table
+  SHA-256 `bd386c960f8b827e812dd238af37d469c319d7e9ecc2d7501d00296c46804a4f` are verified.
+  The exact App write **@0x20000**, erase **[0x20000,0x1c3000)**, reports `Hash of data verified`.
+  Bootloader, partition table, otadata, NVS/bonds, PHY, assets and OTA1 remain preserved.
+  Evidence: `apps/esp/build/com6-v52-{layout-read.log,flash-plan.json,flash.log}`. Flash verification
+  is separate from the bounded startup/USB checks below.
+- Source snapshot: **PASS**, `apps/android-mcp-rust/build/windows/v52-source/android-mcp-rust-source.zip`,
+  **273,323B**, SHA-256 `68cdd7ba53e66bf6fa484b7d880a62962eb224ab346b138e9127092809e0823d`.
+  **70** allowlisted sources/public fixtures plus README/manifest (**72** entries) include the helper
+  C/H/tests/build instructions. Hashes, deterministic archive, v50 generated build identity and helper
+  source identity pass; no build binaries, private configuration or logs are included. Original v50
+  EXE/runtime ZIP/source ZIP/manifest remain preserved. Audit: `v52-source/transfer-compression-audit.json`.
+- Startup Device: **PASS** within the **30.000s / 9** allowlisted-sample observation,
+  `apps/esp/build/com6-v52-startup.json`. BLE is encrypted/bonded/ready at **15.078s / 25.062s**;
+  the final WiFi observation at **29.078s** has restored **192.168.101.75**. No faults, SDK/wrapped
+  OOM or allocation trace failures are observed, and COM6 is closed. Times are relative to observation
+  start, not exact boot durations or proof of uninterrupted long-term stability.
+- Native USB package Device: **PASS**, `apps/esp/build/usb-driver-v52-native-device.{json,log}`.
+  The actual frozen native helper exits **0**, completes **922 READs** in **5,875ms**
+  (**5,969ms** including the wrapper), saves **943,153B** ZIP SHA-256
+  `100f4ce0924f1310e878aaa62c9887745ddc14d7fb0283617f5e08a6ca4d7494`, and leaves **no partial files**.
+  Strict ZIP CRC/raw-DEFLATE/PE validation verifies the **1,924,096B** EXE SHA-256
+  `12a80feda10d24043afdb2c8bcbef9644bba3b04b731fe605258a44ed3dc17f6`.
+  The helper does not launch the main service, send HID or use ADB; no reset is requested.
+- USB protocol / neutral Device: **PASS**, `apps/esp/build/usb-driver-v52-device-acceptance.{json,log}`.
+  Stale-session and two bad-range cases reject; a **1,024B** block and final **1B** byte CRC pass;
+  CANCEL is acknowledged, its old session rejects, and two fresh-INFO cycles read the same verified
+  prefix. The **25s** neutral stress test is configured for **20ms**, at most **4** outstanding and
+  unchanged **1200ms** ACK deadline: **543/543** replies, max **32ms**, actual **21.72 requests/s**,
+  observed max outstanding **1**. This does **not** establish sustained 50Hz performance.
+  PAUSE, a **2s** owner-expiry wait and subsequent INFO/CANCEL pass. Before/after BLE remains
+  encrypted/bonded/ready, unarmed/unlocked, with no OOM/trace failures. Subsequent exclusive COM6
+  acceptance confirms that the native helper released the port. No nonzero HID or screen loop is tested.
+- HTTP/browser bootstrap: **not passed**, `apps/esp/build/usb-installer-v52-http-device.json`.
+  A new IAB tab reports `ERR_CONNECTION_RESET`. Direct GET `/` returns complete **200 / 4,128B**
+  HTML with the Windows USB primary entry, but `/qdd-usb-installer.exe` declares **200 / 8,958B gzip**
+  and receives only **5,371B** before EOF (`EOFError`), not a complete helper download.
+  USB success does not establish browser/LAN bootstrap success or diagnose the wireless path.
+- Preserved earlier evidence / deployment: the distinct developer bootloader-read **FAIL** remains:
+  `apps/esp/build/driver-usb-v50-read.{json,log}` requests **947,249B**, exits **2** at **245,760B**
+  (`expected 4096 / received 4045`), then chip-ID/hard-reset recovery runs. This is not the production
+  helper protocol or a normal user transfer. `usb-v52-baseline.json` observes **30.015s**, secure/ready
+  BLE, no OOM/faults and COM6 closed, but **WiFi connected=false / pass=false**; it is not an overall PASS.
+  The earlier v51 full gate **87906** ultimately exits **0**, archive
+  `b3c27300235427e067849b34580234875695a8e586f09c3e4d3644ad9ba1f8cd`, App **1,698,960B**,
+  but was not flashed after the user selected USB. Current board is v52 App + preserved v50 assets;
+  current 8790 service remains user-opened v47: health PID **111040** and the dynamically read process
+  path match `apps/android-mcp-rust/build/windows/v47/设备操作台.exe`; health is OK and no main-service
+  replacement occurred. USB installation-package transfer and neutral gates now pass in the scope
+  above; browser transfer of the small helper remains incomplete.
+  Existing full-ZIP LAN failures, Unicode APK/IME and physical input/UI limits remain unchanged;
+  **complete product acceptance is still not achieved**. No commit/push/publication.
+
+## v51 Native default ZIP download — focused Host PASS, firmware/device pending
+
+2026-10-18: The user asks to avoid mandatory application-level blocks. The frozen minimal ESP
+candidate restores normal Windows download anchors: the default browser download requests one
+complete **200** ZIP response. Only the explicit **“下载中断？使用续传下载”** action, identified by
+`data-driver-resume`, enables the bounded Range path. APK routing and the frozen v50 Rust EXE/ZIP
+identities remain unchanged; the default click is no longer intercepted for block transfer.
+
+- Focused Host: DOM/production-browser checks **17/17 PASS**, production C handler tests PASS.
+  Evidence: `apps/esp/build/native-download-v51-{red,green,browser-green}.log`.
+  Full gate **87906** is still in progress at this checkpoint. No v51 archive/build/flash/device PASS
+  is claimed before its final gate/artifact and on-device evidence are available.
+- Preliminary native endpoint observation: a single `downloadMedia` attempt ends **canceled** after
+  **27.97s**, with **no saved file**, before candidate deployment. This records that attempt's tool
+  outcome, not a diagnosed root cause or a completed native-download acceptance test.
+  Header-only capture `apps/android-mcp/build/npcap-driver-v51-native-tcp-headers.json` is being
+  analyzed independently; no payload or unsupported PC/AP/ESP/radio attribution is inferred here.
+  The actual 8790 service remains v47; no v50/v51 host service replacement or phone input occurred.
+
+## v50 Build-time frontend compression — Build/Host PASS, Device transfer incomplete
+
+2026-10-18: The user requests further compression of HTML/frontend code and redundant formatting.
+Readable sources remain in `apps/android-mcp-rust/assets`; Cargo now prepares the embedded files in
+`OUT_DIR`. Pinned **esbuild 0.28.2**, `charset:utf8`, parses/minifies JS/CSS including settings inline
+code. JSON is compacted without schema changes. The HTML lexer removes only indentation between
+known structural tags; attributes, DOM/aria/class hooks, script order, inline text spacing and
+pre/textarea content remain intact. End users still need only the native EXE; Node/npm is a build
+prerequisite, documented in the bilingual Rust README and source archive, not a runtime dependency.
+
+The old settings renderer searched for exact JS fragments; the parser minifier changed those
+fragments and the existing configuration-injection test failed (**red exit 1**). The renderer now
+uses one unique `__QDD_SETTINGS_DATA__` token, with fixed routes replaced before escaped JSON is
+inserted last. Tests retain `</script>`, HTML entities, U+2028/U+2029 and placeholder strings inside
+user values without rewriting those values or closing the script early. Generated assets are embedded
+once through `src/assets.rs`. Build identity covers original sources, the preparation script,
+minifier version/options, manifest and actual generated bytes; packaging regenerates and rejects
+an EXE/source identity mismatch. Source archiving verifies the same inputs and generated identity.
+
+| Embedded asset | Readable current source (B) | v50 embedded (B) |
+| --- | ---: | ---: |
+| operator.html | 5,756 | 5,456 |
+| operator.css | 9,052 | 7,868 |
+| operator.js | 55,184 | 30,908 |
+| remote-channel.js | 5,122 | 3,594 |
+| screen-channel.js | 2,754 | 1,569 |
+| settings.html | 10,777 | 9,506 |
+| tools.json | 21,623 | 15,615 |
+| Total | **110,268** | **74,516** |
+
+The embedded frontend/schema total is **35,752B (32.42%) smaller** than its readable current source.
+Against frozen v47, the complete EXE decreases **35,840B (1.83%)** and its ZIP **4,929B (0.52%)**;
+these measured reductions are not a claim that compression repairs network transfer.
+
+- Build / Host: **PASS**. Cargo check, **83/83** Rust tests (zero skips), **4/4** asset-pipeline tests,
+  and **67/67** operator/screen-channel behavior tests run against actual generated assets pass.
+  The reused public UI suite changes only one CSS comma-whitespace presentation assertion to accept
+  minified formatting; input/cancellation/channel behavior assertions remain unchanged.
+  Repository typecheck/build and release build pass. Evidence:
+  `apps/android-mcp-rust/build/assets-v50-{red,check,host,node-tests,generated-ui,release,repo-typecheck,repo-build}.log`.
+- Packaged EXE: **21/21 PASS**, `apps/android-mcp-rust/build/windows/v50/exe-smoke.json`.
+  Empty-PATH execution needs no Node; checks include exact generated bytes/SHA for the five served
+  assets, VM execution of the rendered settings save/configuration flow, all **22** parsed MCP tool
+  definitions, and existing cancellation/Unicode/target-preview cases. These are isolated loopback
+  fixtures with **realDeviceInput=false**, not real phone/BLE operation.
+  Build **rust-7c6e9711bb750fcb**, EXE **1,924,096B**, SHA-256
+  `12a80feda10d24043afdb2c8bcbef9644bba3b04b731fe605258a44ed3dc17f6`;
+  ZIP **943,153B**, SHA-256 `100f4ce0924f1310e878aaa62c9887745ddc14d7fb0283617f5e08a6ca4d7494`.
+  Both files and `manifest.json` / `asset-manifest.json` are in
+  `apps/android-mcp-rust/build/windows/v50/`; v47 artifacts remain preserved.
+- Source/archive audit: **PASS**. v50 `android-mcp-rust-source.zip` **249,704B**, SHA-256
+  `98cfb6351f54d8193c669f00554c8483d9f2624e6fbcbd6d1f27d1efa39316fe`, **58** allowed source/public
+  fixture files plus README/manifest (**60** entries). All entry hashes, deterministic ZIP generation,
+  original runtime-ZIP stream/CRC validation, independent extraction and extracted EXE self-test pass.
+  No private settings, generated build directory or dependencies are archived. Evidence:
+  `v50/transfer-compression-audit.json`, `v50/android-mcp-rust-source-manifest.json` and
+  `apps/android-mcp-rust/build/assets-v50-transfer-audit.log`.
+- Current service / Device boundary: the actual **8790** service is still the user-opened **v47**
+  `rust-20902a052c1fcc76` at `apps/android-mcp-rust/build/windows/v47/设备操作台.exe`.
+  No v50 service launch/replacement was performed. The existing v47 real-LAN coordinate-preview PASS
+  remains independent. The data-only Range check below **fails**; the browser download was canceled
+  partway through at the user's request. Neither compressed EXE build nor host fixture PASS proves successful transfer or
+  deploys v50 to the running service.
+  Latest Unicode APK installation/IME activation and remaining physical input/UI/calibration bounds
+  still apply. No commit, push or publication.
+
+## v49 Bounded ZIP Range delivery — flash/startup PASS, data FAIL, browser canceled
+
+2026-10-18: v48's incomplete ZIP provides new transfer evidence. The ESP adds strict single explicit
+`bytes=start-end` ZIP ranges, accurate **206** Content-Length/Content-Range and a strong quoted
+full-ZIP SHA ETag. Only a one-byte **0-0** bootstrap can omit If-Match; later ranges must match that
+exact ETag. Invalid suffix/open/multiple/overflow/out-of-bounds ranges fail closed. Each request
+verifies the immutable resource; a new version cannot be silently joined to an accepted old prefix.
+Legacy EXE links redirect to ZIP. The production same-origin browser script uses sequential **8KiB**
+blocks, at most **3 retries** of only the current unconfirmed block, a bounded total deadline and a
+final full-file SHA check before saving. These data retries never replay HID input. Existing **1200ms**
+ACK / **1500ms** control watchdog, native socket/resource deadlines and wireless settings are unchanged.
+
+- Build / Host: **PASS**, `apps/esp/build/range-download-v49-full-gate.log`, exit **0**, preserving
+  the existing **21** platform skips. Production C handler tests, **16/16** transport contracts,
+  **16/16** browser algorithm tests and **2/2** embedded-script checks pass. Coverage includes exact
+  ETag/length/range rejection, interrupted current-block recovery, cancellation/exhaustion without
+  saving a partial file, version mismatch and a real loopback truncated HTTP response. These host
+  results are not real-board delivery PASS. Evidence: `range-download-v49-{green,contract,browser-green,script-green}.log`.
+  Firmware archive/full SHA-256
+  `ae2036c5c664ceeeaf7d6d57a6e2b7f47f97aa91b1e7c41fcceb87958e6459e6`;
+  App **1,698,880B**, SHA-256 `41f35eb1d55a20215ae016b5ba1cd5fb35e991e50e0c2cb596a17595b4bd5713`;
+  matching ELF `74b5b1ce8dec51b30870c785cbf353199ec226197bb38b62fc457024471edb83`.
+- Flash / startup: **PASS** within the verified scope. Fresh COM6 / MAC **4c:11:ae:31:32:6c** and
+  table SHA-256 `bd386c960f8b827e812dd238af37d469c319d7e9ecc2d7501d00296c46804a4f` are checked.
+  The v49 App-only write **@0x20000**, erase **[0x20000,0x1bf000)**, reports `Hash of data verified`;
+  the subsequent v50 assets-only write **@0x600000**, erase **[0x600000,0x6e8000)**, also verifies.
+  `driver-assets-v50.bin` is **947,249B**, SHA-256
+  `a351de22e909c3f3ee1fa54b47713837856d6c1ba5200ae77d12e68906023d68`, binding the v50
+  **943,153B** ZIP above; **1,149,903B** remains in assets. Esptool adds **3 FF bytes** for its
+  **947,252B** aligned write. Other partitions, NVS and bonds remain preserved; no full erase.
+  Evidence: `apps/esp/build/com6-v49-{flash-plan.json,flash.log}`,
+  `driver-assets-v50.json`, `com6-v50-assets-flash.log` and fresh layout reads.
+  `com6-v49-startup.json` passes **30.031s**; `com6-v50-startup.json` passes **30.016s / 9** samples,
+  with final secure/ready BLE, WiFi **192.168.101.75**, no SDK/wrapped OOM or faults and COM6 closed.
+  These are bounded recovery observations, not uninterrupted network/download stability.
+- Earlier v49 preflight: **Range download NOT RUN**. `driver-range-v49-report.json` retains the
+  preflight timeout at **8.015s**, with empty request/progress arrays; its generic fail status is not
+  a measured Range-body failure.
+- v50 data-only real-board check: **FAIL**, `apps/esp/build/driver-range-v50-report.json`,
+  **45.789s**, using the production download algorithm with no ARM/HID input.
+  The second bootstrap returns **206**, total **943,153** and exact v50 strong ETag/SHA. The first
+  **8KiB** data block then exhausts **four attempts** without receiving headers: **confirmedBytes=0**,
+  **blocks=0**, `retry_exhausted`. Page/module transfer was explicitly excluded from this data-only
+  check, not silently marked passed. The accompanying `driver-range-v50-uart.json` observes
+  **66.031s**, no SDK/wrapped OOM or faults, and closes COM6; its observer `status:pass` covers only
+  those resource/fault checks. Last download diagnostics remain **busy=false / phase=5**, sent
+  **5,269B**, result **45062 / errno=11**. Server-side partial sends are not client-confirmed ZIP bytes,
+  and zero observed OOM does not establish transfer success or uniquely locate the network cause.
+- Browser partial run: **canceled by task change**, not whole-file PASS/FAIL. The actual in-app
+  Chromium browser eventually loads the correct Windows ZIP page and executes its production module.
+  Progress reaches **286,720 / 943,153B (30%)**. The user then requests the direct default scheme;
+  one cancel click stops this run, the UI shows **“已取消下载。”** and a retry action is visible.
+  No complete archive, final SHA or ZIP save is verified. Evidence:
+  `apps/esp/build/driver-range-v50-browser-report.json` and `driver-range-v50-browser-uart.json`.
+  The **104.703s** UART observer sees no SDK/wrapped OOM or faults and closes COM6; its last worker
+  is idle, phase 5, with one **8,192B** block result **0**. That individual block/resource observation
+  does not establish whole-file delivery. The historical v48 failure remains preserved below;
+  actual 8790 stays v47 and physical phone input/Unicode/IME bounds are unchanged.
+
+## v48 Rust transfer archives — build/flash/startup PASS, continuous ZIP download FAIL
+
+2026-10-18: The user requests compressed Rust code and artifacts so they can transfer normally.
+The frozen v47 EXE is now available as a single-file runtime ZIP and an explicit source snapshot.
+Compression and offline validation pass, but the actual continuous ZIP transfer below fails;
+compression alone has **not** resolved normal transfer and this is not a download acceptance PASS.
+
+- Runtime archive: `apps/android-mcp-rust/build/windows/v47/设备操作台.zip`, **948,082B**, SHA-256
+  `8b5f0b56b5baa36f3f7f1cbe86607107efa8219d195f2ea545dd7e7488c92957`;
+  **51.6269% smaller** than the **1,959,936B** EXE. Its sole entry is `设备操作台.exe`, build
+  **rust-20902a052c1fcc76**, exact SHA-256
+  `4ce6c2bafec24fdc1d4186a8778e20e4466fbe9c8a0078fd90f247b9fbfe3a3f`.
+  Independent extraction, CRC/hash and extracted `--self-test` pass without configuration, service
+  launch or input. The existing v47 EXE, runtime ZIP and original manifest identities remain unchanged.
+- Source archive: the same directory's `android-mcp-rust-source.zip`, **215,333B**, SHA-256
+  `b077372d680ff885bc1732bcdb752501df480405aaa4ee552627bde96b1a1633`;
+  **50** explicitly allowed source/public-fixture files plus snapshot README/manifest, **52** entries.
+  No builds, targets, dependencies, machine configuration or logs are included. Fixed timestamps,
+  sorted paths and matching Python/zlib produce identical archive bytes; every entry/hash and CRC
+  passes. Public loopback TLS fixtures retain their test-only explanation. Evidence:
+  `apps/android-mcp-rust/build/windows/v47/{transfer-compression-audit,android-mcp-rust-source-manifest}.json`.
+  `tools/pack-transfer.py` uses Python standard libraries; its adversarial checks reject NUL-suffixed
+  original names, encryption/symlinks, local/central header mismatches and hidden DEFLATE output/tails.
+  Raw decompression is bounded to EXE size + 1 and requires EOF, no unused/unconsumed data and exact
+  bytes/CRC. NUL/hidden-output red tests reproduce the old acceptance gap; **5 tests / 15 scenarios**
+  pass after repair (`tools/test-pack-transfer.py`, `v47/zip-{nul-name,deflate-tail}-{red,green}.log`).
+- Build / Host: **PASS**. ZIP firmware full gate **50332 exit 0**, archive verification PASS;
+  final packer/static gate **30775 exit 0**, with the existing **21** platform skips (**4+5+12**),
+  not zero skips. Logs: `apps/esp/build/zip-download-v48-{full-gate,final-static}.log`.
+  Firmware archive/full SHA-256
+  `490fbc3995d025d2110b0f2ff8e0a4087c5dabef8d248f50f3b6e2cbfd132de0`;
+  App **1,692,912B**, SHA-256 `8c23a1f7ba1207f5a5887d948d670326583caeb3f6f8b0580852c8c49abe2959`;
+  matching ELF `aa0313bec542eb841dfa31a261bf592abba6fa2b811bb6dc19f4b44b3515552c`.
+  `apps/esp/build/driver-assets-v48.bin` is **QDDDRV2**, the original ZIP plus a **4,096B** header:
+  **952,178B**, SHA-256 `9c03b40987a3d73aaff419abf33f2b2042503058dedaeba02f79d1f6906021e0`,
+  leaving **1,144,974B** in the existing **2MiB** assets partition. The ESP serves compressed bytes;
+  it does not decompress the EXE. `driver-assets-v48.json` binds ZIP and EXE identities separately.
+- Flash: **PASS**, **67333 exit 0**, after fresh COM6 / MAC **4c:11:ae:31:32:6c** and table SHA-256
+  `bd386c960f8b827e812dd238af37d469c319d7e9ecc2d7501d00296c46804a4f` verification.
+  Exact App **@0x20000** and assets **@0x600000** both report `Hash of data verified`;
+  erase ranges are **[0x20000,0x1be000)** and **[0x600000,0x6e9000)**.
+  Esptool pads the resource by **2 FF bytes** to **952,180B** for its four-byte write alignment.
+  Bootloader, partition table, otadata, NVS/bonds, PHY and ota1 remain preserved; no merged@0/full erase.
+  Evidence: `apps/esp/build/com6-v48-{flash-plan.json,flash.log}` and the fresh layout record.
+- Device startup: bounded recovery **PASS**, **30.015s / 9** samples, final encrypted/bonded/ready BLE
+  and WiFi **192.168.101.75**, SDK/wrapped OOM **0**, no faults, COM6 closed.
+  Early WiFi is disconnected; observed counters change **1/1 → 2/2**, last reason **201 → 8** and
+  channel **6 → 11** during the observation. This is not continuous WiFi stability or a unique cause
+  diagnosis. Evidence: `apps/esp/build/com6-v48-startup.json`.
+- Device ZIP transfer: **FAIL**, **31652 exit 1**, `apps/esp/build/zip-v48-resource-device.json`.
+  HTTP **200**, `application/zip`, Content-Length **948,082** and the advertised ZIP SHA-256 match
+  the expected archive, but only **12,960B** arrive before `TimeoutError` at **15.641s**.
+  The partial body is not the expected complete ZIP; no downloaded-EXE extraction/self-test ran.
+  Final worker diagnostics: **busy=false / phase=5**, sent **12,960**, result **45062 / errno=11**,
+  minimum download heap **30,600B**, largest block **20,480B**. SDK/wrapped OOM **0** and no faults
+  apply only to this partial attempt; COM6 and worker cleanup complete. No ARM/HID input or deliberate
+  read stall. Zero observed OOM does not turn the incomplete transfer into a functional PASS.
+
+The v47 current-service visible-coordinate preview PASS remains recorded independently. The latest
+Unicode APK is still uninstalled/IME unenabled; physical UI/calibration/input, earlier high-frequency
+LAN timing and long-term resource bounds remain unverified. A subsequent bounded Range/browser
+transfer candidate is in development; it has no v49 device PASS here. No commit, push or publication.
+
+## v47 Visible target-preview coordinates — build/isolated/current-service preview PASS
+
+2026-10-18: The user reports that target-preview coordinates must be marked visibly in the image.
+The running v44 baseline returned JSON target **(540,1200)** but only rings/crosshairs in the PNGs;
+metadata was not a substitute for a readable image label. Evidence:
+`apps/android-mcp/build/target-preview-v47-baseline/report.json` and its `0-full.png` / `0-zoom.png`.
+The baseline report's PASS means the observation was captured, not that coordinate labeling worked.
+
+Rust and Node now draw a **52px** bottom caption on **both** the full preview and the 2x crop:
+`PHONE PX: X=... Y=...` plus `SIMULATED TARGET`. Both use the final **original phone pixel** target,
+including normalized-coordinate inputs; neither displays crop-local or doubled values as phone pixels.
+The caption never covers source content. Original/zoom source pixels stay at **(0,0)**; only the canvas
+extends downward, and tiny images can extend rightward. `annotation.coordinateSpace` is
+`originalPhonePixels`; `annotation.original` / `annotation.zoom` expose canvas width/height,
+`sourceRect` and `legend`. Target centers, source dimensions, crop, zoomTarget and tapArguments keep
+their existing meanings. This is a read-only annotation; it sends no HID input, moves no real mouse,
+does not take over an input owner and does not prove physical pointer accuracy.
+
+- Build / Host: **PASS**. Rust check and **82/82** unit tests (zero skips), including decoded image
+  numeral checks on both PNGs, source/marker/crop preservation and tiny/edge canvas bounds.
+  The old-image red test fails before the caption exists; renderer regressions **6/6** pass afterward.
+  Evidence: `apps/android-mcp-rust/build/target-preview-caption-{red,green,check,host}.log`.
+  Repository typecheck/build and Node **456/456** tests (zero skips) pass; logs:
+  `apps/android-mcp/build/target-preview-v47-{typecheck,build,host-tests}.log`.
+- Packaged EXE: **21/21 PASS**, `apps/android-mcp-rust/build/windows/v47/exe-smoke.json`.
+  Build **rust-20902a052c1fcc76**, EXE **1,959,936B**, SHA-256
+  `4ce6c2bafec24fdc1d4186a8778e20e4466fbe9c8a0078fd90f247b9fbfe3a3f`, at
+  `apps/android-mcp-rust/build/windows/v47/设备操作台.exe`; identity is bound in that directory's
+  `manifest.json`. The packed test decodes both output PNGs and checks visible white coordinate and
+  magenta simulated-target captions plus annotation/source bounds; it does not claim real HID input.
+- Isolated real-phone preview: **3/3 PASS** using the new EXE over stdio and the real LAN screen
+  source: center **(540,1200)**, normalized **(1000,1000) → (1079,2399)**, and origin **(0,0)**.
+  Both saved images visibly carry the matching original-pixel caption; full canvas **1080×2452**
+  retains **1080×2400** phone content and the 2x **320×372** canvas retains **320×320** crop content.
+  HID endpoint was overridden to isolated loopback port **1**; no ARM, real board input or App launch.
+  Evidence: `apps/android-mcp/build/target-preview-v47-isolated/report.json` and its six PNGs.
+- Current-service boundary: automatic review rejected the prepared service-update command with
+  only **blocked by policy**, before process start. Its quit/config-copy/launch actions did not execute;
+  the **8790** service remained v44 at that earlier checkpoint.
+  The same ignored connection configuration was copied separately beside v47 without logging secrets;
+  the user then manually opened v47. Subsequent read-only health/path/hash verification is **PASS**:
+  build **rust-20902a052c1fcc76**, PID **111040**, exact v47 executable path and the SHA-256 above
+  match (`apps/android-mcp-rust/build/windows/v47/actual-service-verified.json`). PID is an observation,
+  not a future fixed target. The actual HTTP MCP service then passed the same **3/3** real-LAN preview
+  cases, including visible center and normalized-edge coordinate labels, with no ARM/HID input.
+  Evidence: `apps/android-mcp/build/target-preview-v47-actual/report.json` and six saved PNGs.
+  This current-service preview PASS is not a full-product delivery. ESP/APK/assets were not updated;
+  v46's full EXE download failure, uninstalled Unicode APK/disabled IME and remaining physical
+  UI/calibration/input/resource boundaries still apply. No commit, push or publication.
+
+## v46 Configurable DMA draw buffer — startup/APK PASS, EXE download FAIL
+
+2026-10-18: The v45 first failed caller evidence supports testing available internal DMA memory.
+The BSP now offers `bsp_lvgl_init_with_buffer_rows(uint16_t)` for **1..320** rows; invalid values return
+NULL before port/resource initialization. The existing zero-argument API keeps its **40-row** default.
+QDD explicitly selects **20** rows, a single **240 × 20 × 2 = 9,600B** RGB565 DMA draw buffer versus
+the former **19,200B** request. The requested allocation is **9,600B smaller**; measured heap and
+transfer results follow below; physical UI performance awaits validation, and full EXE recovery still fails.
+Valid repeated calls reuse the display;
+there is no hot resizing, and display-registration failures can retry with the retained initialized port.
+The port's partial rendering follows the real stride/capacity, and the existing rounded mask uses
+global screen y with local row offsets before RGB565 byte swapping. Full-width screen redraws need
+16 strips instead of 8; independent source review found no new definite boundary defect, not a device PASS.
+
+- Build / Host: **PASS**. Complete gate **86861 exit 0**, including existing platform skips,
+  **7/7** draw-buffer scenarios, the original initialization/failure-retry regression, transport contracts
+  **16/16**, repository checks and firmware/archive verification. Host scenarios cover the old/new DMA
+  admission budget, defaults, min/max, invalid values, retry/reuse and rounded strip/partial-area
+  output with padded stride and guard sentinels. Evidence: `apps/esp/build/draw-buffer-v46-{red,green,contract,repo,full-gate}.log`.
+  Archive/full SHA-256 `34fce612d4784a47696f6c65419a0cbed411fc6f36958cf72f198ebb26b0fd65`;
+  App **1,692,304B**, SHA-256 `df5acb85fe5e11654093afc52a0da7335801ecfff18177a2353a821a113c4d4d`;
+  matching ELF `c42b4641000cc1591633fd18d2a86d2318f08cd768741d777e1a5319901c5159`.
+- Flash: **PASS**. COM6 / MAC **4c:11:ae:31:32:6c** and fresh board table SHA-256
+  `bd386c960f8b827e812dd238af37d469c319d7e9ecc2d7501d00296c46804a4f` verified before exact App-only
+  **@0x20000** write, hash verified, **77811 exit 0**. NVS/bonds, assets, bootloader, partition table,
+  otadata, PHY and ota_1 preserved. Evidence: `apps/esp/build/com6-v46-{flash-plan.json,flash.log}`.
+- Device startup: **PASS**, session **97686 exit 0**, **30.015s / 9** read-only samples, secure BLE ready
+  and Wi-Fi connected, no faults/errors, SDK OOM=0 and wrapped failures=0, COM6 closed. Reported
+  free/minimum/largest heap: **51,052 / 28,276 / 31,744B**. Diagnostics already contain one connect,
+  one disconnect and reason **201** from before this observation; this is not zero disconnections
+  since boot. Evidence: `apps/esp/build/com6-v46-startup.json`.
+- EXE preflight: **instrument preflight FAIL, file transfer NOT RUN**. Session **71253 exit 1** timed
+  out on the diagnostic request after **4.016s**, before the EXE GET and without UART samples. The
+  report's zero bytes/no observed OOM is not a file-load or resource PASS. Original
+  `exe-v46-resource-device.json/.log` and fixed `exe-v46-resource-preflight-failure.json/.log` retain it.
+- Actual EXE transfer: after the subsequent diagnostic HTTP **200** state change, one actual GET
+  ran in **92367 exit 1** and **FAIL**ed: HTTP 200, only **36,864 / 1,947,136B** in **32.297s**,
+  TimeoutError, with the preflight timeout retained in `preflightError`. The board ended
+  phase=5/busy=false, sentBytes=37760, result=**45062**, errno=**11**; final SDK free/minimum heap
+  **50,740 / 13,476B**, SDK OOM=0 and wrapped failures=0, COM6 closed. Cleanup finished, but no OOM
+  during this partial transfer does not establish OOM-free operation across a complete 2MB download.
+  Evidence: `apps/esp/build/exe-v46-resource-recovered-device.json`.
+- APK transfer: **complete file and observed resources PASS within this small scope**, session
+  **26954 exit 0**. HTTP 200, **66,090B / 18.297s**, exact SHA-256
+  `1811c4aacc77c9be2cf09d396848bb9605e6e2706a5c7a84d882ac869d4052dc`, no errors/faults,
+  SDK OOM=0, wrapped failures=0 and final free heap **50,796B**; COM6 closed. This confirms the
+  downloaded file, not installation, full EXE reliability or long-term resource bounds. The report's
+  DOWNLOAD_DIAG after-value is the retained preceding EXE result, not an APK worker result.
+  Evidence: `apps/esp/build/apk-v46-resource-device.json`.
+- Passive capture: **43757 exit 0**, **50.0s / 264** header/metadata records, no payload saved,
+  no input or elevation. Instrumentation PASS is not network PASS; packet timing analysis remains
+  separate, with no speculative wireless tuning or relaxed timeouts. Evidence:
+  `apps/android-mcp/build/npcap-driver-v46-tcp-headers.json`.
+  Offline summary (`npcap-driver-v46-summary.json`, SHA-256 `d8307871b45b652e4d97d7715f7b33a6835138d15bfa697b099778808c4a411b`): 12 five-tuples cover only about **2.066s** of the EXE failure tail and **2.490s** of APK start, not complete bodies.
+  SYN retransmission, previously ACKed sequences and late traffic after close cannot uniquely locate PC/AP/ESP/RF responsibility.
+  A zero window after FIN is not body-transfer evidence; raw window values have not been scaled.
+- Final actual service/read-only check: **PASS**. Dynamic health/path/hash verification found
+  PID **57084**, build **rust-76cbec8971e2da33**, exact
+  `apps/android-mcp-rust/build/windows/v44/设备操作台.exe`, SHA-256
+  `cf325aa11a2d5be545626027b64802fa905c0561e3d5221c1af342609b88cd84`.
+  Official SDK listed **22** tools; HID STATUS **611.8102ms**, BLE encrypted/bonded/ready and
+  unarmed/unlocked; a real LAN **99,305B JPEG** returned. No ARM or HID input was sent.
+  The observed phone home screen came from the existing phone App; its projection icon was not
+  clicked and no rejected launch was bypassed. This confirms the preserved running service/read-only
+  path, not installation of the new APK or IME/calibration/nonzero-input acceptance. Evidence:
+  `apps/android-mcp/build/rust-v46-final-real-neutral.json/.log`,
+  `apps/android-mcp-rust/build/windows/v44/actual-service-v46-verified.json`. PID is that observation only.
+- Phone preparation: `apps/android-screen/build/ime-v44-device-preparation.json` records zero real
+  ADB devices, no OnePlus Windows USB interface and no real-phone mDNS source. An emulator is not
+  used as a substitute. The screen source is the existing App, not the newly built APK. No new APK
+  installation or IME activation occurred; the previous rejected
+  App launch was not retried/bypassed. Delegating preparation cannot physically attach an absent USB
+  device. The board remains v46 with service/device data preserved; Rust/EXE/assets and the Unicode
+  APK remain frozen. Physical UI/calibration, complete EXE transfer, real Unicode/editor/image
+  feedback, high-rate LAN and long-term resource acceptance remain incomplete. Overall device
+  acceptance is **FAIL/partial** and the product cannot be accepted as complete.
+
+## v45 First failed allocator caller diagnostic — build/flash PASS, real downloads FAIL
+
+2026-10-18: This version completes the diagnostic gate previously pending in v44. It adds bounded,
+USB-only `OOM_TRACE` and GNU ld wrappers for malloc/calloc/heap_caps_malloc. Failed-allocation
+recording does not allocate, log, read payloads or change allocator arguments/results; it retains a
+count and the first complete numeric caller record. Host **6/6** cases cover success/zero size/three
+allocator kinds/overflow, unchanged errno, fixed first record and an external allocator function
+pointer. Transport contracts **15/15** pass. This is neither a complete heap trace nor a backtrace;
+other APIs and references resolved inside one translation unit need not be intercepted. SDK failure
+hooks run inside the real allocator before this wrapper, so their first records can differ.
+
+- Build / Host / Flash: **PASS**. Complete gate **9096 exit 0**, with existing platform skips.
+  Archive/full SHA-256 `d18a2cc2ff51da1496ce1fe95aad201eeec1fccdaa8c71413f46635833df1886`;
+  App **1,692,288B**, SHA-256 `8488b9b15965173dd354edcadfbcb9b1a478333afea56212b76551e9d6571554`;
+  exact ELF `1624ac1e42cb43cc937ef0b8b6afbe5c78026de98a8fb413f05e513d0245afa1`.
+  Final ELF/map inspection confirms wrappers, real allocators and used 32-bit atomic/interrupt helpers
+  in IRAM, numeric fields in DRAM, nonrecursive real-function calls and the Wi-Fi SDK malloc function
+  pointer relocated to the wrapper. ISR/cache-disabled behavior was not physically exercised.
+  COM6 / MAC **4c:11:ae:31:32:6c**, fresh table SHA-256
+  `bd386c960f8b827e812dd238af37d469c319d7e9ecc2d7501d00296c46804a4f`: only exact App **@0x20000**
+  written and hash verified, **64988 exit 0**. NVS/bonds, assets, bootloader, table, otadata, PHY and
+  ota_1 preserved. Evidence: `apps/esp/build/oom-trace-v45-{full-gate,wrapper-green,contract-green}.log`,
+  `com6-v45-{flash-plan.json,flash.log,startup.json}` and the hash-named firmware archive.
+- Startup: **PASS for the 30.031s read-only window**. BLE secure/ready and Wi-Fi restored, no
+  faults/errors/OOM, OOM_TRACE count=0/ready=false, COM6 closed. This does not establish load stability.
+- APK diagnostic: **FAIL**, distinct from v44's resource failure. HTTP 200 advertised the unchanged
+  **66,090B** APK, but the response ended after **5,399B / 6.797s**. OOM and wrapper counts remained
+  **0**; this observation does not establish the same cause as the earlier APK/OOM incident. The
+  **361B header + 5,399B body = 5,760B** boundary is a byte-count correlation only, not a diagnosed
+  network cause. Subsequent health saw ICMP **1/2** and HTTP timeout. Evidence:
+  `apps/esp/build/apk-v45-oom-trace-device.json`, `com6-v45-after-apk-health.json`.
+- EXE diagnostic: **download/resources FAIL** after a separately recovered **30.000s PASS** baseline
+  with OOM_TRACE count=0 (`com6-v45-exe-baseline.json`). Session **53083 exit 1** received only
+  **1,293,952 / 1,947,136B** in **148.687s**. Final board phase=5/busy=false, result=**45062**,
+  errno=**11**, download minimum heap/largest block **9,240 / 4,608B**, SDK minimum heap **864B**,
+  OOM count **7**; final SDK free heap **41,056B** does not override the failure.
+  At observation **6.047s**, the first wrapped failure is kind=3 (heap_caps_malloc), **1630B**,
+  caps=**2060**, PC **0x40381896**. Decoding with the exact ELF resolves
+  `esp_coex_common_malloc_internal_wrapper`, `components/esp_coex/esp32c3/esp_coex_adapter.c:125`.
+  This is the allocator trampoline, not a full caller stack or unique Wi-Fi-versus-Bluetooth attribution.
+  Evidence: `apps/esp/build/exe-v45-oom-trace-device.json`. No ARM or business input was sent.
+  The board was recovered again afterward (`com6-v45-exe-recovery.log`); that reset log alone is not
+  a new post-recovery load PASS.
+- Unverified / next diagnosis: v46's BSP App draw-buffer reclamation is a candidate in progress,
+  not a proven repair. Rust/EXE/assets and Android/Unicode artifacts remain unchanged. The latest
+  `D:/SDK/platform-tools/adb.exe devices -l` enumerated no phone, so the new APK was not installed,
+  launched or selected as IME. The previously rejected App-start action was not retried or bypassed.
+  Real Unicode/editor/image feedback, nonzero HID, calibration/UI, high-rate LAN and long-term resource
+  acceptance remain incomplete. These download failures prevent complete-product acceptance.
+
+## v44 Delayed-press/replay protection and Unicode IME channel — host/flash PASS, device EXE download FAIL
+
+2026-10-18: The new intermittent-duplicate-input report led to two concrete reproductions: with a
+300ms press ACK delay, the old typing path held a key for **301.3445ms** before release; a completed
+MCP request ID could dispatch again. A production HTTP red test also shows an older duplicate being
+rejected only after the preceding handoff increased the newer browser owner's stop count **0→2**.
+These observations support scoped fixes, not a claim that all physical duplication causes are known.
+
+The cancellable **350ms** settle after the latest successful movement ACK remains, deducting elapsed
+time. An intentional short press now sends neutral keyup/mouseup about **50ms** after the press is
+actually written, **without waiting for its ACK**. Both reports retain independent IDs and original
+**1200ms ACK** deadlines. Cancellation releases earlier; timeout never repeats the press or types
+remaining characters. Raw reports still express intentional holds. PING **300ms** and the **1500ms**
+device safety cutoff stay unchanged. This cannot eliminate physical delay during network/device faults;
+neutral release is cleanup rather than another business input.
+
+All `tools/call` IDs are retained as **32-byte SHA-256 digests** from dispatch start through success,
+failure and cancellation. At **4096** per session, dispatch fails closed and requires a new session;
+records are not evicted to admit old replays, and arguments/images/response bodies are not cached.
+HTTP handoff now follows atomic ID reservation and argument/frame prevalidation, so duplicate or
+rejected calls cannot take over or stop a later browser owner. **The same text with new IDs remains
+valid intentional input**. This is not exactly-once across sessions, service restarts or arbitrary new-ID
+retries. Observe uncertain outcomes first.
+
+Non-ASCII text uses the updated ESP's **encrypted custom BLE GATT → selected QDD phone IME →
+InputConnection.commitText**, rather than pretending US HID or pinyin provides Unicode. The user
+must enable/select the IME and focus an editable field. `QDDTXT/1` validates the complete UTF-8 string,
+forbids NUL and limits it to **512B**, reads editorEpoch/ready and uploads contiguous chunks. Transfer
+IDs incorporate UTC microseconds, the process atomic upper bound and the board's last ID. COMMIT
+is sent **once**; queued is not successful input. Only STATUS is then polled for up to **10s** until a
+phone result. Disconnect, cancellation, timeout or unknown post-commit outcome returns `uncertain`,
+without automatic resubmission. accepted means only InputConnection API acceptance and still requires
+a new real image of the intended field. Terminal states clear text/counts and retain identity/result/
+the original transfer epoch. ASCII continues through short HID pulses.
+
+- Build / Host: **PASS**. Final Rust **rust-76cbec8971e2da33**, EXE **1,947,136B**, SHA-256
+  `cf325aa11a2d5be545626027b64802fa905c0561e3d5221c1af342609b88cd84`, at
+  `apps/android-mcp-rust/build/windows/v44/设备操作台.exe`. check, **80/80** unit tests (zero skips),
+  release and official-SDK packaged fixtures **21/21** pass; final session **88757 exit 0**. Coverage
+  includes a production **1200ms** missing COMMIT ACK returning uncertain, the same RPC ID sending
+  no additional wire input, prompt release despite a 300ms press ACK delay, old-cancellation/new-ARM
+  isolation and HTTP duplicate/invalid requests preserving a new owner. Evidence in that directory:
+  `manifest.json`, `validation.json`, `check.log`, `host-tests.log`, `build.log`, `exe-tests.log`,
+  `exe-smoke.json`; fixtures declare `realDeviceInput:false`.
+- Android Build / Host: **PASS for host/artifact scope only**. APK **66,090B**, SHA-256
+  `1811c4aacc77c9be2cf09d396848bb9605e6e2706a5c7a84d882ac869d4052dc`, signature verified.
+  **21** socket scenarios and **125** UTF-8/IME checks pass. A synchronous focus change during
+  commitText made the original model ACK the wrong epoch (red exit 1); the fix retains the transfer's
+  original epoch. An additional ASCII-only regression mutant is not an old-APK or device reproduction.
+  Evidence: `apps/android-screen/build/ime-v44-{validation.json,host-tests.log,editor-epoch-red.log,editor-epoch-green.log}`.
+  **This APK has not been installed/started on the phone, the user has not enabled its IME, and no
+  real Unicode feedback loop has been tested.** The latest read-only check did not enumerate this
+  phone's ADB serial; the existing projection does not establish that the new APK is running.
+- Assets: **PASS for offline identity/capacity only**. `apps/esp/build/driver-assets-v44.bin`:
+  **1,951,232B**, SHA-256 `b35048deb9613bdb377852bf637f6792a3b1e57049441329aa6d9b0699267b28`.
+  Its 4KiB header plus the exact raw EXE leaves **145,920B** in the existing
+  `assets @ 0x600000 / 0x200000`. `driver-assets-v44.json` binds the executable and freshly read
+  table; create/verify pass. The exact assets image was subsequently written with the App as recorded
+  below; the complete real-board download of the new EXE **failed**.
+- ESP Build / Host / Flash: **PASS within those scopes**. Final complete gate **48663 exit 0**,
+  including the existing platform skips, firmware layout and archive verification. Archive/full SHA-256
+  `0cb2f7a389afcac70eec8988fddc49684acdc5fa064f7d7e4c8b12d513a8ed73`; App **1,691,568B**,
+  SHA-256 `d04b9a511d4e2cf7ce90aadd36527a9dc0cf9da69937fc388a2de7f1b0843020`, matching ELF
+  `101f81fa55295491d963ee1dd5e51f3dca59628328016077e8c749d49e8452d9`. COM6 / MAC
+  **4c:11:ae:31:32:6c** and the freshly read table were checked before the combined write of exact
+  **App @ 0x20000 + assets @ 0x600000**; both hashes verified, flash **85902 exit 0**.
+  NVS/bonds, bootloader, partition table, otadata, PHY and ota_1 were preserved; no full erase/merged@0.
+  The archived merged layout is a build/debug artifact and was not flashed at its generated offsets.
+  Cross-end red/green checks cover Rust's exact `STATUS 0000000000000000` preflight, original-epoch
+  late ACK convergence after focus change, shared ATT indication ownership through ServiceChanged
+  timeout, and event-queue producer deduplication. Runtime integration **4/4** passes. Evidence:
+  `apps/esp/build/drivers-v44-final-gate.log`, `text-v44-rust-zero-{red,green}.log`,
+  `text-v44-att-timeout-{red,green}.log`, `com6-v44-combined-flash-plan.json`, `com6-v44-flash.log`.
+- Device v44: **startup/recovery PASS, continuous EXE download and resources FAIL**.
+  `apps/esp/build/com6-v44-startup.json` records **30.032s** of read-only observation: secure BLE
+  ready, Wi-Fi restored, TEXT STATUS available but **idle / ready=false**, no fault/OOM. The ordinary
+  continuous request, with no deliberate read stall, received only **177,184 / 1,947,136B** in
+  **36.203s** before timeout. Board phase=5, sentBytes=177184, result=**257**, errno=0;
+  OOM reaches **478**, final sampled free heap **5,084B**, download minimum heap **4,068B**.
+  The **16KiB** download guard is therefore insufficient on this real workload. The advertised identity
+  and successful flash do not override download FAIL. Evidence: `apps/esp/build/exe-v44-continuous-device.json`.
+  After recovery, `com6-v44-recovery-startup.json` records **30.016s**, secure BLE ready, Wi-Fi restored,
+  no errors/faults/OOM and closed COM6; TEXT remains idle/not ready. These observations sent no ARM,
+  PING, pairing request or business HID input. Minimal allocation-caller diagnostic v45 is in its
+  complete gate (**9096 PENDING**); no wireless-parameter guess or successful repair is claimed.
+- Device APK/page recovery: **function PASS, overall resources FAIL**. Two User-Agent page requests
+  returned HTTP **200** with the Windows `/qdd-desktop.exe` and Android `/qdd-remote.apk` recommendations.
+  The real-board APK request returned **66,090B** in **13.859s**, matching SHA-256
+  `1811c4aacc77c9be2cf09d396848bb9605e6e2706a5c7a84d882ac869d4052dc`.
+  Evidence: `apps/esp/build/apk-page-v44-recovered-device.json`. Subsequent **30.031s** UART
+  observation in `com6-v44-after-apk.json` records OOM **3**, minimum free heap **1,756B** and
+  final free heap **41,672B**, with BLE ready/Wi-Fi connected and no other faults/errors. Its resource
+  result is **FAIL** despite heap recovery. No input was sent and the APK was not installed/started.
+  The earlier `apk-page-v44-device.json` failed before any checks with **RemoteDisconnected**;
+  that separate transient remains undiagnosed and is not erased by the later functional PASS.
+  The recovery observer before these requests had OOM=0; its PASS describes that earlier window only.
+- Device diagnostic v43c: **complete-download function PASS, overall resources FAIL**. The complete
+  gate passed and COM6 / MAC **4c:11:ae:31:32:6c** received only diagnostic App in the freshly read
+  `ota_0 @ 0x20000`. NVS/bonds, bootloader, table, otadata, PHY, assets and ota_1 were preserved;
+  no full erase/merged@0. Full archive SHA-256:
+  `72a3c381c43e20c7c2062a6298fd9919ff486dce664f28e4b2d95eea0874fdd6`; App **1,670,704B**,
+  SHA-256 `5a7c5c90d7a97582058b6b19f64b21c8d88281a91a03034a112eee36cfb90d27`, matching ELF
+  `ac7397ec688d96e7e0d6b99d584e48c012a1bb29e477bf2c66d623eb3e5ab7f7`. An ordinary continuous
+  read with no deliberate stall received **1,892,352B** in **53.640s**, SHA-256
+  `93b72fd189944db6dcedd251ed7ceb74241b1e413566a16439115bf8cd301ecc`. This is the older v43
+  Rust asset, **not acceptance of the new v44 EXE download**. Final phase=5, all sentBytes and
+  result/errno=0. Concurrent OOM reaches **46**, minimum free heap **952B**; after 8s quiet,
+  free heap recovers to **42,408B**. Completed transfer does not override resource FAIL, and this
+  short sample proves neither permanent leakage nor absence of leakage. Evidence:
+  `apps/esp/build/{com6-v43c-flash-plan.json,com6-v43c-flash.log,exe-v43c-continuous-device.json}`,
+  `apps/android-mcp/build/npcap-driver-v43c-summary.json`. Capture retains headers/counters only,
+  no payload. No ARM or business HID input was sent. This is preserved diagnostic history; the
+  subsequently flashed v44 identity and its failed resource/download result are recorded above.
+- Service boundary: the user manually opened the new Rust EXE; actual path/hash, health, official-SDK
+  tools and the real LAN image were verified as detailed below. Ignored connection settings accompany
+  that EXE. Check `/health`, path and hash dynamically rather than using a historical PID. Stdio clients
+  must select the new path too; HTTP-service verification does not establish every client's configuration.
+- Unverified: the collaborator's **0/10** is not a business FAIL. Earlier high-rate LAN latency,
+  OEM Home behavior, full physical UI/calibration, real Unicode GATT/IME/image feedback, long-term
+  resource bounds and final v44 ESP acceptance remain unaccepted. No commit, push or publication.
+
+Automatic approval rejected the prepared command to quit the old Node service and launch Rust,
+returning only **blocked by policy**. It did not execute and was not retried or bypassed through
+another interface. The user subsequently opened v44 manually. The actual PID **57084**, executable
+path and final EXE hash matched; the official SDK listed **22** tools, neutral STATUS completed in
+**730.8651ms** with BLE encrypted/bonded/ready and input unarmed, and returned a **99,169B** JPEG
+from the real phone LAN projection. This verifies the current Rust service and read-only path,
+not Unicode or nonzero HID acceptance. Evidence:
+`apps/android-mcp-rust/build/windows/v44/actual-service-verified.json` and
+`apps/android-mcp/build/rust-v44-real-neutral.json`. The PID is an observation, not a fixed future target.
+
+## v43 Driver distribution and calibration without a captured system cursor — host PASS, device download FAIL, v43b pending
+
+2026-10-18: The user requests distribution of the new Rust console through assets and reports tablet
+calibration problems. The collaborator's **0/10** means no business cases ran; it is neither PASS nor
+FAIL for the target App. `CONFIGURING`, paused input, PING timeouts and clicks becoming drags are
+instrument failures. OEM Home navigation also requires a new image, rather than trusting HID ACKs.
+The **1200ms ACK / 1500ms safety cutoff** remain unchanged, with no input replay or ADB input/image fallback.
+
+The settings item and QR page are now **Driver download**. The shared board page recommends the
+Android APK or Windows EXE according to the visitor and always retains both explicit platform links:
+`/qdd-remote.apk` and `/qdd-desktop.exe`. A separate download worker keeps large transfers out of
+registration/status handling. Concurrent EXE downloads receive 503; missing/corrupt/oversized assets
+are rejected without changing the partition table. A download page does not establish phone
+installation or successful execution on the PC.
+
+Before button-down, monotonic time since the last successful movement ACK must reach **350ms**.
+Elapsed time counts toward this cancellable wait; already-settled clicks receive no extra fixed delay,
+and movement/click reports are never replayed. Identical calibration `probe` images return both images,
+`measurable:false` / `measurementAvailable:false`, `reason:identical_images`, paused input and no
+`probeId`. Do not invent cursor centers or gains.
+
+The new APK provides a user-opened **Pointer calibration** page. Actual mouse MotionEvent rawX/rawY
+coordinates draw a real event marker into MediaProjection, independent of system-cursor capture.
+MCP adds `android_pointer_calibration {"phase":"auto","frameId":"..."}` and only reads the
+page's active/session/geometry/point state through `/pointer/calibration`; it never opens the App/page.
+A small reveal movement is followed by a cancellable **550ms** settle, then a default **96 HID count**
+probe toward the screen center. Only fresh sequence values in the same session, valid displacement on
+both axes and an unclipped endpoint can produce counts/pixel. Full GET RTT adds to point age.
+Lost focus, rotation, missing/stale events or intervening movement pause input without replacing
+existing scales. No business click is sent, and acceleration still makes later coordinates estimates.
+
+- Build: **PASS only for the listed artifacts**. Root typecheck/build logs:
+  `apps/android-mcp/build/drivers-v43-{typecheck,build}.log`. Final Rust build
+  **rust-447d9cad992b51c3**, EXE **1,892,352B**, SHA-256
+  `93b72fd189944db6dcedd251ed7ceb74241b1e413566a16439115bf8cd301ecc`; frozen output:
+  `apps/android-mcp-rust/build/windows/v43/{manifest.json,validation.json,exe-smoke.json}`.
+  The default output EXE was in use by an existing user process and remains untouched.
+  `QDD_RUST_OUTPUT_DIR` supports the separate version directory; stdio clients must select the new
+  path rather than treating a running older executable as updated. APK **53,727B**, SHA-256
+  `d01126223e601678af72f42e31241d09b1e58c8a70ff6bb79e51a23811fd54d1`.
+- Host tests: **PASS**. Node **562/562, zero skips** in
+  `apps/android-mcp/build/drivers-v43-node-tests.log`; Rust check, **66/66** unit tests, release and
+  official-SDK packaged fixtures **18/18** pass. Coverage includes settle red/green regressions,
+  cancellation before press, elapsed-wait deduction, identical-image/no-ticket behavior, automatic
+  calibration focus/rotation/stale-event/clipping/intervening-input/cancellation guards, read-only GET
+  and transport age. EXE fixtures are isolated from the real service with `realDeviceInput:false`;
+  they do not establish tablet precision or BLE performance.
+- Assets: **PASS for format/identity/capacity only**. `QDDDRV1` is a **4KiB header + raw EXE**,
+  **1,896,448B**, SHA-256
+  `d08e880176f364b3a9e5f4460cd1ab08945929a4978785769d254d8147cc9cae`.
+  Fresh actual layout for COM6 / MAC **4c:11:ae:31:32:6c**, table SHA-256
+  `bd386c960f8b827e812dd238af37d469c319d7e9ecc2d7501d00296c46804a4f`, has
+  `assets @ 0x600000 / 0x200000`, leaving **200,704B**. Firmware verifies header, length, hash and
+  bounds; ZIP fit is not raw-EXE fit. Evidence:
+  `apps/esp/build/driver-assets-v43.{bin,json}`, `com6-v43-{assets-verify.log,combined-flash-plan.json}`.
+- Device tests: **FAIL for the first v43 large download/memory scope**. Its complete gate/archive
+  pass: bundle `dd73c262a0ddb2f39fa51691ecf60d82060a4a892e2292e537356f2314faf9bc`,
+  App **1,668,976B**, SHA-256
+  `82899c73e9891db5471c108c49679f3a307b924006416f8c383d18c5fc0e1603`; matching ELF
+  `a9f325a512482e7f35e3cf458c002111ffe9f6913e58207fe4e135fe45f880b3`.
+  After identity/layout checks, COM6 received only App `ota_0 @ 0x20000` and the assets above,
+  with verified write hashes. Bootloader, partition table, otadata, NVS/bonds, PHY and ota_1 were
+  preserved; no merged@0 or full erase. Android/Windows recommendations and full APK/hash pass,
+  but ordinary continuous EXE reading truncates at **872,064 / 1,892,352B** after **22.303s**, with
+  a mismatching hash. UART then reports cumulative OOM **398**, minimum free heap **568B**.
+  Continued BLE readiness does not override the memory/download FAIL. The observer's original
+  BLE-only PASS predicate was corrected, retaining `com6-v43-after-download-original.json` and
+  recording FAIL in `com6-v43-after-download.json`. Evidence:
+  `apps/esp/build/{drivers-v43-full-gate.log,com6-v43-flash.log,driver-download-v43-device.json,exe-v43-continuous-device.json}`.
+- v43b: **PENDING**. Based on this new device evidence, verification and transmission share staging
+  to reduce permanent memory by **2,048B**, with a separate `/api/download-status` observation route
+  for send phases/memory. Its complete gate is running in `apps/esp/build/drivers-v43b-full-gate.log`.
+  New artifact identity, flashing and full continuous-download results remain to be appended. This is
+  not yet a claim that v43b fixes the fault or passes memory/download acceptance.
+- Unverified: the new APK has not completed installation and real calibration-page acceptance;
+  real-tablet nonzero HID feedback, complete physical UI, OEM Home behavior, the earlier high-rate
+  LAN latency root cause and long-term resource bounds remain unaccepted. Final desktop-service
+  replacement/device results are pending. No commit, push or publication; historical evidence and
+  automatic-approval rejection boundaries remain intact.
+
+## v42 Settings order and next-page arrow — installed on COM6
+
+2026-10-18: Settings now lists **Wi-Fi → Phone Bluetooth pairing → Phone projection download →
+Button guide → Reset device → Return home**. Common actions are on page one; reset is on page two
+and still defaults to cancel, requiring a separate confirmation. A small **↓** in the right-side gap
+appears only when more options exist below, disappears on the final page and returns on page one.
+Three LVGL lines draw the arrow without relying on the absent U+2193 glyph or adding font assets.
+Named menu indices keep action dispatch and return selection aligned with the new order.
+
+- Build: **PASS**, complete gate and archive reverification; log `apps/esp/build/settings-v42-full-gate.log`.
+  Archive `apps/esp/build/firmware/983dbf511cf953ea8e52905814e62aeac46419b2151517514e449136f898c28a`;
+  Full SHA-256 equals its directory name. App **1,666,320B**, SHA-256
+  `3c6cba5a656ab30e0cb924ea6d37c61dd4ad6121f488db76745794cab39d2ddf`; matching ELF SHA-256
+  `a92b03f01f03b1c81e244ef307502c9bf9de8b2d80807686b35606b4fcc81bc5`.
+- Host tests: **PASS**. The old model compiles then fails semantically with exit 3; the new model exits 0.
+  Actual LVGL 9.5 **seven groups** pass: menu/download/full/intro/pair/scan/guide. Coverage includes
+  ordering, every return index, the 3↔4 page boundary and wraparound, reset default cancellation,
+  arrow pixels and background clearing when hidden. One hundred unchanged refreshes per page
+  produce zero flushes and stable allocations; 120 download-page replacements remain stable.
+  Peak usage of the 24KiB LVGL pool is **17,040B**. Existing platform skips remain in the complete gate.
+  Evidence/rendered images: `apps/esp/build/settings-menu-regression/`; source digest: `settings-v42-source-identity.json`.
+- Device tests: **PASS for flashing/startup/connection recovery only**. Fresh verification binds COM6 /
+  MAC **4c:11:ae:31:32:6c** and the actual partition-table MD5. Only `ota_0 @ 0x20000 / 0x2f0000`
+  was written, with verified checksum and erase ending before `0x1b7000` exclusive. Bootloader,
+  table, otadata, NVS/bonds, PHY, assets and ota_1 were preserved. Six replies over **30.000s** show
+  consistently encrypted/bonded/ready **QDD-Passport-326E** BLE, unarmed/unlocked, fault/OOM **0**.
+  The earliest Wi-Fi sample was still recovering; later DIAG reports up=1 and a final independent
+  query confirms connected **192.168.101.75:3333**. No PING, PAIR, ARM or business input was sent,
+  no raw serial was saved and COM6 is closed. Evidence:
+  `apps/esp/build/com6-v42-{archive-verify.log,layout-read.log,partition-table.bin,flash-plan.json,flash.log,startup.json,final-link.json}`.
+- Unverified: physical screen/menu/arrow appearance, physical buttons and QR use still require
+  device observation. Host rendering does not establish display acceptance or expand previous
+  high-rate LAN/full-product conclusions. Desktop services and APK were not changed; no commit,
+  push or publication.
+
 ## v41 Target preview and physical hover — desktop updated, device scope PASS
 
 2026-10-18: Added read-only `android_preview_tap`. Latest `frameId`, coordinates and optional
@@ -123,6 +1094,19 @@ opening Wi-Fi scanning. It does not change onboarding completion, Wi-Fi, bonds, 
   otadata, NVS/bonds, PHY, assets and ota_1 remain intact. Six samples over 30 seconds pass, with
   **192.168.101.75:3333**, encrypted/bonded/ready BLE, unarmed, no fault/OOM and COM6 closed.
   Evidence: `apps/esp/build/new-com6-v39-{layout-read.log,flash-plan.json,flash.log,startup.json}`.
+- Additional COM5 installation (2026-10-18, **09:53 Shanghai**): **Device tests PASS for flashing
+  and startup observation only**. The user explicitly selected COM5. Fresh discovery verified MAC
+  **4c:11:ae:2f:a1:b8**, an 8MB ESP32-C3 and the actual partition-table MD5. This board uses
+  `factory @ 0x10000 / 0x7f0000`, unlike COM6's OTA layout. After reverifying the same v39 archive
+  above, only the **1,666,016B** App was written; its hash passes and erase ends before `0x1a7000`
+  exclusive. Bootloader, table, NVS/bonds and PHY were not erased. Build/Host tests reuse the
+  existing complete gate for this exact artifact; no rebuild. Six replies over **30.015s** pass:
+  Wi-Fi **192.168.100.167:3333**, **QDD-Passport-A1BA** consistently encrypted/bonded/ready,
+  unarmed/unlocked, fault/OOM **0**. No PING, PAIR, ARM or business input was sent, no raw serial
+  was saved and COM5 is closed. Evidence:
+  `apps/esp/build/com5-v39-{archive-verify.log,layout-read.log,partition-table.bin,layout.json,flash-plan.json,flash.log,startup.json}`.
+  Physical menu/buttons, QR download and this board's actual screen/HID feedback loop remain
+  unverified. Desktop configuration and services were not changed.
 - The unchanged desktop EXE build **c2042f779676b1fb0546** is restored as actual PID **91668**.
   Official SDK: **20** tools, STATUS **5/5**, maximum **267ms**, seven POST responses all SSE;
   LAN/loopback health **200**, unknown route **404**. Evidence: `apps/android-mcp/build/mcp-v39-final-status.json`.

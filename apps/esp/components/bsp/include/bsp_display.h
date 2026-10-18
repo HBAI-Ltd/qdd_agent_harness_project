@@ -40,7 +40,14 @@ struct _lv_display_t;
 // 启动 LVGL 与其渲染任务,返回 lv_display_t*。失败返回 NULL；display/回调注册失败
 // 回滚 display 并保留已初始化的 port，后续可重试。port 自身部分初始化失败需重启，
 // 不覆盖依赖中可能尚未退出的任务。首次初始化由单一任务串行调用。
+// 默认单个 40 行 RGB565 DMA 缓冲；已就绪时返回原 display，不重新分配。
 struct _lv_display_t *bsp_lvgl_init(void);
+
+// 同上，但允许应用在首次注册前选择部分绘制缓冲的行数（1..BSP_LCD_H）。
+// 非法值返回 NULL，且不启动 port/分配资源。始终保持单个 RGB565 DMA 缓冲；
+// 本板无 PSRAM，字节预算为 BSP_LCD_W * draw_buffer_rows * 2。
+// 已就绪时有效参数仍返回原 display，不热调整；失败重试可改用较少行数。
+struct _lv_display_t *bsp_lvgl_init_with_buffer_rows(uint16_t draw_buffer_rows);
 
 // LVGL 非线程安全:在【非 LVGL 任务】里操作任何 lv_* 对象前后必须加解锁。
 // LVGL 尚未就绪或超时时 lock 返回 false；只有 lock 成功后才调用 unlock。

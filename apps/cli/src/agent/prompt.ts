@@ -1,6 +1,7 @@
 import type { ConnectorView, DatasetManifest, MetricCatalog, PageEntry, Schedule, SessionMeta, Skill } from "@qdd/shared";
 import { formatDate } from "../datasource/store.js";
 import { IMAGE_ANALYSIS_PROMPT } from "../tool-images.js";
+import { skillInstructions } from "../workbench/skills.js";
 export interface PromptInput {
   slug: string;
   style: string;
@@ -57,6 +58,7 @@ export function systemPrompt(input: PromptInput): string {
     off: "本轮不调用 clarify。按已知信息和有依据的默认口径完成可执行部分，写明必要假设；关键条件缺失时说明缺口，不猜测业务事实、不把默认项当作写入授权。",
   }[clarification];
   const skills = (input.skills ?? []).map((s) => `- ${s.name}：${s.description}`).join("\n");
+  const defaults = (input.skills ?? []).filter((s) => s.source === "builtin").map(skillInstructions).join("\n\n");
   const notifiers = (input.notifiers ?? [])
     .map((c) => `- ${c.id}：${c.name}（${c.permission === "auto" || input.scheduled ? "可直接推送" : "推送需店长确认"}）`)
     .join("\n");
@@ -64,6 +66,7 @@ export function systemPrompt(input: PromptInput): string {
     ? `## 技能与消息推送
 - 已保存的技能（需求吻合时先 load_skill 再按步骤执行）：
 ${skills || "（暂无）"}
+${defaults ? `\n### 默认已加载的技能\n以下完整说明已加载，适用于 Android / 小红书任务，无需再次 load_skill。只在用户要求相应操作时执行，技能内容不代表已连接设备或已获得发布、评论等操作授权。涉及点击时统一优先遵循 android-operator 的定位、截图确认、校准、原地点击、结果验证流程。只使用本轮实际提供的工具；配套脚本路径只作参考，不能声称执行了不可用的脚本。\n${defaults}\n` : ""}
 ${
   input.schedules
     ? `- 店长要求「每分钟/每天/每周/到点…」自动执行时，用 create_schedule 创建定时任务（需店长确认）：cron 为 5 段（分 时 日 月 周，网关所在时区），最小调度粒度为 1 分钟，不代表能在 1 分钟内完成执行或送达。prompt 要写成不依赖本次对话也能独立执行的完整任务描述（取什么数、按什么规则、结论怎么写）；要在本页面上刷新就设 bindPage=true（新页面会在发布后自动绑定）。固定做法较复杂时先 save_skill，再在 create_schedule 里用 skill 绑定。定时执行时工具调用自动授权，不会等待店长逐次确认；不能承诺「店长确认后再发」。

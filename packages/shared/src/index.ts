@@ -452,7 +452,9 @@ export interface Skill {
   steps: string[];
   /** 用到的数据工具 / harness 工具，如 store__get_inventory、send_notification */
   tools: string[];
-  source: "user" | "agent";
+  source: "user" | "agent" | "builtin";
+  /** 内置技能的完整说明，默认加入会话上下文。 */
+  instructions?: string;
   /** agent 从对话中提炼时的来源会话 */
   sessionId?: string;
   createdAt: string;

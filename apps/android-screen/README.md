@@ -61,6 +61,11 @@ discovery can fill connection settings. If the board IP changes, discovery match
 selected Bluetooth name instead of silently switching devices. Registration grants no
 HID input rights and does not skip Android screen-sharing consent.
 
+The Bluetooth guide accepts the controller as ready only when `connected`, `encrypted`,
+`bonded` and `ready` are all true. Just Works pairing needs no typed code; confirm the
+device in Android's Bluetooth settings. Its `authenticated` flag can remain false:
+encryption and bonding do not provide passkey-based MITM authentication.
+
 Install the APK on Android 8+; Android 13 is the current acceptance target.
 For an authorized, USB-connected development device:
 
@@ -244,6 +249,60 @@ callback isolation, notification denial, Activity recreation and service-start
 wait recovery. Three pixel regressions cover packed buffer reuse, padded rows and
 invalid layout rejection. They do not establish Android streaming frame rate or
 phone resource usage; those need a new installed-build test.
+
+## Pointer calibration without a captured system cursor
+
+After starting screen sharing, manually tap **打开指针校准页** in the App. This full-screen
+page receives actual mouse events and draws their measured coordinates into ordinary
+MediaProjection output. It needs no accessibility, injection or overlay permission. The PC MCP
+can measure with `android_pointer_calibration phase: "auto"`; use system Back to leave afterward.
+
+Read-only private-LAN `GET /pointer/calibration` returns `active`, `deviceId`, `sessionId`, physical
+`width/height`, `rotation` and `point: {x,y,sequence,ageMs}`. Fractional coordinates come from Android
+mouse-event `getRawX/getRawY`; without a valid event, `point` is null. Lost focus/background invalidates
+the session and point, and re-entering creates a fresh session. HTTP cannot launch the page or inject
+events. Identical images cannot establish gain when the system cursor is absent, and simulated target
+markers do not prove actual pointer positions.
+
+## Optional device Unicode input method
+
+Updated ESP firmware carries original UTF-8 through its bonded, encrypted BLE link to an optional
+App input method, which calls `InputConnection.commitText` on the current editor. It uses no pinyin
+substitution, clipboard, ADB or network text injection. A transfer supports up to 512 UTF-8 bytes,
+including Chinese, emoji and mixed ASCII; NUL is rejected. The target App may still filter characters
+or length. An ACK confirms the editor API result, so verify the actual result through screen sharing.
+
+The user must complete the App's **设备中文输入** steps themselves:
+
+1. Grant Android 12+ Nearby devices connection permission and select an already bonded QDD controller.
+2. Open system input-method settings and enable **设备中文输入**.
+3. Select it in the system picker, then focus the intended field in the target App.
+
+The App lists bonded devices only, without scanning or location permission. It cannot silently enable
+or select the IME. A hardware keyboard may hide the IME window; readiness instead requires a valid
+current InputConnection and subscribed encrypted GATT channel. The service is protected by
+`BIND_INPUT_METHOD`. HTTP has no text-commit, IME-launch or selection endpoint. Editor changes,
+IME shutdown and disconnection clear pending bytes. Text is never saved to preferences, logs or files.
+
+The service UUID is `9bded201-39ba-4a19-8ff7-25c9d00a0001`; the ESP indication characteristic ends
+in `0002` and encrypted phone-write characteristic in `0003`. Every packet starts with version
+byte 1 and type byte; all remaining integers use little-endian encoding:
+
+| Direction/type | Body |
+| --- | --- |
+| ESP→phone `01 BEGIN` | id u64, editor epoch u32, UTF-8 length u16 |
+| ESP→phone `02 DATA` | id u64, byte offset u16, bytes |
+| ESP→phone `03 COMMIT` | id u64, editor epoch u32 |
+| ESP→phone `04 CANCEL` | id u64 |
+| Phone→ESP `81 READY` / `83 NOT_READY` | editor epoch u32 |
+| Phone→ESP `82 ACK` | id u64, status u8, editor epoch u32 |
+
+ACK 0 means `commitText` returned true, 1 means rejected, and 2 means an exception left the result
+uncertain. Nonzero IDs increase as unsigned u64 within each editor epoch. Duplicate data must match
+already received bytes exactly; duplicate COMMIT returns the cached result without another commit.
+Lost confirmation may mean text was already entered: the PC must never replay automatically. State
+and ACK writes are serialized, and text arrives exclusively through ESP BLE. HID/GATT coexistence,
+Service Changed/OEM cache behavior for existing bonds and actual Unicode input still require device acceptance.
 
 ## Validation boundary
 

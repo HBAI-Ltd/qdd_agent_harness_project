@@ -19,7 +19,7 @@ typedef struct {
     bool double_buffer;
     int hres, vres;
     struct { bool swap_xy, mirror_x, mirror_y; } rotation;
-    struct { bool buff_dma, swap_bytes; } flags;
+    struct { bool buff_dma, swap_bytes, buff_spiram, sw_rotate; } flags;
 } lvgl_port_display_cfg_t;
 esp_err_t lvgl_port_init(const lvgl_port_cfg_t *);
 esp_err_t lvgl_port_deinit(void);

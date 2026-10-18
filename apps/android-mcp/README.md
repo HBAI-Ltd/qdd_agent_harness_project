@@ -223,7 +223,7 @@ is not automatically connected to this standalone service's screenshots.
 | `android_hid_arm`, `android_hid_pause`, `android_release` | Explicit arm, cancel queued input, release held reports |
 | `android_mouse_move`, `android_mouse_click`, `android_scroll` | Relative counts, current-position clicks, wheel |
 | `android_preview_tap` | Read-only target marker and enlarged crop before choosing a click position |
-| `android_pointer_calibration` | AI-assisted measurement and confirmation of pointer calibration |
+| `android_pointer_calibration` | `auto` reads actual mouse events on the dedicated page; `probe/finish` measures a visible cursor |
 | `android_calibrate_pointer`, `android_pointer_home`, `android_tap`, `android_swipe` | Calibrated estimated coordinates |
 | `android_type`, `android_key`, `android_key_report` | US-layout ASCII, chords, raw keyboard reports |
 | `android_consumer_report`, `android_home`, `android_back` | Raw consumer usages and Home/Back |
@@ -314,7 +314,22 @@ preview → hover → inspect → click flow for small or consequential targets.
 
 ### Measure pointer calibration with the AI
 
-Prefer `android_pointer_calibration` for AI coordinate taps/swipes. The AI reads
+If the tablet omits its system cursor from captured images, manually open **打开指针校准页**
+inside the screen-sharing App, keep that page in the foreground, take a fresh screenshot and call:
+
+```json
+{ "phase": "auto", "frameId": "<calibration-page-frameId>" }
+```
+
+This sends two small button-free ESP BLE mouse movements and computes both counts/pixel scales
+from actual Android mouse events received by the dedicated page. The page draws the measured
+position itself, so capturing the system cursor is unnecessary. It rests for 550 ms before the
+measured move. Lost focus, rotation, stale events, clipped movement and intervening input reject
+the calibration update. Use system Back to leave the page when done. The API cannot launch the
+App/page or grant screen-sharing consent. Never calibrate by clicking a business page, and never
+treat the simulated target marker as proof of the physical landing point. Acceleration still limits accuracy.
+
+For a visible system cursor, `android_pointer_calibration` also supports `probe/finish`. The AI reads
 the circular cursor in original screenshots; the service calculates the ratios,
 so the user does not have to guess horizontal or vertical scales. This is a
 two-stage measurement, not automatic computer vision.

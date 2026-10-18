@@ -141,7 +141,15 @@ Wi-Fi、NimBLE 和 light/deep sleep 直接使用 ESP-IDF API，不属于板级 B
 
 ### 5.2 LVGL 内存和线程规则
 
-ESP32-C3 无 PSRAM。当前 LVGL 显示缓冲为 `240 × 20` 像素的单 DMA 缓冲，RGB565 约 9.6 KB；`sdkconfig.defaults` 的 LVGL 内部池为 24 KB。不要直接改为大行数双缓冲，也不要扩大 UI 内存池而不检查内部 RAM、最大连续堆和 I2S DMA 初始化。
+ESP32-C3 无 PSRAM。零参数 `bsp_lvgl_init()` 保留 `240 × 40` RGB565 单 DMA
+缓冲，占 19,200 字节。应用可在初始化时调用 `bsp_lvgl_init_with_buffer_rows(rows)`，
+行数限定为 `1..BSP_LCD_H`；非法值不分配资源，已注册显示返回原实例，不热调整大小。
+QDD 桥接应用显式选择 20 行（9,600 字节），比默认值释放 9,600 字节用于并发无线负载。
+port 仍只用原来的单个 `MALLOC_CAP_DMA` 分配，不启用 PSRAM 或第二块缓冲。
+行数减少会增加全屏刷新分片（本屏 40 行到 20 行由 8 片变为 16 片），因此必须验证
+应用的实际页面切换、圆角、二维码可读性及无线/下载行为；预算减少本身不证明分配失败
+或网络超时已经修复。`sdkconfig.defaults` 的 LVGL 内部池仍为 24 KB。
+不要直接改为大行数双缓冲，也不要扩大 UI 内存池而不检查内部 RAM、最大连续堆和 I2S DMA 初始化。
 
 LVGL 最终输出的 RGB565 刷新区域会统一套用 30 px 圆角遮罩，因此正常刷新和页面切换期间，圆角之外的四角区域都会保持纯黑。遮罩直接作用于局部绘制缓冲，不使用根 screen 的 `clip_corner`；全屏圆角裁剪需要 ARGB 中间图层，在本项目无 PSRAM、LVGL 内存池仅 24 KB 的条件下可能耗尽内存。该行为统一放在显示接入层，不应在各页面重复绘制四角装饰。
 
@@ -266,7 +274,7 @@ SOC 准确度取决于电芯与 profile 的匹配程度。本驱动给出的是�
 内存审查至少关注：
 
 - LVGL 静态内存池 24 KB；
-- LCD DMA buffer 约 9.6 KB；
+- 已选 LCD DMA buffer（BSP 默认 19.2 KB，QDD 应用 9.6 KB）；
 - I2S DMA descriptor/frame buffer；
 - Audio demo 96 KB 录音堆；
 - Wi-Fi 驱动或 NimBLE host/controller（两个示例不同时常驻）；

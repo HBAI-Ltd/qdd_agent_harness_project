@@ -2,6 +2,10 @@ package cn.qdd.screenbridge;
 
 import android.Manifest;
 import android.app.Activity;
+import android.app.AlertDialog;
+import android.bluetooth.BluetoothAdapter;
+import android.bluetooth.BluetoothDevice;
+import android.bluetooth.BluetoothManager;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.res.ColorStateList;
@@ -16,15 +20,20 @@ import android.os.Handler;
 import android.os.SystemClock;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.inputmethod.InputMethodManager;
 import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
 
 public final class MainActivity extends Activity {
   private static final int CAPTURE = 10;
   private static final int NOTIFICATIONS = 11;
+  private static final int BLUETOOTH_TEXT = 12;
   private static final int BACKGROUND = 0xFF0E1116;
   private static final int CARD = 0xFF191D24;
   private static final int BORDER = 0xFF303640;
@@ -39,6 +48,7 @@ public final class MainActivity extends Activity {
   private Button stop;
   private TextView setupGuide;
   private Button bluetooth;
+  private TextView imeStatus;
   private CaptureConsent consent;
   private final Runnable refresh = new Runnable() {
     @Override public void run() { update(); handler.postDelayed(this, 500); }
@@ -79,6 +89,22 @@ public final class MainActivity extends Activity {
     setupGuide = label("", 14); setupGuide.setTextColor(MUTED); setupGuide.setPadding(0, dp(12), 0, dp(4)); controller.addView(setupGuide);
     bluetooth = button(controller, "连接设备控制器", false);
     bluetooth.setOnClickListener(view -> startActivity(new Intent(android.provider.Settings.ACTION_BLUETOOTH_SETTINGS)));
+
+    LinearLayout calibration = card(content, "指针校准");
+    TextView calibrationTip = label("平板光标不出现在投屏画面时，打开专用校准页，电脑即可读取真实鼠标坐标。请先开始投屏。", 14);
+    calibrationTip.setTextColor(MUTED); calibrationTip.setPadding(0, dp(12), 0, 0); calibration.addView(calibrationTip);
+    button(calibration, "打开指针校准页", false).setOnClickListener(view -> startActivity(new Intent(this, PointerCalibrationActivity.class)));
+
+    LinearLayout unicode = card(content, "设备中文输入");
+    TextView unicodeTip = label("中文和表情需要新版控制器固件，并由你在系统里启用、选择“设备中文输入”。文字只经所选控制器的蓝牙传入，不读取或保存输入内容。可随时切回原输入法。", 14);
+    unicodeTip.setTextColor(MUTED); unicodeTip.setPadding(0, dp(12), 0, 0); unicode.addView(unicodeTip);
+    imeStatus = label("", 14); imeStatus.setTextColor(MUTED); imeStatus.setPadding(0, dp(12), 0, 0); unicode.addView(imeStatus);
+    button(unicode, "1. 选择已配对控制器", false).setOnClickListener(view -> chooseTextController());
+    button(unicode, "2. 打开系统输入法设置", false).setOnClickListener(view -> {
+      try { startActivity(new Intent(android.provider.Settings.ACTION_INPUT_METHOD_SETTINGS)); }
+      catch (RuntimeException unavailable) { Toast.makeText(this, "请在系统设置中手动启用设备中文输入", Toast.LENGTH_LONG).show(); }
+    });
+    button(unicode, "3. 选择设备中文输入", false).setOnClickListener(view -> getSystemService(InputMethodManager.class).showInputMethodPicker());
 
     LinearLayout guide = card(content, "如何操作");
     TextView details = label("电脑打开设备操作台.exe，点“自动查找”连接设备。\n\n点击实时画面开始操作，按 Esc 返回电脑。\n\n紧急情况：在设备控制器上选择“紧急停止”并按确认。主界面默认选中急停；恢复时选择“取消急停”并确认。", 14);
@@ -130,6 +156,31 @@ public final class MainActivity extends Activity {
 
   private int dp(int value) { return Math.round(value * getResources().getDisplayMetrics().density); }
 
+  private void chooseTextController() {
+    if (!ImeGattClient.permitted(this)) {
+      requestPermissions(new String[]{Manifest.permission.BLUETOOTH_CONNECT}, BLUETOOTH_TEXT); return;
+    }
+    try {
+      BluetoothManager manager = getSystemService(BluetoothManager.class);
+      BluetoothAdapter adapter = manager == null ? null : manager.getAdapter();
+      if (adapter == null || !adapter.isEnabled()) { Toast.makeText(this, "请先开启系统蓝牙，并配对设备控制器", Toast.LENGTH_LONG).show(); return; }
+      ArrayList<BluetoothDevice> choices = new ArrayList<>();
+      for (BluetoothDevice device : adapter.getBondedDevices()) {
+        String name = device.getName();
+        if (device.getBondState() == BluetoothDevice.BOND_BONDED && name != null && name.startsWith("QDD-Passport-")) choices.add(device);
+      }
+      Collections.sort(choices, Comparator.comparing(device -> device.getName() + device.getAddress()));
+      if (choices.isEmpty()) { Toast.makeText(this, "尚无已配对的 QDD 控制器，请先在系统蓝牙设置完成配对", Toast.LENGTH_LONG).show(); return; }
+      String[] labels = new String[choices.size()];
+      for (int i = 0; i < choices.size(); i++) labels[i] = choices.get(i).getName() + "  " + choices.get(i).getAddress();
+      new AlertDialog.Builder(this).setTitle("选择接收中文的控制器").setItems(labels, (dialog, selected) -> {
+        BluetoothDevice device = choices.get(selected);
+        getSharedPreferences("screen-source", MODE_PRIVATE).edit().putString(ImeGattClient.ADDRESS, device.getAddress())
+            .putString(ImeGattClient.NAME, device.getName()).apply(); update();
+      }).setNegativeButton("取消", null).show();
+    } catch (RuntimeException unavailable) { Toast.makeText(this, "无法读取已配对设备，请检查附近设备权限", Toast.LENGTH_LONG).show(); }
+  }
+
   private void setLabel(TextView view, String text) {
     if (!text.contentEquals(view.getText())) view.setText(text);
   }
@@ -164,6 +215,8 @@ public final class MainActivity extends Activity {
     setLabel(endpoint, app.wifiAddress() == null ? "暂未连接 Wi-Fi，请先连接电脑所在的局域网。" : "http://" + app.wifiAddress() + ":" + app.port());
     setLabel(setupGuide, app.boardSetup().guide());
     setLabel(bluetooth, app.boardSetup().bluetoothReady() ? "查看蓝牙连接" : "连接 " + app.boardSetup().deviceName());
+    String selected = getSharedPreferences("screen-source", MODE_PRIVATE).getString(ImeGattClient.NAME, "尚未选择控制器");
+    setLabel(imeStatus, selected + "\n" + app.imeStatus);
   }
 
   private void requestCapture() {
@@ -190,6 +243,11 @@ public final class MainActivity extends Activity {
 
   @Override public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] results) {
     super.onRequestPermissionsResult(requestCode, permissions, results);
+    if (requestCode == BLUETOOTH_TEXT) {
+      if (ImeGattClient.permitted(this)) chooseTextController();
+      else Toast.makeText(this, "未允许附近设备权限，中文输入暂不可用；投屏仍可继续", Toast.LENGTH_LONG).show();
+      return;
+    }
     if (requestCode == NOTIFICATIONS) {
       consent.finished();
       if (results.length == 0 || results[0] != PackageManager.PERMISSION_GRANTED) {

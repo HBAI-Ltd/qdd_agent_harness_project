@@ -2,7 +2,10 @@
 """Integration contracts for failed-CONNECT routing and HOGP registration."""
 
 from pathlib import Path
+import os
 import re
+import subprocess
+import tempfile
 import unittest
 
 
@@ -67,7 +70,7 @@ class QddBleContractTest(unittest.TestCase):
         self.assertIn("qdd_ble_policy_secure", function_body(self.source, "update_security"))
         context = function_body(self.source, "qdd_ble_pairing_context")
         self.assertIn("s_status.passkey_visible = false", context)
-        self.assertIn("closed && !s_status.authenticated", context)
+        self.assertIn("closed && !secure", context)
         self.assertIn("atomic_load(&s_new_peer)", context)
         gap = function_body(self.source, "gap_event")
         repeat = gap[gap.index("case BLE_GAP_EVENT_REPEAT_PAIRING:"):]
@@ -117,6 +120,51 @@ class QddBleContractTest(unittest.TestCase):
             self.assertIn(expected, defaults)
         startup = function_body(self.source, "qdd_ble_start")
         self.assertIn("qdd_hid_pnp_id(s_pnp_id, CONFIG_QDD_HID_VENDOR_ID_SOURCE", startup)
+
+    def test_just_works_keeps_encryption_and_bonding_without_forging_mitm(self) -> None:
+        startup = function_body(self.source, "qdd_ble_start")
+        for required in ("sm_io_cap = BLE_SM_IO_CAP_NO_IO", "sm_bonding = 1", "sm_mitm = 0", "sm_sc = 1"):
+            self.assertIn(required, startup)
+        self.assertIn("s_status.authenticated = desc.sec_state.authenticated", self.source)
+        self.assertIn("s_status.key_size = desc.sec_state.key_size", self.source)
+        self.assertNotIn("s_status.authenticated = true", self.source)
+        for forbidden in ("BLE_GATT_CHR_F_READ_AUTHEN", "BLE_GATT_CHR_F_WRITE_AUTHEN",
+                          "BLE_GATT_CHR_F_NOTIFY_INDICATE_AUTHEN", "BLE_ATT_F_READ_AUTHEN"):
+            self.assertNotIn(forbidden, self.source)
+        self.assertIn("BLE_GATT_CHR_F_NOTIFY_INDICATE_ENC", self.source)
+        self.assertIn("BLE_ATT_F_READ_ENC, .min_key_size = 16", self.source)
+
+    def test_production_pairing_security_and_primary_advertisement(self) -> None:
+        signatures = {
+            "update_ready_locked": "static void update_ready_locked(void)",
+            "qdd_ble_status": "qdd_ble_status_t qdd_ble_status(void)",
+            "qdd_ble_pairing_context": "void qdd_ble_pairing_context(bool active)",
+            "advertise": "static int advertise(void)",
+            "update_security": "static void update_security(uint16_t connection)",
+            "qdd_ble_report": "bool qdd_ble_report(uint8_t report_id, const uint8_t *data, size_t length, void *context)",
+            "text_little": "static uint64_t text_little(const uint8_t *bytes, unsigned count)",
+            "text_access": "static int text_access(uint16_t connection, uint16_t handle, struct ble_gatt_access_ctxt *context, void *argument)",
+        }
+        bodies = [signature + " {\n" + function_body(self.source, name) + "\n}"
+                  for name, signature in signatures.items()]
+        gap = function_body(self.source, "gap_event")
+        for name, marker, end_marker in (
+                ("production_connect", "CONNECT", "ENC_CHANGE"),
+                ("production_encryption", "ENC_CHANGE", "PASSKEY_ACTION"),
+                ("production_passkey", "PASSKEY_ACTION", "REPEAT_PAIRING")):
+            start = gap.index(f"case BLE_GAP_EVENT_{marker}:") + len(f"case BLE_GAP_EVENT_{marker}:")
+            end = gap.index(f"case BLE_GAP_EVENT_{end_marker}:", start)
+            branch = gap[start:end].strip()
+            bodies.append(f"static int {name}(struct mock_event *event) {{\n{branch}\n}}")
+        with tempfile.TemporaryDirectory(prefix="qdd-ble-pairing-") as temporary:
+            directory = Path(temporary)
+            (directory / "qdd_ble_pairing_extract.h").write_text("\n".join(bodies), encoding="utf-8")
+            executable = directory / ("test.exe" if os.name == "nt" else "test")
+            subprocess.run([os.environ.get("CC", "cc"), "-std=c11", "-Wall", "-Wextra", "-Werror",
+                "-I" + str(ROOT / "main"), "-I" + str(ROOT / "tests/qdd_wifi_host"), "-I" + str(directory),
+                str(ROOT / "tests/test_qdd_ble_pairing.c"), str(ROOT / "main/qdd_hid.c"),
+                "-o", str(executable)], check=True)
+            subprocess.run([str(executable)], check=True)
 
 
 if __name__ == "__main__":

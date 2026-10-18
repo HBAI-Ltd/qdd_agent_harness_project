@@ -359,7 +359,8 @@ static void reset(void) {
     s_client_activity_ms = 0;
     atomic_uint *diagnostic_counters[] = {&s_diag_connects, &s_diag_disconnects, &s_diag_beacons,
         &s_diag_reason, &s_diag_disconnect_ms, &s_diag_beacon_ms, &s_diag_alloc_failures,
-        &s_diag_alloc_size, &s_diag_alloc_caps, &s_diag_tx_ok, &s_diag_tx_fail, &s_diag_tx_ms};
+        &s_diag_alloc_size, &s_diag_alloc_caps, &s_diag_first_state, &s_diag_first_function,
+        &s_diag_first_size, &s_diag_first_caps, &s_diag_tx_ok, &s_diag_tx_fail, &s_diag_tx_ms};
     for (size_t i = 0; i < sizeof(diagnostic_counters) / sizeof(diagnostic_counters[0]); i++) {
         atomic_store(diagnostic_counters[i], 0);
     }
@@ -1135,6 +1136,7 @@ static void test_diagnostics_numeric_callbacks_and_bounds(void) {
     assert(strstr(json, "\"ev\":[1,1,1,200,200,150]"));
     assert(strstr(json, "\"heap\":[27624,24000,15360]"));
     assert(strstr(json, "\"oom\":[1,1536,2052]"));
+    assert(strstr(json, "\"oomFirst\":[255,1536,2052]"));
     assert(strstr(json, "\"tx\":[0,1,1,10]") && strstr(json, "\"memHook\":0"));
     assert(!strstr(json, "NEVER_OUTPUT") && !strstr(json, "ssid") && !strstr(json, "password"));
     for (size_t i = 0; i < length; i++) assert((unsigned char)json[i] >= 32 && (unsigned char)json[i] <= 126);
@@ -1171,6 +1173,8 @@ static void test_diagnostics_stale_cache_api_failures_and_maximum(void) {
     atomic_uint *maximums[] = {&s_diag_connects, &s_diag_disconnects, &s_diag_beacons, &s_diag_reason,
         &s_diag_alloc_failures, &s_diag_alloc_size, &s_diag_alloc_caps, &s_diag_tx_ok, &s_diag_tx_fail};
     for (size_t i = 0; i < sizeof(maximums) / sizeof(maximums[0]); i++) atomic_store(maximums[i], UINT_MAX);
+    atomic_store(&s_diag_first_state, 2); atomic_store(&s_diag_first_function, 255);
+    atomic_store(&s_diag_first_size, UINT_MAX); atomic_store(&s_diag_first_caps, UINT_MAX);
     m.now_us = (int64_t)INT_MAX * 1000;
     m.ap_result = m.rssi_result = m.channel_result = m.ps_result = m.ip_result = INT_MIN;
     atomic_store(&s_diag_tx_hook_error, INT_MIN); atomic_store(&s_diag_heap_hook_error, INT_MIN);
@@ -1188,6 +1192,26 @@ static void test_diagnostics_stale_cache_api_failures_and_maximum(void) {
     assert(qdd_wifi_scan() == ESP_OK && s_started); // Diagnostic failure cannot disable Wi-Fi.
     assert(qdd_wifi_diagnostics(json, sizeof(json)) > 0);
     assert(strstr(json, "\"tx\":[-1,0,0,-1]") && strstr(json, "\"memHook\":-1"));
+}
+
+static void test_first_oom_is_persistent_numeric_and_bounded(void) {
+    connected(); char json[QDD_WIFI_DIAGNOSTICS_MAX + 1];
+    assert(qdd_wifi_diagnostics(json, sizeof(json)) && strstr(json, "\"oomFirst\":[0,0,0]"));
+    diagnostic_alloc_failed(1630, 2060, "heap_caps_malloc");
+    diagnostic_alloc_failed(1700, 6144, "NEVER_ECHO_ALLOCATOR_OR_ADDRESS");
+    assert(qdd_wifi_diagnostics(json, sizeof(json)));
+    assert(strstr(json, "\"oomFirst\":[1,1630,2060]") && strstr(json, "\"oom\":[2,1700,6144]"));
+    assert(!strstr(json, "heap_caps") && !strstr(json, "NEVER_ECHO"));
+    stop_stack();
+    assert(qdd_wifi_diagnostics(json, sizeof(json)) && strstr(json, "\"oomFirst\":[1,1630,2060]"));
+    const char *names[] = {"heap_caps_malloc", "heap_caps_calloc", "heap_caps_realloc",
+        "heap_caps_malloc_prefer", "heap_caps_calloc_prefer", "heap_caps_realloc_prefer",
+        "heap_caps_aligned_alloc", "heap_caps_aligned_calloc", "heap_caps_malloc_default", "heap_caps_realloc_default"};
+    for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); i++) assert(diagnostic_function(names[i]) == i + 1);
+    assert(diagnostic_function(NULL) == 255 && diagnostic_function("heap_caps_malloc_secret") == 255);
+    reset(); atomic_store(&s_diag_first_state, 1); // A partial publication is never exposed.
+    atomic_store(&s_diag_first_function, 1); atomic_store(&s_diag_first_size, 100);
+    assert(qdd_wifi_diagnostics(json, sizeof(json)) && strstr(json, "\"oomFirst\":[0,0,0]"));
 }
 
 static void assert_tcp_diagnostics(const char *expected) {
@@ -1273,6 +1297,7 @@ static void test_tcp_diagnostics_failure_reasons_and_bounds(void) {
 }
 
 int main(void) {
+    test_first_oom_is_persistent_numeric_and_bounded();
     test_idle_observer_replaced_by_valid_peer();
     test_observer_admission_protects_owner_fresh_and_invalid();
     test_observer_activity_is_per_client_and_rx_only();

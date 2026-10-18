@@ -13,6 +13,8 @@ whenToUse: 需要在真机小红书做点击类操作；或遇到"坐标整体�
 
 配套：`agent.py`（闭环驱动）
 
+通用方法与 Android 主技能共用：[METHODOLOGY.md](../android-operator/METHODOLOGY.md)。文中 `tap` 是动作意图的简写，必须展开为“认页面状态 → 只移动定位 → 检查新整屏和目标局部实拍图 → 确认校准/定位依据 → 原地点击 → 等待并验证”，不能直接用组合点击跳过中间观察。列表目标以新帧现测；预览十字是模拟标记，不能证明物理光标位置。结果不确定时先按链路/未武装/定位/状态分类，只有明确证明未开始/未派发才允许重新执行，非幂等动作只回读。每次留存确认图、效果图及判读用的计数/文案。
+
 ---
 
 ## 第 0 步：校准（跳过它后面全错）
@@ -77,7 +79,7 @@ py agent.py blindswipe 500 500 500 500 100   # 原地按压：既点击又把指
 
 **状态没变时的判定顺序**：
 ```
-指针确实在目标上 + 已过 0.55s → 真没生效 → 允许再点（仅幂等操作）
+指针确实在目标上 + 已过 0.55s → 重新观测并分类；仅明确原动作未开始/未派发才重新执行
 指针不在目标上                → 定位失败，重新归零，不要补点
 动作后 <0.55s 取的帧          → 不算数，重新取帧
 目标被系统 chrome 遮挡        → 报告遮挡，不要重试（见故障 G）
@@ -169,20 +171,19 @@ $py = "C:\Users\1\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\python\pyth
 & $py agent.py move DX DY            # 一次相对移动
 
 & $py agent.py goto X Y              # 视觉闭环移动（指针必须入镜）
-& $py agent.py tap X Y [safe]        # 闭环 + 拆分点击
-& $py agent.py blindtap X Y          # 归零 + 盲走 + 点击（指针不入镜时用）
+# 旧 tap / blindtap 组合命令不作为默认点击流程：使用 goto/预览，人工判读双图后再 click
 & $py agent.py blindswipe X1 Y1 X2 Y2 [MS]   # 盲走 + 拖拽
 & $py agent.py click                 # 原地点击
 & $py agent.py scroll ±N             # 滚轮（手机有效，平板无效）
 & $py agent.py back | homekey        # 已内置 0.55s 沉降
-& $py agent.py type "ascii"          # 仅 US 布局
+& $py agent.py type "淮北采耳店"     # 中文走新版 QDD 输入法通道，英文走 HID
 & $py agent.py key "ctrl+a" | backspace
 & $py agent.py longpress X Y [ms]
 & $py agent.py gain GX GY            # 驱动侧像素/计数比
 & $py agent.py staleframe            # 验证过期帧不会执行
 ```
 
-**选闭环还是盲走**：指针入镜（手机）→ 闭环更快更稳；指针不入镜（平板）→ 只能盲走，并用点击效果校验。
+**定位方式按设备实测选择**：真实指针入镜时可用帧差闭环（排除旧位置残影）；不入镜时使用当前服务支持的实测校准与定位观测，不以盲点或点击后看效果代替点击前确认。无法取得新整屏、局部图或可靠定位依据时停止点击并报告。
 
 ---
 
@@ -337,7 +338,7 @@ type 中文或英文 → **重新截图回读输入框，逐字核对** → tap 
 
 | 新工具 | 作用 | 本平板实测 |
 |---|---|---|
-| `android_preview_tap` | 不移动不点击，返回带 **模拟目标标记 + 2× 局部放大** 的图，用来核对坐标选得对不对 | 需要时很有用（校验坐标，不校验物理精度） |
+| `android_preview_tap` | 不移动不点击，返回带 **模拟目标标记 + 2× 局部放大** 的图，用来核对坐标选得对不对 | 每次点击前检查整屏与局部图；只校验目标选择，不证明真实指针到位 |
 | `android_control action=hover` | **只移动**到 (x,y)，返回新帧，用来看真实指针后再点击 | 调用成功但**画面里没有指针** |
 | `android_pointer_calibration` `phase=probe/finish` | 一次小位移返回 **BEFORE/AFTER** 两张图，标注两张图的指针中心后自动算比例 | **不可用**：两张图 **sha256 完全相同** |
 

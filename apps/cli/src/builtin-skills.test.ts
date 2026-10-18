@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -18,6 +18,8 @@ test("空工作空间默认提供完整内置技能，允许自建技能并在�
     assert.equal((await store.get(android.id)).id, android.id);
     assert.match(skillInstructions(android), /定位与点击必须分开/);
     assert.match(android.instructions!, /四大能力/);
+    const methodology = await readFile(new URL("../../../skills/android-operator/METHODOLOGY.md", import.meta.url), "utf8");
+    assert.ok(android.instructions!.includes(methodology), "完整方法论应随默认手机技能加载");
     const xhs = (await store.find("xiaohongshu-hid-control"))!;
     assert.match(skillInstructions(xhs), /布局族/);
     // 完整说明保留原文后半部分，不经过普通技能步骤的 300 字截断。

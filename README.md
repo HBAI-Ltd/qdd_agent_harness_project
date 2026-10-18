@@ -190,6 +190,8 @@ DeepSeek 官方 API 的 `deepseek-flash` 当前对应 V4.1 Flash（2026-10-17）
 
 原始文档及小红书配套 `agent.py` 保存在根目录 `skills/`，内置技能随项目更新，不写入或覆盖运行时用户技能，也不能在工作台编辑、删除。操作设备前仍需接入相应 MCP，并使用支持视觉及工具调用的模型；默认加载不代表已连接设备或自动执行任何操作。
 
+手机操作的统一方法见 [skills/android-operator/METHODOLOGY.md](skills/android-operator/METHODOLOGY.md)，随 Android 技能全文默认加载，并已合入主技能、通用提示词、四大能力及小红书操作说明。它要求换设备重测画像、按页面锚点识别状态、点击前检查新整屏与目标局部图、区分模拟标记与真实指针、按失败类型处理并保存前后证据；中文仍使用 QDD 输入法通道。
+
 默认技能与已有用户技能的存储、完整上下文加载回归位于 `apps/cli/src/builtin-skills.test.ts`，通过 `npm test` 执行。技能页回归可用 `node --test apps/web/tests/skills-view.test.mjs` 执行。
 
 ## 目录结构

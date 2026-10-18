@@ -6,13 +6,26 @@
 
 ---
 
+## 零、统一方法：先认状态，再闭环操作
+
+完整原则见 [METHODOLOGY.md](METHODOLOGY.md)，随本技能默认加载。以下要求适用于点击、导航及文字输入，设备相关历史参数仅作参考：
+
+- **先建设备画像**：换设备、旋转或重新连接后核对分辨率/旋转、增益、线性位移区间、光标可见性、渲染偏移、点击后指针变化、滚动方式及系统手势/Dock 遮挡区。校准值为 `1/增益`，优先用服务支持的无点击测量，不直接沿用下方旧设备示例。
+- **先认页面状态**：用顶栏、作者栏、底栏等稳定锚点判断当前页面，再选目标。列表、推荐和轮播目标必须根据新帧现测，并核对标题/作者等唯一信息。
+- **三层交叉观测**：坐标回读用于比较，目标点的原分辨率局部裁剪用于确认控件，整屏用于确认状态；需要时用帧差观察真实光标，排除旧位置残影。`positionEstimated` 为 true 时，坐标只是估计，不能单独证明物理落点。
+- **点击前双图确认**：必须看到新鲜整屏和目标局部放大图，十字压在目标可点区域内；边缘裁剪的十字应按 `(目标坐标 - crop 原点) × scale` 定位，不能画在裁剪图中心。`android_preview_tap` 仅预览目标、不发送 HID；当前接口要求时传最新 `frameId`，并区分模拟标记与真实指针。无法取得双图或可靠定位依据时停止点击，报告缺口。
+- **失败先分类**：区分链路、未武装、定位和页面状态变化。只有明确证明动作未开始/未派发才允许重新执行；已开始但效果图失败时只重新观测。发送、评论、发布、支付等非幂等动作结果不确定时绝不补动作，中文输入 `uncertain` 同样只回读。
+- **每次保留证据**：点击前整屏与局部确认图、点击后效果图、判读用的计数/文案/锚点。报告按“期望状态 → 实际状态 → 差别 → 分类 → 下一步”组织，不以 `completed` 或 ACK 代替效果证明。
+
+---
+
 ## 一、铁律：定位与点击必须分开
 
 任何一次点击都走完这五步，**不可合并、不可跳步**：
 
 ```
 ① 定位      android_mouse_move / hover   只移动，不点击
-② 截图确认  ★必做：重新截图 → 读该图 input.pointer 的 x/y + 看画面控件是否为可点状态
+② 双图确认  ★必做：新整屏 + 目标局部放大图 → 读坐标/估计状态 → 核对控件、十字与页面锚点
 ③ 重新校准  cal（移动会清掉校准，点击前必须复位）
 ④ 点击      android_mouse_click()        原地点击，不移动
 ⑤ 验证      截图 → 确认效果出现（计数/页面/状态）
@@ -20,7 +33,7 @@
 
 > ② 是**硬性前置条件**：每次点击、每次文字输入之前，都必须重新截一张图确认光标位置。
 > 不复用旧截图（光标静止数秒会被系统隐藏，旧图的 `pointer` 也是上一状态），
-> 三条同时满足才算"已确认"：**新图 + 控件可点 + 坐标差 ≤40px**。
+> 同时满足才算“已确认”：**新鲜整屏仍为目标页面 + 新鲜局部图十字压住可点控件 + 有依据的定位/校准**。容差按控件大小及本机实测误差确定，下文 30–40px 仅为旧设备示例。
 
 > ③ 是**独立的、不可省略的一步**，不是①的附属动作。
 > 原因：相对移动会让服务端把 `calibrated` 复位为 false、`scaleX/scaleY` 变 null，
@@ -41,7 +54,7 @@
 ### 校验不通过怎么办
 
 - 落点偏 → **回到①重新定位**，不要"先点了再说"
-- 该页面不渲染光标 → 用 `android_preview_tap(x, y)` 取局部放大图，看十字标记是否压在目标上；并在答复里注明"此页光标不可见，已用十字标记替代确认"
+- 每次点击前均使用当前服务支持的目标预览取得整屏和局部图；不渲染光标时，明确说明“十字为模拟目标，未目视确认真实指针”，结合服务支持的实测校准建立定位依据，不能用模拟标记替代物理位置证明。
 - 连续两次定位失败 → 停止，报告，不要盲点
 
 ### 校验用坐标，不用肉眼找光标（v2 实测）
@@ -57,7 +70,7 @@
 "pointer": {"x": 999.0, "y": 600.0}
 ```
 
-**做法**：`hover(x, y)` → 再截一张 → 读 `input.pointer`，与目标坐标比较（容差 30–40px）→ 通过才点击。
+**做法**：`hover(x, y)` → 重新观测整屏及目标局部图 → 读 `input.pointer` 和 `positionEstimated`，按本机误差及控件大小比较 → 同时通过页面状态、控件和定位检查才点击。
 
 > 为什么不能靠截图找灰圈：**Android 会在指针静止数秒后自动隐藏光标**。
 > 稍慢一步截图，光标就消失了，会被误判成"没移到位置"。
@@ -147,12 +160,12 @@ if not sc:
 | 返回文本特征 | 真因 | 处置 |
 |---|---|---|
 | `timed out`（hid_status/arm） | 板子不可达（BLE 或 ESP_HOST） | 停止操作，要求重新配对/检查地址 |
-| `This MCP tools/call request id was already used` | 请求 id 重复 | 换唯一 id 重发 |
-| `Coordinate actions need explicit calibration` | 校准丢失 | `cal` 后重试 |
-| `pointer not detectable at (0, 0)` | 归零后零点无指针｜闭环定位不可用 | 改用 `android_mouse_move` 相对定位或服务端 `tap` |
+| `This MCP tools/call request id was already used` | 请求 id 重复 | 先核查旧请求是否已派发；旧动作不确定时只回读。仅确认未派发或用户明确要求新的动作时使用新 id |
+| `Coordinate actions need explicit calibration` | 校准丢失 | 恢复校准并重做双图确认；仅明确未派发时重新执行 |
+| `pointer not detectable at (0, 0)` | 归零后零点无指针｜闭环定位不可用 | 检查服务支持的无点击校准/移动观测；不能退回未经确认的 `tap` 或盲点 |
 | `input is paused` / `Call ARM explicitly` | 板子空闲自动解除 | `armed` 检查 → `android_hid_arm` |
 | `PING/MOVE acknowledgement timed out` | 蓝牙链路抖动 | **不要重放**，等链路恢复 |
-| `Screenshot is missing or superseded` | 帧过期 | 重新取帧后重试一次 |
+| `Screenshot is missing or superseded` | 帧过期 | 重新取帧并认状态；动作是否可重新执行仍取决于原动作是否明确未派发 |
 
 > 经验：**"点了没反应"绝大多数不是 App 的问题**，而是 校准丢失 / 未武装 / 链路超时 / 点击被合并成拖拽 四者之一。
 
@@ -205,23 +218,25 @@ if not sc:
 
 ```python
 def safe_click(target_xy):
+    expected_state = recognize_page(screenshot())
     # ① 定位（只移动）
-    move_relative_toward(target_xy)      # android_mouse_move, 每步 <=120 计数
+    move_relative_toward(target_xy)      # android_mouse_move, 单步上限取本机实测线性区间
     # ② 校验（必须在点击之前）
-    img = screenshot()
-    if not cursor_is_inside(img, target_xy, tol=40):
-        if cursor_visible(img):
-            return retry_or_abort()
-        if not preview_crosshair_hits(target_xy):   # android_preview_tap
-            return retry_or_abort()
+    full, crop, metadata = fresh_target_preview(target_xy)  # 当前接口要求时使用最新 frameId
+    if not same_page_state(full, expected_state) or not target_control_under_crosshair(crop):
+        return observe_and_relocate_or_abort()      # 只观测/定位，不补点击
+    if not positioning_supported_by_evidence(metadata):  # 模拟十字不证明真实指针位置
+        return abort_with_evidence_gap()
     # ③ 重新校准（独立步骤：移动已把它清掉）
-    ensure_calibrated()                  # cal 1 1 0 / 0.5 0.5 0
+    ensure_calibrated_from_measured_profile()  # 使用本机实测值，不套用旧设备参数
     assert state.calibrated and state.scaleX is not None
     # ④ 点击（原地，不移动）
     android_mouse_click()
     # ⑤ 验证
     sleep(1.2)
-    return screenshot()
+    after = screenshot()
+    save_evidence(full, crop, after)
+    return verify_expected_change(after)           # 不确定时只回读，绝不补动作
 ```
 
 ---
@@ -230,14 +245,15 @@ def safe_click(target_xy):
 
 ```
 铁律    定位(只移动) → ★截图确认光标 → 重校准(独立步) → 点击(原地) → 验证(截图)
-截图    每次点击/输入前必做；用新图，禁复旧图；新图+控件可点+坐标差≤40px 三条齐全才算确认
+截图    每次点击前必看新整屏+目标局部图；十字压住可点控件，页面锚点仍一致
 禁止    android_tap/click 直接命中；跳过截图确认就操作
-校验    用 input.pointer 的坐标判断，不要肉眼找灰圈（静止数秒会隐藏）
+校验    pointer 可能是估计；模拟十字不是物理落点证明；容差按本机及控件大小设置
 校准    动完就失效 → 点前必须单独执行一次 cal；手机 1 1 0 / 平板 0.5 0.5 0
 边缘    y<300 区域小步移动会被吸附 → 用绝对 hover 一步到位
 id      每次唯一 UUID，否则被判定重放
 状态    android_hid_status（不是 android_status）；也可读截图的 input
 长按    只有 android_key_report + keycode=0 能实现
-返回    只用三大金刚键（首次常被吞，重试一次后升级 Home）
-判因    先读错误文本，超时类不重放
+返回    系统 Back → Home → 最近任务；每步等待并观察，不盲重发 Back
+判因    链路/未武装/定位/状态；只在明确未开始时重试，非幂等结果不确定只回读
+留证    点击前整屏+局部图、点击后效果图、计数/文案；参数不得跨设备沿用
 ```
